@@ -66,3 +66,14 @@ When working with the `basalt` component of the workspace, observe the following
     *   `PoseVelBiasState`: Represents the estimated state.
 
 > **Note on Data Structures**: Any newly added or significantly modified data structures must be documented in the "Core Data Structures" section of `ARCHITECTURE.md`.
+
+## Helper Macros & Utilities
+
+When writing code, prefer the project's established macros for assertions and logging over standard `assert()` or `std::cerr`:
+
+*   **Assertions**: Use `BASALT_ASSERT(expr)` or `BASALT_ASSERT_STREAM(expr, msg)` to verify assumptions.
+*   **Logging**: Use `BASALT_LOG_FATAL_STREAM("msg " << val)` for critical errors.
+*   **Formatting**: Use the `_format` literal for string formatting: `"Val: {}"_format(x)`.
+*   **Unused Variables**: Use `UNUSED(var)` to silence compiler warnings.
+
+Refer to the "Helper Macros & Utilities" section in `ARCHITECTURE.md` for the full list.
