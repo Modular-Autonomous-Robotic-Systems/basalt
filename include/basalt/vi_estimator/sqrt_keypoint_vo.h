@@ -44,208 +44,215 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace basalt {
 
 template <class Scalar_>
-class SqrtKeypointVoEstimator : public VioEstimatorBase,
+class SqrtKeypointVoEstimator : public VioEstimatorBase<Scalar_>,
                                 public SqrtBundleAdjustmentBase<Scalar_> {
- public:
-  using Scalar = Scalar_;
+  public:
+    using Scalar = Scalar_;
 
-  typedef std::shared_ptr<SqrtKeypointVoEstimator> Ptr;
+    typedef std::shared_ptr<SqrtKeypointVoEstimator> Ptr;
 
-  static const int N = 9;
-  using Vec2 = Eigen::Matrix<Scalar, 2, 1>;
-  using Vec3 = Eigen::Matrix<Scalar, 3, 1>;
-  using Vec4 = Eigen::Matrix<Scalar, 4, 1>;
-  using VecN = Eigen::Matrix<Scalar, N, 1>;
-  using VecX = Eigen::Matrix<Scalar, Eigen::Dynamic, 1>;
-  using MatN3 = Eigen::Matrix<Scalar, N, 3>;
-  using MatX = Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>;
-  using SE3 = Sophus::SE3<Scalar>;
+    static const int N = 9;
+    using Vec2 = Eigen::Matrix<Scalar, 2, 1>;
+    using Vec3 = Eigen::Matrix<Scalar, 3, 1>;
+    using Vec4 = Eigen::Matrix<Scalar, 4, 1>;
+    using VecN = Eigen::Matrix<Scalar, N, 1>;
+    using VecX = Eigen::Matrix<Scalar, Eigen::Dynamic, 1>;
+    using MatN3 = Eigen::Matrix<Scalar, N, 3>;
+    using MatX = Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>;
+    using SE3 = Sophus::SE3<Scalar>;
 
-  using typename SqrtBundleAdjustmentBase<Scalar>::RelLinData;
-  using typename SqrtBundleAdjustmentBase<Scalar>::AbsLinData;
+    using typename SqrtBundleAdjustmentBase<Scalar>::RelLinData;
+    using typename SqrtBundleAdjustmentBase<Scalar>::AbsLinData;
 
-  using BundleAdjustmentBase<Scalar>::computeError;
-  using BundleAdjustmentBase<Scalar>::get_current_points;
-  using BundleAdjustmentBase<Scalar>::computeDelta;
-  using BundleAdjustmentBase<Scalar>::computeProjections;
-  using BundleAdjustmentBase<Scalar>::triangulate;
-  using BundleAdjustmentBase<Scalar>::backup;
-  using BundleAdjustmentBase<Scalar>::restore;
-  using BundleAdjustmentBase<Scalar>::getPoseStateWithLin;
-  using BundleAdjustmentBase<Scalar>::computeModelCostChange;
+    using BundleAdjustmentBase<Scalar>::computeError;
+    using BundleAdjustmentBase<Scalar>::get_current_points;
+    using BundleAdjustmentBase<Scalar>::computeDelta;
+    using BundleAdjustmentBase<Scalar>::computeProjections;
+    using BundleAdjustmentBase<Scalar>::triangulate;
+    using BundleAdjustmentBase<Scalar>::backup;
+    using BundleAdjustmentBase<Scalar>::restore;
+    using BundleAdjustmentBase<Scalar>::getPoseStateWithLin;
+    using BundleAdjustmentBase<Scalar>::computeModelCostChange;
 
-  using SqrtBundleAdjustmentBase<Scalar>::linearizeHelper;
-  using SqrtBundleAdjustmentBase<Scalar>::linearizeAbsHelper;
-  using SqrtBundleAdjustmentBase<Scalar>::linearizeRel;
-  using SqrtBundleAdjustmentBase<Scalar>::linearizeAbs;
-  using SqrtBundleAdjustmentBase<Scalar>::updatePoints;
-  using SqrtBundleAdjustmentBase<Scalar>::updatePointsAbs;
-  using SqrtBundleAdjustmentBase<Scalar>::linearizeMargPrior;
-  using SqrtBundleAdjustmentBase<Scalar>::computeMargPriorError;
-  using SqrtBundleAdjustmentBase<Scalar>::computeMargPriorModelCostChange;
-  using SqrtBundleAdjustmentBase<Scalar>::checkNullspace;
-  using SqrtBundleAdjustmentBase<Scalar>::checkEigenvalues;
+    using SqrtBundleAdjustmentBase<Scalar>::linearizeHelper;
+    using SqrtBundleAdjustmentBase<Scalar>::linearizeAbsHelper;
+    using SqrtBundleAdjustmentBase<Scalar>::linearizeRel;
+    using SqrtBundleAdjustmentBase<Scalar>::linearizeAbs;
+    using SqrtBundleAdjustmentBase<Scalar>::updatePoints;
+    using SqrtBundleAdjustmentBase<Scalar>::updatePointsAbs;
+    using SqrtBundleAdjustmentBase<Scalar>::linearizeMargPrior;
+    using SqrtBundleAdjustmentBase<Scalar>::computeMargPriorError;
+    using SqrtBundleAdjustmentBase<Scalar>::computeMargPriorModelCostChange;
+    using SqrtBundleAdjustmentBase<Scalar>::checkNullspace;
+    using SqrtBundleAdjustmentBase<Scalar>::checkEigenvalues;
 
-  SqrtKeypointVoEstimator(const basalt::Calibration<double>& calib,
-                          const VioConfig& config);
+    SqrtKeypointVoEstimator(const basalt::Calibration<double> &calib,
+                            const VioConfig &config,
+                            bool useProducerConsumerArchitecture = false);
 
-  void initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
-                  const Eigen::Vector3d& vel_w_i, const Eigen::Vector3d& bg,
-                  const Eigen::Vector3d& ba) override;
+    void initialize(int64_t t_ns, const Sophus::SE3d &T_w_i,
+                    const Eigen::Vector3d &vel_w_i, const Eigen::Vector3d &bg,
+                    const Eigen::Vector3d &ba) override;
 
-  void initialize(const Eigen::Vector3d& bg,
-                  const Eigen::Vector3d& ba) override;
+    void initialize(const Eigen::Vector3d &bg,
+                    const Eigen::Vector3d &ba) override;
 
-  virtual ~SqrtKeypointVoEstimator() { maybe_join(); }
+    virtual ~SqrtKeypointVoEstimator() { maybe_join(); }
 
-  inline void maybe_join() override {
-    if (processing_thread) {
-      processing_thread->join();
-      processing_thread.reset();
-    }
-  }
-
-  void addIMUToQueue(const ImuData<double>::Ptr& data) override;
-  void addVisionToQueue(const OpticalFlowResult::Ptr& data) override;
-
-  bool measure(const OpticalFlowResult::Ptr& opt_flow_meas, bool add_frame);
-
-  // int64_t propagate();
-  // void addNewState(int64_t data_t_ns);
-
-  void optimize_and_marg(const std::map<int64_t, int>& num_points_connected,
-                         const std::unordered_set<KeypointId>& lost_landmaks);
-
-  void marginalize(const std::map<int64_t, int>& num_points_connected,
-                   const std::unordered_set<KeypointId>& lost_landmaks);
-  void optimize();
-
-  void logMargNullspace();
-  Eigen::VectorXd checkMargNullspace() const;
-  Eigen::VectorXd checkMargEigenvalues() const;
-
-  int64_t get_t_ns() const {
-    return frame_states.at(last_state_t_ns).getState().t_ns;
-  }
-  const SE3& get_T_w_i() const {
-    return frame_states.at(last_state_t_ns).getState().T_w_i;
-  }
-  const Vec3& get_vel_w_i() const {
-    return frame_states.at(last_state_t_ns).getState().vel_w_i;
-  }
-
-  const PoseVelBiasState<Scalar>& get_state() const {
-    return frame_states.at(last_state_t_ns).getState();
-  }
-  PoseVelBiasState<Scalar> get_state(int64_t t_ns) const {
-    PoseVelBiasState<Scalar> state;
-
-    auto it = frame_states.find(t_ns);
-
-    if (it != frame_states.end()) {
-      return it->second.getState();
+    inline void maybe_join() override {
+        if (processing_thread) {
+            processing_thread->join();
+            processing_thread.reset();
+        }
     }
 
-    auto it2 = frame_poses.find(t_ns);
-    if (it2 != frame_poses.end()) {
-      state.T_w_i = it2->second.getPose();
+    void addIMUToQueue(const ImuData<double>::Ptr &data) override;
+    void addVisionToQueue(const OpticalFlowResult::Ptr &data) override;
+
+    typename PoseVelBiasState<Scalar>::Ptr
+    measure(const OpticalFlowResult::Ptr &opt_flow_meas, bool add_frame);
+
+    typename PoseVelBiasState<Scalar>::Ptr
+    ProcessFrame(OpticalFlowResult::Ptr &curr_frame);
+
+    // int64_t propagate();
+    // void addNewState(int64_t data_t_ns);
+
+    void optimize_and_marg(const std::map<int64_t, int> &num_points_connected,
+                           const std::unordered_set<KeypointId> &lost_landmaks);
+
+    void marginalize(const std::map<int64_t, int> &num_points_connected,
+                     const std::unordered_set<KeypointId> &lost_landmaks);
+    void optimize();
+
+    void logMargNullspace();
+    Eigen::VectorXd checkMargNullspace() const;
+    Eigen::VectorXd checkMargEigenvalues() const;
+
+    int64_t get_t_ns() const {
+        return frame_states.at(last_state_t_ns).getState().t_ns;
+    }
+    const SE3 &get_T_w_i() const {
+        return frame_states.at(last_state_t_ns).getState().T_w_i;
+    }
+    const Vec3 &get_vel_w_i() const {
+        return frame_states.at(last_state_t_ns).getState().vel_w_i;
     }
 
-    return state;
-  }
+    const PoseVelBiasState<Scalar> &get_state() const {
+        return frame_states.at(last_state_t_ns).getState();
+    }
+    PoseVelBiasState<Scalar> get_state(int64_t t_ns) const {
+        PoseVelBiasState<Scalar> state;
 
-  void setMaxStates(size_t val) override { max_states = val; }
-  void setMaxKfs(size_t val) override { max_kfs = val; }
+        auto it = frame_states.find(t_ns);
 
-  Eigen::aligned_vector<SE3> getFrameStates() const {
-    Eigen::aligned_vector<SE3> res;
+        if (it != frame_states.end()) {
+            return it->second.getState();
+        }
 
-    for (const auto& kv : frame_states) {
-      res.push_back(kv.second.getState().T_w_i);
+        auto it2 = frame_poses.find(t_ns);
+        if (it2 != frame_poses.end()) {
+            state.T_w_i = it2->second.getPose();
+        }
+
+        return state;
     }
 
-    return res;
-  }
+    void setMaxStates(size_t val) override { max_states = val; }
+    void setMaxKfs(size_t val) override { max_kfs = val; }
 
-  Eigen::aligned_vector<SE3> getFramePoses() const {
-    Eigen::aligned_vector<SE3> res;
+    Eigen::aligned_vector<SE3> getFrameStates() const {
+        Eigen::aligned_vector<SE3> res;
 
-    for (const auto& kv : frame_poses) {
-      res.push_back(kv.second.getPose());
+        for (const auto &kv : frame_states) {
+            res.push_back(kv.second.getState().T_w_i);
+        }
+
+        return res;
     }
 
-    return res;
-  }
+    Eigen::aligned_vector<SE3> getFramePoses() const {
+        Eigen::aligned_vector<SE3> res;
 
-  Eigen::aligned_map<int64_t, SE3> getAllPosesMap() const {
-    Eigen::aligned_map<int64_t, SE3> res;
+        for (const auto &kv : frame_poses) {
+            res.push_back(kv.second.getPose());
+        }
 
-    for (const auto& kv : frame_poses) {
-      res[kv.first] = kv.second.getPose();
+        return res;
     }
 
-    for (const auto& kv : frame_states) {
-      res[kv.first] = kv.second.getState().T_w_i;
+    Eigen::aligned_map<int64_t, SE3> getAllPosesMap() const {
+        Eigen::aligned_map<int64_t, SE3> res;
+
+        for (const auto &kv : frame_poses) {
+            res[kv.first] = kv.second.getPose();
+        }
+
+        for (const auto &kv : frame_states) {
+            res[kv.first] = kv.second.getState().T_w_i;
+        }
+
+        return res;
     }
 
-    return res;
-  }
+    Sophus::SE3d getT_w_i_init() override {
+        return T_w_i_init.template cast<double>();
+    }
 
-  Sophus::SE3d getT_w_i_init() override {
-    return T_w_i_init.template cast<double>();
-  }
+    void debug_finalize() override;
 
-  void debug_finalize() override;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  private:
+    using BundleAdjustmentBase<Scalar>::frame_poses;
+    using BundleAdjustmentBase<Scalar>::frame_states;
+    using BundleAdjustmentBase<Scalar>::lmdb;
+    using BundleAdjustmentBase<Scalar>::obs_std_dev;
+    using BundleAdjustmentBase<Scalar>::huber_thresh;
+    using BundleAdjustmentBase<Scalar>::calib;
 
- private:
-  using BundleAdjustmentBase<Scalar>::frame_poses;
-  using BundleAdjustmentBase<Scalar>::frame_states;
-  using BundleAdjustmentBase<Scalar>::lmdb;
-  using BundleAdjustmentBase<Scalar>::obs_std_dev;
-  using BundleAdjustmentBase<Scalar>::huber_thresh;
-  using BundleAdjustmentBase<Scalar>::calib;
+  private:
+    bool take_kf;             // true if next frame should become kf
+    int frames_after_kf;      // number of frames since last kf
+    std::set<int64_t> kf_ids; // sliding window frame ids
 
- private:
-  bool take_kf;              // true if next frame should become kf
-  int frames_after_kf;       // number of frames since last kf
-  std::set<int64_t> kf_ids;  // sliding window frame ids
+    // timestamp of latest state in the sliding window
+    // TODO: check and document when this is equal to kf_ids.rbegin() and when
+    // not. It may be only relevant for VIO, not VO.
+    int64_t last_state_t_ns = -1;
 
-  // timestamp of latest state in the sliding window
-  // TODO: check and document when this is equal to kf_ids.rbegin() and when
-  // not. It may be only relevant for VIO, not VO.
-  int64_t last_state_t_ns = -1;
+    // Input
 
-  // Input
+    Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr> prev_opt_flow_res;
 
-  Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr> prev_opt_flow_res;
+    std::map<int64_t, int> num_points_kf;
 
-  std::map<int64_t, int> num_points_kf;
+    // Marginalization
+    MargLinData<Scalar> marg_data;
 
-  // Marginalization
-  MargLinData<Scalar> marg_data;
+    // Used only for debug and log purporses.
+    MargLinData<Scalar> nullspace_marg_data;
 
-  // Used only for debug and log purporses.
-  MargLinData<Scalar> nullspace_marg_data;
+    size_t max_states;
+    size_t max_kfs;
 
-  size_t max_states;
-  size_t max_kfs;
+    SE3 T_w_i_init;
 
-  SE3 T_w_i_init;
+    bool initialized;
 
-  bool initialized;
+    VioConfig config;
 
-  VioConfig config;
+    constexpr static Scalar vee_factor = Scalar(2.0);
+    constexpr static Scalar initial_vee = Scalar(2.0);
+    Scalar lambda, min_lambda, max_lambda, lambda_vee;
 
-  constexpr static Scalar vee_factor = Scalar(2.0);
-  constexpr static Scalar initial_vee = Scalar(2.0);
-  Scalar lambda, min_lambda, max_lambda, lambda_vee;
+    std::shared_ptr<std::thread> processing_thread;
 
-  std::shared_ptr<std::thread> processing_thread;
+    // timing and stats
+    ExecutionStats stats_all_;
+    ExecutionStats stats_sums_;
 
-  // timing and stats
-  ExecutionStats stats_all_;
-  ExecutionStats stats_sums_;
+    bool mpUseProducerConsumerArchitecture = false;
 };
-}  // namespace basalt
+} // namespace basalt

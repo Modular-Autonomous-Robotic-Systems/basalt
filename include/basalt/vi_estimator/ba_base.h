@@ -128,24 +128,24 @@ class BundleAdjustmentBase {
   }
 
   inline void backup() {
-    for (auto& kv : frame_states) kv.second.backup();
-    for (auto& kv : frame_poses) kv.second.backup();
-    lmdb.backup();
+    for (auto& kv : this->frame_states) kv.second.backup();
+    for (auto& kv : this->frame_poses) kv.second.backup();
+    this->lmdb.backup();
   }
 
   inline void restore() {
-    for (auto& kv : frame_states) kv.second.restore();
-    for (auto& kv : frame_poses) kv.second.restore();
-    lmdb.restore();
+    for (auto& kv : this->frame_states) kv.second.restore();
+    for (auto& kv : this->frame_poses) kv.second.restore();
+    this->lmdb.restore();
   }
 
   // protected:
   PoseStateWithLin<Scalar> getPoseStateWithLin(int64_t t_ns) const {
-    auto it = frame_poses.find(t_ns);
-    if (it != frame_poses.end()) return it->second;
+    auto it = this->frame_poses.find(t_ns);
+    if (it != this->frame_poses.end()) return it->second;
 
-    auto it2 = frame_states.find(t_ns);
-    if (it2 == frame_states.end()) {
+    auto it2 = this->frame_states.find(t_ns);
+    if (it2 == this->frame_states.end()) {
       std::cerr << "Could not find pose " << t_ns << std::endl;
       std::abort();
     }

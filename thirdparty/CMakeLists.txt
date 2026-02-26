@@ -53,10 +53,11 @@ set_target_properties(opengv PROPERTIES
   DEBUG_POSTFIX "")
 
 # fix opengv: compile options (CMAKE_CXX_FLAGS is overwritten by Opengv)
+separate_arguments(BASALT_PASSED_CXX_FLAGS_LIST UNIX_COMMAND "${BASALT_PASSED_CXX_FLAGS}")
 target_compile_options(opengv PRIVATE
   -Wno-unused-private-field
   ${BASALT_MARCH_FLAGS}
-  ${BASALT_PASSED_CXX_FLAGS})
+  ${BASALT_PASSED_CXX_FLAGS_LIST})
 
 # TODO: enable once mpark issue is fixed upstream pangolin
 #set_target_properties(pangolin PROPERTIES

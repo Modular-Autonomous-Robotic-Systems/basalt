@@ -40,9 +40,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <basalt/utils/vio_config.h>
 
-#include <basalt/io/dataset_io.h>
 #include <basalt/calibration/calibration.hpp>
 #include <basalt/camera/stereographic_param.hpp>
+#include <basalt/io/dataset_io.h>
 #include <basalt/utils/sophus_utils.hpp>
 
 #include <tbb/concurrent_queue.h>
@@ -52,37 +52,44 @@ namespace basalt {
 using KeypointId = size_t;
 
 struct OpticalFlowInput {
-  using Ptr = std::shared_ptr<OpticalFlowInput>;
+    using Ptr = std::shared_ptr<OpticalFlowInput>;
 
-  int64_t t_ns;
-  std::vector<ImageData> img_data;
+    int64_t t_ns;
+    std::vector<ImageData> img_data;
 };
 
 struct OpticalFlowResult {
-  using Ptr = std::shared_ptr<OpticalFlowResult>;
+    using Ptr = std::shared_ptr<OpticalFlowResult>;
 
-  int64_t t_ns;
-  std::vector<Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>>
-      observations;
+    int64_t t_ns;
+    std::vector<Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>>
+        observations;
 
-  std::vector<std::map<KeypointId, size_t>> pyramid_levels;
+    std::vector<std::map<KeypointId, size_t>> pyramid_levels;
 
-  OpticalFlowInput::Ptr input_images;
+    OpticalFlowInput::Ptr input_images;
 };
 
 class OpticalFlowBase {
- public:
-  using Ptr = std::shared_ptr<OpticalFlowBase>;
+  public:
+    using Ptr = std::shared_ptr<OpticalFlowBase>;
 
-  tbb::concurrent_bounded_queue<OpticalFlowInput::Ptr> input_queue;
-  tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr>* output_queue = nullptr;
+    tbb::concurrent_bounded_queue<OpticalFlowInput::Ptr> input_queue;
+    tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr> *output_queue =
+        nullptr;
 
-  Eigen::MatrixXf patch_coord;
+    Eigen::MatrixXf patch_coord;
+    OpticalFlowResult::Ptr processFrame(int64_t curr_t_ns,
+                                        OpticalFlowInput::Ptr &new_img_vec) {
+        std::cout << "Not Implemented" << std::endl;
+        return nullptr;
+    }
 };
 
 class OpticalFlowFactory {
- public:
-  static OpticalFlowBase::Ptr getOpticalFlow(const VioConfig& config,
-                                             const Calibration<double>& cam);
+  public:
+    static OpticalFlowBase::Ptr
+    getOpticalFlow(const VioConfig &config, const Calibration<double> &cam,
+                   bool useProducerConsumerArchitecture = false);
 };
-}  // namespace basalt
+} // namespace basalt

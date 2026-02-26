@@ -308,6 +308,7 @@ target_sources(basalt
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/device/rs_t265.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/hash_bow/hash_bow.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/io/dataset_io.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/io/rt_io.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/io/dataset_io_euroc.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/io/dataset_io_kitti.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/io/dataset_io_rosbag.h
@@ -358,6 +359,7 @@ target_sources(basalt
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/sqrt_keypoint_vio.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/sqrt_keypoint_vo.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/vio_estimator.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/controller.h
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/calibration/aprilgrid.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/calibration/calibraiton_helper.cpp
@@ -383,6 +385,7 @@ target_sources(basalt
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vi_estimator/sqrt_keypoint_vio.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vi_estimator/sqrt_keypoint_vo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vi_estimator/vio_estimator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/controller.cpp
 )
 
 target_link_libraries(basalt
@@ -477,6 +480,6 @@ enable_testing()
 add_subdirectory(thirdparty/basalt-headers/test)
 add_subdirectory(test)
 # Restore original install() behavior.
-macro(install)
-  _install(${ARGN})
-endmacro()
+# macro(install)
+#   _install(${ARGN})
+# endmacro()
