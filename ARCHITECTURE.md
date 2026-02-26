@@ -4,7 +4,9 @@
 
 The VIO system in Basalt is designed as a pipeline with distinct frontend (Optical Flow) and backend (Estimator) components, decoupled by concurrent queues.
 
-### Overview
+### Overview of Consumer Producer architecture
+
+The basalt package implements both consumer producer architecture and a receive and return based architecture as well. Desired architecture may be set by initialzing the controller with the argument `useProducerConsumerArchitecture` set as true when invoking the function `Controller::initialize()`. Refer to [this](#orchestration) section for more information regarding `class Orchestration` and the high level management of SLAM within basalt. Sample im 
 
 The data flow is as follows:
 1.  **Input**: Images and IMU data are read from a dataset (or camera driver).
@@ -15,7 +17,7 @@ The data flow is as follows:
 
 ### Sensor Configuration (Monocular vs. Stereo)
 
-The sensor suite configuration (e.g., monocular vs. stereo) is **defined implicitly by the calibration file**. There is no explicit "stereo" flag in `VioConfig`.
+The sensor suite configuration (e.g., monocular vs. stereo) is **defined implicitly by the calibration file**. There is no explicit "stereo" flag in `VioConfig`. Please note that only single channel images are currently supported.
 
 *   **Mechanism**: The `basalt::Calibration` struct contains vectors for camera intrinsics and extrinsics. The size of these vectors determines the system mode.
     *   **Monocular**: `intrinsics.size() == 1`
@@ -422,6 +424,218 @@ Usage with a live RealSense T265 device is similar but utilizes the `RsT265Devic
     // Link Device IMU Output -> Estimator IMU Input
     t265_device->imu_data_queue = &vio->imu_data_queue;
     ```
+
+## Build System (CMake)
+
+The Basalt build system is modular, using CMake to manage dependencies, compiler flags, and target definitions.
+
+### Key Components
+
+*   **Root `CMakeLists.txt`**:
+    *   **Project Setup**: Defines project name `basalt` and version.
+    *   **Compiler Flags**: Sets default C++ standard (C++17) and warning levels (`-Wall -Wextra -Werror`. It must be noted that the way the build flags have been provided may cause errors in some downstream CMakeLists.txt files. Refer to the CMakeLists.txt at `ext/basalt/thirdparty/CMakeLists.txt`. An error was observed due to the aforementioned flags being provided as a single string while attempting to build OpenGV).
+    *   **Platform Specifics**: Handles macOS vs. Linux differences (e.g., `stdlib` on macOS).
+    *   **SIMD**: detection and flags (`-march=native` by default, disabled on Apple Silicon).
+    *   **Dependencies**: Finds external packages:
+        *   `Eigen3` (Linear Algebra)
+        *   `TBB` (Threading)
+        *   `OpenCV` (Image processing)
+        *   `fmt` (String formatting)
+    *   **Options**:
+        *   `BASALT_INSTANTIATIONS_DOUBLE`/`FLOAT`: Controls template instantiation for `double` and `float` precision. Disabling one can reduce compile times.
+        *   `BASALT_BUILTIN_EIGEN`/`SOPHUS`/`CEREAL`: Controls whether to use vendored submodules or system-installed versions.
+
+*   **Target Definitions**:
+    *   **`basalt` (Library)**: The core shared library containing all SLAM logic.
+        *   **Sources**: `src/` and `include/basalt/`.
+        *   **Includes**: Public headers are exported.
+    *   **Executables**:
+        *   `basalt_vio`: Offline VIO processing (Reference implementation).
+        *   `basalt_mapper`: Mapping tool.
+        *   `basalt_calibrate`: Camera calibration tool.
+        *   `basalt_kitti_eval`: KITTI evaluation tool.
+
+*   **Subdirectories**:
+    *   `thirdparty/`: Contains vendored dependencies (Pangolin, opengv, etc.) and their build logic.
+    *   `thirdparty/basalt-headers/`: A header-only library target `basalt::basalt-headers` that exposes core types and serialization.
+
+## Orchestration
+
+This section details how the core components (Frontend and Backend) are instantiated, connected, and executed. The reference implementation for offline dataset processing is found in `src/vio.cpp`.
+
+### Real-time SLAM (`include/basalt/controller.h`)
+
+The `basalt::Controller` class provides a high-level interface to orchestrate the SLAM system, abstracting away the complexities of manual thread management and queue connections. It is designed for integration with external systems like ROS 2.
+
+*   **Header**: [`include/basalt/controller.h`](include/basalt/controller.h)
+*   **Implementation**: [`src/controller.cpp`](src/controller.cpp)
+
+#### 1. Purpose
+The `Controller` encapsulates the entire VIO/VO pipeline. It manages:
+*   Loading of configuration and calibration.
+*   Instantiation of the Frontend (`OpticalFlowBase`) and Backend (`VioEstimatorBase`) via factories.
+*   Thread-safe data ingestion (Images, IMU).
+*   Retrieval of the latest estimated pose.
+*   Graceful shutdown and thread lifecycle management.
+
+#### 2. Usage
+1.  **Instantiation**:
+    ```cpp
+    basalt::Controller controller(config_path, calib_path, basalt::SlamMode::VIO);
+    controller.load_data();
+    controller.initialize(); 
+    // Or initialize with a specific prior state:
+    // controller.initialize(t_ns, T_w_i, vel_w_i, bg, ba);
+    ```
+
+2.  **Data Feeding**:
+    External drivers (e.g., ROS 2 nodes) push data into the controller:
+    ```cpp
+    controller.GrabImage(image_data); // basalt::OpticalFlowInput::Ptr
+    controller.GrabImu(imu_data);     // basalt::ImuData<double>::Ptr
+    ```
+
+3.  **Result Retrieval**:
+    The controller provides thread-safe access to the latest estimated state:
+    *   **`GetLatestPose()`**: Returns the most recent `PoseVelBiasState` observed by the internal consumer thread. This method is non-destructive (does not pop from the queue) and is suitable for high-frequency polling.
+    *   **`TryPopPose(pose)`**: Explicitly attempts to pop the next pose from the queue. Returns `true` if successful.
+
+#### 3. Limitations (vs. `src/vio.cpp`)
+The `Controller` focuses on the core estimation loop and lacks some auxiliary features present in the offline pipeline:
+*   **Visualization**: Does not connect to the Pangolin GUI (`out_vis_queue` is unused).
+*   **Marginalization Saving**: Does not support saving marginalization data for debugging (`out_marg_queue` is unused).
+*   **Thread Pool Configuration**: Does not manage the global TBB thread pool (`tbb::global_control`). The embedding application is responsible for this.
+
+<!-- TODO -->
+These features need to be added in basalt SLAM system.
+
+### Recorded Data Pipeline (`src/vio.cpp`)
+
+The system orchestrates the VIO pipeline by spinning up separate threads for data feeding, processing, and result consumption, connected via thread-safe queues.
+
+#### 1. Initialization Phase
+
+1.  **Configuration**:
+    *   `VioConfig` ([`src/utils/vio_config.cpp`](src/utils/vio_config.cpp)) and `Calibration` ([`include/basalt/calibration/calibration.hpp`](include/basalt/calibration/calibration.hpp)) are loaded from files.
+    *   **Examples**:
+        *   EuroC: `data/euroc_config.json`
+        *   Kitti: `data/kitti_config.json`
+        *   TUM VI: `data/tumvi_512_config.json`
+
+2.  **Dataset**:
+    *   `DatasetIoFactory` ([`include/basalt/io/dataset_io.h`](include/basalt/io/dataset_io.h)) creates the appropriate reader (e.g., EuroC, Kitti, Bag) based on the type string.
+    *   The returned `DatasetIoInterface` loads the dataset into memory or prepares it for streaming.
+
+3.  **Component Creation**:
+    *   **Frontend**: `OpticalFlowFactory::getOpticalFlow` ([`include/basalt/optical_flow/optical_flow.h`](include/basalt/optical_flow/optical_flow.h)) creates the tracker (e.g., `PatchOpticalFlow`).
+    *   **Backend**: `VioEstimatorFactory::getVioEstimator` ([`include/basalt/vi_estimator/vio_estimator.h`](include/basalt/vi_estimator/vio_estimator.h)) creates the estimator.
+
+4.  **Wiring**:
+    *   The critical step is connecting the frontend's output to the backend's input.
+    *   `opt_flow_ptr->output_queue = &vio->vision_data_queue;` (Direct pointer assignment).
+
+5.  **Output Setup**:
+    *   Global queues in `src/vio.cpp` (`out_state_queue`, `out_vis_queue`) are linked to the estimator's output pointers to intercept results.
+
+#### 2. Threading Model
+
+The application spawns multiple threads to maximize parallelism while maintaining causal order via queues.
+
+*   **T1: Image Feed (`feed_images`)**:
+    *   **Source**: `src/vio.cpp`
+    *   Iterates through dataset images, wraps them in `OpticalFlowInput` ([`include/basalt/optical_flow/optical_flow.h`](include/basalt/optical_flow/optical_flow.h)), and pushes to `opt_flow_ptr->input_queue`.
+    *   *Control*: Respects `step_by_step` flags using `std::condition_variable` to pause feeding.
+
+*   **T2: IMU Feed (`feed_imu`)**:
+    *   **Source**: `src/vio.cpp`
+    *   Iterates through IMU messages and pushes `ImuData` to `vio->imu_data_queue`.
+
+*   **Internal Processing Threads**:
+    *   **Frontend**: The `OpticalFlowBase` instance launches its own thread consuming `input_queue`.
+    *   **Backend**: The `VioEstimatorBase` instance launches its own thread consuming `vision_data_queue` and `imu_data_queue`.
+    *   **Note**: The backend must be explicitly initialized. In `src/vio.cpp`, `vio->initialize(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero())` is called to set initial Gyro and Accel biases to zero.
+
+*   **T3: Visualization Consumer**:
+    *   **Source**: `src/vio.cpp` (Lambda in `main`)
+    *   Pops `VioVisualizationData` from `out_vis_queue` and updates the global `vis_map` for the GUI.
+
+*   **T4: State Consumer**:
+    *   **Source**: `src/vio.cpp` (Lambda in `main`)
+    *   Pops `PoseVelBiasState` from `out_state_queue`.
+    *   Logs data to `vio_data_log` (`pangolin::DataLog`) for real-time plotting.
+    *   Records the trajectory (`vio_t_w_i`) for final evaluation (ATE/RMSE).
+
+#### 3. GUI Pipeline (Pangolin)
+
+The visualization is built on the Pangolin library, running in the main thread.
+
+**Logical Blocks:**
+
+1.  **Setup (`main`)**:
+    *   **Window**: `pangolin::CreateWindowAndBind` creates the OpenGL context.
+    *   **Viewports**:
+        *   `main_display`: Container for other views.
+        *   `img_view_display`: Displays camera feeds (with overlays).
+        *   `plot_display`: Displays real-time data plots.
+        *   `display3D`: Renders the 3D scene (camera poses, landmarks).
+    *   **Panel**: `pangolin::CreatePanel` creates the side menu with buttons/checkboxes (`pangolin::Var`).
+
+2.  **State Management**:
+    *   **`vis_map`**: A `std::unordered_map` mapping timestamps to `VioVisualizationData`. Filled by T3, read by the rendering loop.
+    *   **`show_frame`**: A `pangolin::Var<int>` controlling which frame's data is currently visualized.
+
+3.  **Rendering Loop**:
+    *   **Frequency**: Runs as fast as possible (`while (!pangolin::ShouldQuit())`).
+    *   **Sync**: Checks `GuiChanged()` flags on variables to trigger updates.
+    *   **3D Scene**: Calls `draw_scene` to render the trajectory and landmarks using OpenGL.
+    *   **2D Overlays**: Calls `draw_image_overlay` to draw tracked features on camera images.
+    *   **Plots**: `pangolin::Plotter` automatically visualizes data added to `vio_data_log`.
+
+**Future Visualization Support**:
+*   To add new 3D elements, modify `draw_scene`.
+*   To add new 2D overlays, modify `draw_image_overlay`.
+*   Ensure thread safety: The GUI thread reads `vis_map`, while T3 writes to it. `vis_map` is not protected by a mutex in the example, relying on the fact that `std::unordered_map` insertion is generally safe if keys are unique and iterators aren't invalidated (though strictly speaking, a read/write lock would be safer).
+
+#### 4. Auxiliary Components
+
+Table of key methods and objects used in `src/vio.cpp` for orchestration.
+
+| Name | Type | Source | Description |
+| :--- | :--- | :--- | :--- |
+| `feed_images` | Function | `src/vio.cpp` | Feeds images from dataset to frontend queue. |
+| `feed_imu` | Function | `src/vio.cpp` | Feeds IMU data from dataset to backend queue. |
+| `vio_data_log` | Object (`pangolin::DataLog`) | External (Pangolin) | Buffer for real-time plotting of states (Vel, Pos, Biases). |
+| `draw_image_overlay` | Function | `src/vio.cpp` | Draws keypoints and tracks on 2D images. |
+| `draw_scene` | Function | `src/vio.cpp` | Renders 3D trajectory, cameras, and landmarks. |
+| `draw_plots` | Function | `src/vio.cpp` | Configures Pangolin plotter series based on checkboxes. |
+| `load_data` | Function | `src/vio.cpp` | Loads camera calibration from JSON. |
+| `alignSVD` | Function | `src/utils/system_utils.cpp` | Computes Sim3 alignment between estimated and GT trajectories. |
+| `saveTrajectoryButton` | Function | `src/vio.cpp` | GUI callback to save the estimated trajectory to file. |
+| `DatasetIoFactory` | Class | `include/basalt/io/dataset_io.h` | Factory for creating dataset readers. |
+| `OpticalFlowFactory` | Class | `include/basalt/optical_flow/optical_flow.h` | Factory for creating the frontend. |
+| `VioEstimatorFactory` | Class | `include/basalt/vi_estimator/vio_estimator.h` | Factory for creating the backend. |
+
+#### 5. Cleanup & Termination
+
+Proper shutdown is critical to avoid hanging threads, especially given the use of blocking bounded queues. The sequence implemented in `src/vio.cpp` handles both natural completion and user interruption.
+
+**Standard Sequence:**
+1.  **Wait for VIO**: `vio->maybe_join()` is called. This blocks the main thread until the VIO estimator's internal processing thread finishes (triggered by receiving `nullptr` in its input queues).
+2.  **Unblock Input Threads**: `vio->drain_input_queues()` is called immediately after.
+    *   *Reason*: Input threads (`T1`, `T2`) might be blocked trying to push to a full queue. Draining these queues ensures those threads can wake up, exit their loops (checking `vio->finished`), and terminate naturally.
+3.  **Join Input Threads**: `t1.join()` and `t2.join()` are called to ensure data feeding has ceased.
+4.  **Signal Global Termination**: The global atomic flag `terminate` is set to `true`. This signals auxiliary threads (like the queue printer `T5` or visualization consumers) to stop their loops.
+5.  **Join Consumer Threads**: `t3`, `t4`, and `t5` are joined.
+6.  **Finalize**: `vio->debug_finalize()` is called to perform any remaining cleanup or stat logging within the estimator.
+
+**GUI Interruption (User Abort):**
+If the user closes the Pangolin window (`pangolin::ShouldQuit()` returns true) *before* the dataset is fully processed:
+1.  **Detection**: The main rendering loop breaks.
+2.  **Abort Signal**: The code checks `if (!vio->finished)`.
+3.  **Flag Setting**:
+    *   `terminate = true`: Tells input threads (`feed_images`, `feed_imu`) to stop pushing data immediately.
+    *   `aborted = true`: Prevents the saving of partial results (trajectory files) after cleanup.
+4.  **Queue Draining**: The standard `drain_input_queues()` (in step 2 above) becomes critical here to unblock the input threads so they can check the `terminate` flag and exit.
 
 ## Serialization (Cereal)
 

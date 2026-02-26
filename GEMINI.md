@@ -77,3 +77,32 @@ When writing code, prefer the project's established macros for assertions and lo
 *   **Unused Variables**: Use `UNUSED(var)` to silence compiler warnings.
 
 Refer to the "Helper Macros & Utilities" section in `ARCHITECTURE.md` for the full list.
+
+## Coding Standards
+
+Adhere to the following conventions when contributing to the codebase.
+
+### Naming Conventions
+
+*   **Files**: `snake_case.cpp`, `snake_case.h`.
+*   **Classes & Structs**: `PascalCase` (e.g., `VioEstimatorBase`, `OpticalFlowInput`).
+*   **Typedefs**: `PascalCase` (e.g., `Ptr`, `KeypointId`).
+*   **Functions & Methods**:
+    *   **General**: `snake_case` is preferred for core logic, lifecycle methods, and data access (e.g., `initialize`, `load`, `save`, `get_image_data`, `feed_images`).
+    *   **Factories**: `camelCase` (e.g., `getVioEstimator`, `getOpticalFlow`).
+    *   **Setters/Modifiers**: Mixed, often `camelCase` (e.g., `setMaxStates`, `addIMUToQueue`).
+*   **Variables**:
+    *   **Local & Parameters**: `snake_case` (e.g., `vio_config`, `num_threads`).
+    *   **Member Variables**: `snake_case` (e.g., `input_queue`, `optical_flow_type`).
+    *   **Global**: `snake_case` (e.g., `show_gui`).
+*   **Constants & Macros**: `SCREAMING_SNAKE_CASE` (e.g., `BASALT_ASSERT`, `GL_LUMINANCE`).
+*   **Enums**: `PascalCase` for the type, `SCREAMING_SNAKE_CASE` for values (e.g., `LinearizationType::ABS_QR`).
+
+### Code Structure
+
+*   **Namespaces**: All code must be wrapped in `namespace basalt { ... }`.
+*   **Smart Pointers**: Use `using Ptr = std::shared_ptr<Class>;` (or `typedef`) within class definitions for shared pointers.
+*   **Eigen Alignment**: Structs containing Eigen fixed-size vectorizable types must include `EIGEN_MAKE_ALIGNED_OPERATOR_NEW`.
+*   **Indentation**: 4 spaces.
+*   **Headers**: `#pragma once` guards.
+*   **Formatting**: Opening brace on the same line (K&R style).
