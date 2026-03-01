@@ -106,3 +106,7 @@ Adhere to the following conventions when contributing to the codebase.
 *   **Indentation**: 4 spaces.
 *   **Headers**: `#pragma once` guards.
 *   **Formatting**: Opening brace on the same line (K&R style).
+
+## Python Coding Standards
+
+This applies to all new python code. When writing Python code (especially launch files), only import top-level packages (e.g., `import launch`, `import launch_ros`, `import ament_index_python`) and use fully qualified module paths in the code instead of using `from ... import ...`. This helps make the code structure visible everywhere.

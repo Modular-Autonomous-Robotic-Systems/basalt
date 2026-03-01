@@ -52,6 +52,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_reduce.h>
 
+#include "basalt/imu/imu_types.h"
 #include <chrono>
 
 namespace basalt {
@@ -59,15 +60,16 @@ namespace basalt {
 template <class Scalar_>
 SqrtKeypointVioEstimator<Scalar_>::SqrtKeypointVioEstimator(
     const Eigen::Vector3d &g_, const basalt::Calibration<double> &calib_,
-    const VioConfig &config_)
-    : take_kf(true), frames_after_kf(0), g(g_.cast<Scalar>()),
-      initialized(false), config(config_),
+    const VioConfig &config_, bool useProducerConsumerArchitecture)
+    : VioEstimatorBase<Scalar_>(), take_kf(true), frames_after_kf(0),
+      g(g_.cast<Scalar>()), initialized(false), config(config_),
       lambda(config_.vio_lm_lambda_initial),
       min_lambda(config_.vio_lm_lambda_min),
-      max_lambda(config_.vio_lm_lambda_max), lambda_vee(2) {
+      max_lambda(config_.vio_lm_lambda_max), lambda_vee(2),
+      mpUseProducerConsumerArchitecture(useProducerConsumerArchitecture) {
     obs_std_dev = Scalar(config.vio_obs_std_dev);
     huber_thresh = Scalar(config.vio_obs_huber_thresh);
-    calib = calib_.cast<Scalar>();
+    this->calib = calib_.cast<Scalar>();
 
     // Setup marginalization
     marg_data.is_sqrt = config.vio_sqrt_marg;
@@ -108,8 +110,8 @@ SqrtKeypointVioEstimator<Scalar_>::SqrtKeypointVioEstimator(
     std::cout << "marg_H (sqrt:" << marg_data.is_sqrt << ")\n"
               << marg_data.H << std::endl;
 
-    gyro_bias_sqrt_weight = calib.gyro_bias_std.array().inverse();
-    accel_bias_sqrt_weight = calib.accel_bias_std.array().inverse();
+    gyro_bias_sqrt_weight = this->calib.gyro_bias_std.array().inverse();
+    accel_bias_sqrt_weight = this->calib.accel_bias_std.array().inverse();
 
     max_states = config.vio_max_states;
     max_kfs = config.vio_max_kfs;
@@ -148,144 +150,169 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d &bg_,
                                                    const Eigen::Vector3d &ba_) {
     Vec3 bg_init = bg_.cast<Scalar>();
     Vec3 ba_init = ba_.cast<Scalar>();
+    this->mpBg = bg_init;
+    this->mpBa = ba_init;
+    this->mpAccelCov =
+        this->calib.dicrete_time_accel_noise_std().array().square();
+    this->mpGyroCov =
+        this->calib.dicrete_time_gyro_noise_std().array().square();
 
-    auto proc_func = [&, bg = bg_init, ba = ba_init] {
-        OpticalFlowResult::Ptr prev_frame, curr_frame;
-        typename IntegratedImuMeasurement<Scalar>::Ptr meas;
+    if (mpUseProducerConsumerArchitecture) {
+        auto proc_func = [&] {
+            OpticalFlowResult::Ptr curr_frame;
 
-        const Vec3 accel_cov =
-            calib.dicrete_time_accel_noise_std().array().square();
-        const Vec3 gyro_cov =
-            calib.dicrete_time_gyro_noise_std().array().square();
+            this->imuData = popFromImuDataQueue();
+            BASALT_ASSERT_MSG(imuData, "first IMU measurment is nullptr");
 
-        typename ImuData<Scalar>::Ptr data = popFromImuDataQueue();
-        BASALT_ASSERT_MSG(data, "first IMU measurment is nullptr");
+            imuData->accel =
+                this->calib.calib_accel_bias.getCalibrated(imuData->accel);
+            imuData->gyro =
+                this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
 
-        data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
-        data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
+            while (true) {
+                this->vision_data_queue.pop(curr_frame);
 
-        while (true) {
-            this->vision_data_queue.pop(curr_frame);
-
-            if (config.vio_enforce_realtime) {
-                // drop current frame if another frame is already in the queue.
-                while (!this->vision_data_queue.empty())
-                    this->vision_data_queue.pop(curr_frame);
+                if (config.vio_enforce_realtime) {
+                    // drop current frame if another frame is already in the
+                    // queue.
+                    while (!this->vision_data_queue.empty())
+                        this->vision_data_queue.pop(curr_frame);
+                }
+                typename PoseVelBiasState<Scalar>::Ptr output_state =
+                    this->ProcessFrame(curr_frame);
+                if (output_state == nullptr) {
+                    break;
+                }
             }
 
-            if (!curr_frame.get()) {
+            if (this->out_vis_queue)
+                this->out_vis_queue->push(nullptr);
+            if (this->out_marg_queue)
+                this->out_marg_queue->push(nullptr);
+            if (this->out_state_queue)
+                this->out_state_queue->push(nullptr);
+
+            this->finished = true;
+
+            std::cout << "Finished VIOFilter " << std::endl;
+        };
+
+        processing_thread.reset(new std::thread(proc_func));
+    } else {
+        this->finished = false;
+        this->prev_frame = nullptr;
+        this->imuData = nullptr;
+    }
+}
+
+template <class Scalar>
+typename PoseVelBiasState<Scalar>::Ptr
+SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
+    OpticalFlowResult::Ptr &curr_frame) {
+    if (!curr_frame.get()) {
+        return nullptr;
+    }
+
+    if (this->imuData == nullptr) {
+        this->imuData = popFromImuDataQueue();
+        this->imuData->accel =
+            this->calib.calib_accel_bias.getCalibrated(imuData->accel);
+        this->imuData->gyro =
+            this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
+    }
+
+    // Correct camera time offset
+    // curr_frame->t_ns += calib.cam_time_offset_ns;
+    typename IntegratedImuMeasurement<Scalar>::Ptr meas;
+
+    if (!initialized) {
+        while (imuData->t_ns < curr_frame->t_ns) {
+            imuData = popFromImuDataQueue();
+            if (!imuData)
                 break;
-            }
-
-            // Correct camera time offset
-            // curr_frame->t_ns += calib.cam_time_offset_ns;
-
-            if (!initialized) {
-                while (data->t_ns < curr_frame->t_ns) {
-                    data = popFromImuDataQueue();
-                    if (!data)
-                        break;
-                    data->accel =
-                        calib.calib_accel_bias.getCalibrated(data->accel);
-                    data->gyro =
-                        calib.calib_gyro_bias.getCalibrated(data->gyro);
-                    // std::cout << "Skipping IMU data.." << std::endl;
-                }
-
-                Vec3 vel_w_i_init;
-                vel_w_i_init.setZero();
-
-                T_w_i_init.setQuaternion(
-                    Eigen::Quaternion<Scalar>::FromTwoVectors(data->accel,
-                                                              Vec3::UnitZ()));
-
-                last_state_t_ns = curr_frame->t_ns;
-                imu_meas[last_state_t_ns] =
-                    IntegratedImuMeasurement<Scalar>(last_state_t_ns, bg, ba);
-                frame_states[last_state_t_ns] = PoseVelBiasStateWithLin<Scalar>(
-                    last_state_t_ns, T_w_i_init, vel_w_i_init, bg, ba, true);
-
-                marg_data.order.abs_order_map[last_state_t_ns] =
-                    std::make_pair(0, POSE_VEL_BIAS_SIZE);
-                marg_data.order.total_size = POSE_VEL_BIAS_SIZE;
-                marg_data.order.items = 1;
-
-                std::cout << "Setting up filter: t_ns " << last_state_t_ns
-                          << std::endl;
-                std::cout << "T_w_i\n" << T_w_i_init.matrix() << std::endl;
-                std::cout << "vel_w_i " << vel_w_i_init.transpose()
-                          << std::endl;
-
-                if (config.vio_debug || config.vio_extended_logging) {
-                    logMargNullspace();
-                }
-
-                initialized = true;
-            }
-
-            if (prev_frame) {
-                // preintegrate measurements
-
-                auto last_state = frame_states.at(last_state_t_ns);
-
-                meas.reset(new IntegratedImuMeasurement<Scalar>(
-                    prev_frame->t_ns, last_state.getState().bias_gyro,
-                    last_state.getState().bias_accel));
-
-                BASALT_ASSERT_MSG(
-                    prev_frame->t_ns < curr_frame->t_ns,
-                    "duplicate frame timestamps?! zero time delta leads "
-                    "to invalid IMU integration.");
-
-                while (data->t_ns <= prev_frame->t_ns) {
-                    data = popFromImuDataQueue();
-                    if (!data)
-                        break;
-                    data->accel =
-                        calib.calib_accel_bias.getCalibrated(data->accel);
-                    data->gyro =
-                        calib.calib_gyro_bias.getCalibrated(data->gyro);
-                }
-
-                while (data->t_ns <= curr_frame->t_ns) {
-                    meas->integrate(*data, accel_cov, gyro_cov);
-                    data = popFromImuDataQueue();
-                    if (!data)
-                        break;
-                    data->accel =
-                        calib.calib_accel_bias.getCalibrated(data->accel);
-                    data->gyro =
-                        calib.calib_gyro_bias.getCalibrated(data->gyro);
-                }
-
-                if (meas->get_start_t_ns() + meas->get_dt_ns() <
-                    curr_frame->t_ns) {
-                    if (!data.get())
-                        break;
-                    int64_t tmp = data->t_ns;
-                    data->t_ns = curr_frame->t_ns;
-                    meas->integrate(*data, accel_cov, gyro_cov);
-                    data->t_ns = tmp;
-                }
-            }
-
-            measure(curr_frame, meas);
-            prev_frame = curr_frame;
+            imuData->accel =
+                this->calib.calib_accel_bias.getCalibrated(imuData->accel);
+            imuData->gyro =
+                this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
+            // std::cout << "Skipping IMU data.." << std::endl;
         }
 
-        if (this->out_vis_queue)
-            this->out_vis_queue->push(nullptr);
-        if (this->out_marg_queue)
-            this->out_marg_queue->push(nullptr);
-        if (this->out_state_queue)
-            this->out_state_queue->push(nullptr);
+        Vec3 vel_w_i_init;
+        vel_w_i_init.setZero();
 
-        this->finished = true;
+        T_w_i_init.setQuaternion(Eigen::Quaternion<Scalar>::FromTwoVectors(
+            imuData->accel, Vec3::UnitZ()));
 
-        std::cout << "Finished VIOFilter " << std::endl;
-    };
+        last_state_t_ns = curr_frame->t_ns;
+        imu_meas[last_state_t_ns] =
+            IntegratedImuMeasurement<Scalar>(last_state_t_ns, mpBg, mpBa);
+        frame_states[last_state_t_ns] = PoseVelBiasStateWithLin<Scalar>(
+            last_state_t_ns, T_w_i_init, vel_w_i_init, mpBg, mpBa, true);
 
-    processing_thread.reset(new std::thread(proc_func));
+        marg_data.order.abs_order_map[last_state_t_ns] =
+            std::make_pair(0, POSE_VEL_BIAS_SIZE);
+        marg_data.order.total_size = POSE_VEL_BIAS_SIZE;
+        marg_data.order.items = 1;
+
+        std::cout << "Setting up filter: t_ns " << last_state_t_ns << std::endl;
+        std::cout << "T_w_i\n" << T_w_i_init.matrix() << std::endl;
+        std::cout << "vel_w_i " << vel_w_i_init.transpose() << std::endl;
+
+        if (config.vio_debug || config.vio_extended_logging) {
+            logMargNullspace();
+        }
+
+        initialized = true;
+    }
+
+    if (this->prev_frame) {
+        // preintegrate measurements
+
+        auto last_state = frame_states.at(last_state_t_ns);
+
+        meas.reset(new IntegratedImuMeasurement<Scalar>(
+            this->prev_frame->t_ns, last_state.getState().bias_gyro,
+            last_state.getState().bias_accel));
+
+        BASALT_ASSERT_MSG(this->prev_frame->t_ns < curr_frame->t_ns,
+                          "duplicate frame timestamps?! zero time delta leads "
+                          "to invalid IMU integration.");
+
+        while (imuData->t_ns <= this->prev_frame->t_ns) {
+            imuData = popFromImuDataQueue();
+            if (!imuData)
+                return nullptr;
+            imuData->accel =
+                this->calib.calib_accel_bias.getCalibrated(imuData->accel);
+            imuData->gyro =
+                this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
+        }
+
+        while (imuData->t_ns <= curr_frame->t_ns) {
+            meas->integrate(*imuData, this->mpAccelCov, this->mpGyroCov);
+            imuData = popFromImuDataQueue();
+            if (!imuData)
+                return nullptr;
+            imuData->accel =
+                this->calib.calib_accel_bias.getCalibrated(imuData->accel);
+            imuData->gyro =
+                this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
+        }
+
+        if (meas->get_start_t_ns() + meas->get_dt_ns() < curr_frame->t_ns) {
+            if (!imuData.get())
+                return nullptr;
+            int64_t tmp = imuData->t_ns;
+            imuData->t_ns = curr_frame->t_ns;
+            meas->integrate(*imuData, this->mpAccelCov, this->mpGyroCov);
+            imuData->t_ns = tmp;
+        }
+    }
+
+    typename PoseVelBiasState<Scalar>::Ptr output_state =
+        measure(curr_frame, meas);
+    this->prev_frame = curr_frame;
+    return output_state;
 }
 
 template <class Scalar_>
@@ -319,7 +346,8 @@ SqrtKeypointVioEstimator<Scalar_>::popFromImuDataQueue() {
 }
 
 template <class Scalar_>
-bool SqrtKeypointVioEstimator<Scalar_>::measure(
+typename PoseVelBiasState<Scalar_>::Ptr
+SqrtKeypointVioEstimator<Scalar_>::measure(
     const OpticalFlowResult::Ptr &opt_flow_meas,
     const typename IntegratedImuMeasurement<Scalar>::Ptr &meas) {
     stats_sums_.add("frame_id", opt_flow_meas->t_ns).format("none");
@@ -448,17 +476,17 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
                                     .template cast<Scalar>();
 
                 Vec4 p0_3d, p1_3d;
-                bool valid1 = calib.intrinsics[0].unproject(p0, p0_3d);
+                bool valid1 = this->calib.intrinsics[0].unproject(p0, p0_3d);
                 bool valid2 =
-                    calib.intrinsics[tcido.cam_id].unproject(p1, p1_3d);
+                    this->calib.intrinsics[tcido.cam_id].unproject(p1, p1_3d);
                 if (!valid1 || !valid2)
                     continue;
 
                 SE3 T_i0_i1 =
                     getPoseStateWithLin(tcidl.frame_id).getPose().inverse() *
                     getPoseStateWithLin(tcido.frame_id).getPose();
-                SE3 T_0_1 = calib.T_i_c[0].inverse() * T_i0_i1 *
-                            calib.T_i_c[tcido.cam_id];
+                SE3 T_0_1 = this->calib.T_i_c[0].inverse() * T_i0_i1 *
+                            this->calib.T_i_c[tcido.cam_id];
 
                 if (T_0_1.translation().squaredNorm() < min_triang_distance2)
                     continue;
@@ -508,8 +536,9 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
 
     optimize_and_marg(num_points_connected, lost_landmaks);
 
+    PoseVelBiasStateWithLin p = frame_states.at(last_state_t_ns);
+
     if (this->out_state_queue) {
-        PoseVelBiasStateWithLin p = frame_states.at(last_state_t_ns);
 
         typename PoseVelBiasState<double>::Ptr data(
             new PoseVelBiasState<double>(p.getState().template cast<double>()));
@@ -521,6 +550,8 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
         VioVisualizationData::Ptr data(new VioVisualizationData);
 
         data->t_ns = last_state_t_ns;
+
+        BASALT_ASSERT(frame_states.empty());
 
         for (const auto &kv : frame_states) {
             data->states.emplace_back(
@@ -546,7 +577,10 @@ bool SqrtKeypointVioEstimator<Scalar_>::measure(
 
     stats_sums_.add("measure", t_total.elapsed()).format("ms");
 
-    return true;
+    typename PoseVelBiasState<Scalar>::Ptr d(new PoseVelBiasState<Scalar>(
+        p.getT_ns(), p.getState().T_w_i, p.getState().vel_w_i, mpBg, mpBa));
+
+    return d;
 }
 
 template <class Scalar_>

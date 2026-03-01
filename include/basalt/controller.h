@@ -30,7 +30,7 @@ class Controller {
                     bool useProducerConsumerArchitecture = false);
 
     void GrabImage(basalt::OpticalFlowInput::Ptr data);
-    void GrabImu(basalt::ImuData<double>::Ptr data);
+    void GrabIMU(basalt::ImuData<double>::Ptr data);
 
     // Helper to retrieve the latest pose estimate (does not pop from queue)
     basalt::PoseVelBiasState<double>::Ptr GetLatestPose() const;

@@ -90,8 +90,9 @@ class SqrtKeypointVioEstimator : public VioEstimatorBase<Scalar_>,
     using SqrtBundleAdjustmentBase<Scalar>::checkEigenvalues;
 
     SqrtKeypointVioEstimator(const Eigen::Vector3d &g,
-                             const basalt::Calibration<double> &calib,
-                             const VioConfig &config);
+                             const basalt::Calibration<double> &calib_,
+                             const VioConfig &config,
+                             bool useProducerConsumerArchitecure);
 
     void initialize(int64_t t_ns, const Sophus::SE3d &T_w_i,
                     const Eigen::Vector3d &vel_w_i, const Eigen::Vector3d &bg,
@@ -114,14 +115,12 @@ class SqrtKeypointVioEstimator : public VioEstimatorBase<Scalar_>,
 
     typename ImuData<Scalar>::Ptr popFromImuDataQueue();
 
-    bool measure(const OpticalFlowResult::Ptr &opt_flow_meas,
-                 const typename IntegratedImuMeasurement<Scalar>::Ptr &meas);
+    typename PoseVelBiasState<Scalar>::Ptr
+    measure(const OpticalFlowResult::Ptr &opt_flow_meas,
+            const typename IntegratedImuMeasurement<Scalar>::Ptr &meas);
 
     typename PoseVelBiasState<Scalar>::Ptr
-    ProcessFrame(OpticalFlowResult::Ptr &curr_frame) {
-        std::cout << "Not Implemented" << std::endl;
-        return nullptr;
-    }
+    ProcessFrame(OpticalFlowResult::Ptr &curr_frame);
 
     // int64_t propagate();
     // void addNewState(int64_t data_t_ns);
@@ -263,5 +262,9 @@ class SqrtKeypointVioEstimator : public VioEstimatorBase<Scalar_>,
     // timing and stats
     ExecutionStats stats_all_;
     ExecutionStats stats_sums_;
+    bool mpUseProducerConsumerArchitecture = false;
+    typename ImuData<Scalar>::Ptr imuData;
+    Vec3 mpBg, mpBa;
+    Vec3 mpAccelCov, mpGyroCov;
 };
 } // namespace basalt
