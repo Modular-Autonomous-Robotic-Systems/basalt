@@ -125,6 +125,19 @@ class LandmarkDatabase {
 
   int numObservations(KeypointId lm_id) const;
 
+  // Return the number of landmarks hosted by tid_a that are observed by
+  // tid_b. Inspects observations.at(tid_a).at(tid_b); returns 0 if either
+  // lookup misses. Used by LocalMapper::ComputeCovisibility.
+  size_t getObservationsCountForPair(const TimeCamId& tid_a,
+                                     const TimeCamId& tid_b) const;
+
+  // Return the number of observations at tid that reference landmarks NOT
+  // hosted by tid. Iterates over every entry in observations whose key is
+  // not tid and sums the sizes of its obs-sub-map row for tid.
+  // Used by LocalMapper::SelectKeyframeToCull to compute total(a).
+  size_t getNonLandmarkObservationsCountForKeyFrame(
+      const TimeCamId& tid) const;
+
   void removeLandmark(KeypointId lm_id);
 
   void removeObservations(KeypointId lm_id, const std::set<TimeCamId>& obs);

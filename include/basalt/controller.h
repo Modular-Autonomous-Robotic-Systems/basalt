@@ -1,9 +1,10 @@
 #pragma once
 
-#include <basalt/calibration/calibration.hpp>
 #include <basalt/optical_flow/optical_flow.h>
 #include <basalt/utils/vio_config.h>
 #include <basalt/vi_estimator/vio_estimator.h>
+
+#include <basalt/calibration/calibration.hpp>
 #include <mutex>
 #include <string>
 
@@ -12,8 +13,8 @@ namespace basalt {
 enum class SlamMode { VO, VIO };
 
 class Controller {
-  public:
-    Controller(const std::string &config_path, const std::string &calib_path,
+public:
+    Controller(const std::string& config_path, const std::string& calib_path,
                SlamMode mode);
 
     ~Controller();
@@ -24,9 +25,9 @@ class Controller {
     void initialize();
 
     // Initialize mid-flight with specific state
-    void initialize(int64_t t_ns, const Sophus::SE3d &T_w_i,
-                    const Eigen::Vector3d &vel_w_i, const Eigen::Vector3d &bg,
-                    const Eigen::Vector3d &ba,
+    void initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
+                    const Eigen::Vector3d& vel_w_i, const Eigen::Vector3d& bg,
+                    const Eigen::Vector3d& ba,
                     bool useProducerConsumerArchitecture = false);
 
     void GrabImage(basalt::OpticalFlowInput::Ptr data);
@@ -36,11 +37,11 @@ class Controller {
     basalt::PoseVelBiasState<double>::Ptr GetLatestPose() const;
 
     // Explicitly pop a pose reading from the queue
-    bool TryPopPose(basalt::PoseVelBiasState<double>::Ptr &pose);
+    bool TryPopPose(basalt::PoseVelBiasState<double>::Ptr& pose);
 
-    void TrackMonocular(OpticalFlowInput::Ptr &frame, Sophus::SE3f &tcw);
+    void TrackMonocular(OpticalFlowInput::Ptr& frame, Sophus::SE3f& tcw);
 
-  private:
+private:
     // configuration
     std::string config_path_;
     std::string calib_path_;
@@ -62,6 +63,7 @@ class Controller {
     std::atomic<bool> terminate_processing_thread_ = false;
 
     void process_pose_queue_loop();
+    bool mpUseProducerConsumerArchitecture = true;
 };
 
-} // namespace basalt
+}  // namespace basalt

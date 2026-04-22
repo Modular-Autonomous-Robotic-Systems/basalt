@@ -6,7 +6,7 @@ The VIO system in Basalt is designed as a pipeline with distinct frontend (Optic
 
 ### Overview of Consumer Producer architecture
 
-The basalt package implements both consumer producer architecture and a receive and return based architecture as well. Desired architecture may be set by initialzing the controller with the argument `useProducerConsumerArchitecture` set as true when invoking the function `Controller::initialize()`. Refer to [this](#orchestration) section for more information regarding `class Orchestration` and the high level management of SLAM within basalt. Sample im 
+The basalt package implements both consumer producer architecture and an event driven architecture as well. Desired architecture may be set by initialzing the controller with the argument `useProducerConsumerArchitecture` set as true when invoking the function `Controller::initialize()`. Refer to [this](#orchestration) section for more information regarding `class Orchestration` and the high level management of SLAM within basalt.
 
 The data flow is as follows:
 1.  **Input**: Images and IMU data are read from a dataset (or camera driver).
@@ -74,7 +74,7 @@ The sensor suite configuration (e.g., monocular vs. stereo) is **defined implici
 | `vio_obs_huber_thresh` | `double` | Huber loss threshold. |
 | `vio_min_triangulation_dist` | `double` | Min distance for triangulation. |
 | `vio_enforce_realtime` | `bool` | If true, drops frames to maintain real-time speed. |
-| *Various Mapper Settings* | ... | Settings prefixed with `mapper_` for the mapping module. |
+<!-- | *Various Mapper Settings* | ... | Settings prefixed with `mapper_` for the mapping module. | -->
 
 *To add a new parameter, modify `src/utils/vio_config.cpp` in `VioConfig()` (init) and `serialize()` (binding).*
 
@@ -424,6 +424,123 @@ Usage with a live RealSense T265 device is similar but utilizes the `RsT265Devic
     // Link Device IMU Output -> Estimator IMU Input
     t265_device->imu_data_queue = &vio->imu_data_queue;
     ```
+
+## Mapping Features (NFR Mapper)
+<!-- TODO Move this to a dedicated mapping documentation file -->
+
+The mapping system in Basalt operates as an offline, batch process designed to consume data marginalisation and keyframe data produced by the 
+ fix lag smoother, the VIO estimator to build a globally consistent map. It relies on Non-linear Factor Recovery (NFR) to fuse local feature tracking with globally consistent pose graph constraints.
+
+### Key Classes and Interfaces
+
+#### 1. Core Mapping Classes
+
+*   **`basalt::NfrMapper`**
+    *   **Header**: [`include/basalt/vi_estimator/nfr_mapper.h`](include/basalt/vi_estimator/nfr_mapper.h)
+    *   **Implementation**: [`src/vi_estimator/nfr_mapper.cpp`](src/vi_estimator/nfr_mapper.cpp)
+    *   **Purpose**: The central mapping engine responsible for data ingestion, tracking, and global optimization.
+*   **`basalt::ScBundleAdjustmentBase`** (Base Class)
+    *   **Header**: [`include/basalt/vi_estimator/sc_ba_base.h`](include/basalt/vi_estimator/sc_ba_base.h)
+    *   **Purpose**: Base class for Bundle Adjustment using Schur Complement. `NfrMapper` inherits from this, inheriting the ability to marginalize out landmarks efficiently and solve the reduced camera system.
+*   **`basalt::BundleAdjustmentBase`** (Base Class)
+    *   **Header**: [`include/basalt/vi_estimator/ba_base.h`](include/basalt/vi_estimator/ba_base.h)
+    *   **Purpose**: Foundational class for bundle adjustment providing core structures like `LandmarkDatabase`, camera models, and triangulation utilities. `ScBundleAdjustmentBase` derives from this.
+
+#### 2. Configuration: `basalt::VioConfig`
+
+Mapping is heavily parameterized by settings prefixed with `mapper_` in `basalt::VioConfig`.
+
+| Attribute | Type | Description |
+| :--- | :--- | :--- |
+| `mapper_use_factors` | `bool` | Enables/disables the use of recovered VIO priors (`RelPoseFactor`, `RollPitchFactor`) in the global optimization. |
+| `mapper_num_frames_to_match` | `int` | Number of past keyframes to try matching with the current one for loop closure. |
+| `mapper_min_matches` | `int` | Minimum number of feature matches required to establish a valid connection between keyframes. |
+| `mapper_bow_num_bits` | `int` | Length of the binary descriptor used for Bag-of-Words (BoW) loop closure retrieval. |
+
+#### 3. Data Structures & Marginalization
+
+The interface between the online VIO thread and the offline mapping thread relies on serializing and deserializing marginalization events.
+
+*   **`basalt::MargData`**:
+    *   **Header**: [`include/basalt/utils/imu_types.h`](include/basalt/utils/imu_types.h)
+    *   **Purpose**: The serialized packet produced by VIO. Contains the marginalized Hessian (`abs_H`), residual vector (`abs_b`), and the linearized states of involved keyframes.
+*   **`basalt::RelPoseFactor`**: Represents a recovered 6DoF relative pose constraint between two keyframes.
+*   **`basalt::RollPitchFactor`**: Represents a recovered 2DoF absolute orientation constraint aligned with gravity.
+
+<!-- TODO Need to add references for AbsOrderMap  -->
+
+### Mapping Deep Dive
+
+The mapping process, primarily driven by `src/mapper.cpp`, operates in distinct offline phases. It aims to re-evaluate the visual data to build a highly accurate, globally consistent map by using the poses obtained from the VIO as an initial prior constraint.
+
+1.  **Data Loading & Queuing (`load_data`)**:
+    *   The execution begins in `src/mapper.cpp` by loading pre-recorded datasets and serialized `MargData` files from disk.
+    *   A background thread (`basalt::MargDataLoader`) reads these files and pushes `MargData::Ptr` into a thread-safe queue (`tbb::concurrent_bounded_queue<basalt::MargData::Ptr>`).
+
+2.  **Marginalization Data Ingestion (`NfrMapper::addMargData`)**:
+    *   The `NfrMapper` processes each `MargData` packet to extract prior constraints.
+    *   **State Reduction (`NfrMapper::processMargData`)**: Because mapping is strictly a geometric pose graph problem, non-pose states (velocity, biases) from the VIO prior are marginalized out using Schur complement.
+    *   **Non-linear Factor Recovery (`NfrMapper::extractNonlinearFactors`)**: This implements the core NFR concept. The mapper inverts the reduced marginalized Hessian (`abs_H`) to obtain a covariance matrix. Using this covariance and the state estimates, it computes independent, non-linear constraints: `RelPoseFactor` (relative poses) and `RollPitchFactor` (global roll/pitch). These recovered factors are stored in `NfrMapper::rel_pose_factors` and `NfrMapper::roll_pitch_factors`.
+
+3.  **Feature Detection (`NfrMapper::detect_keypoints`)**:
+    *   Unlike the VIO estimator which relies on the `OpticalFlow` front-end, the mapper uses Corner Detection to extract dense features for mapping.
+    *   It detects keypoints (`detectKeypointsMapping`) uniformly across all stored keyframes using a grid-based approach. This method internally utilizes OpenCV's `goodFeaturesToTrack()` function (a common corner detector).
+    *   It extracts patches around the corners to compute orientation angles (`computeAngles`) and feature descriptors (`computeDescriptors`).
+    *   It computes a Bag-of-Words (BoW) vector for each image using a predefined vocabulary (`HashBow`) and adds the image to a visual database (`hash_bow_database`). This enables rapid querying for loop closures.
+
+4.  **Matching (`NfrMapper::match_stereo` and `NfrMapper::match_all`)**:
+    *   **Stereo Matching (`NfrMapper::match_stereo`)**: Matches features between the left and right cameras of the same timestamp. It computes the essential matrix from the known extrinsic calibration to perform strict geometric verification of the matches (`findInliersEssential`).
+    *   **Temporal & Loop Closure Matching (`NfrMapper::match_all`)**: Queries the BoW database to find visually similar past keyframes. For the best candidate pairs, it matches feature descriptors (using Hamming distance and ratio tests via `matchDescriptors`) and performs geometric verification using RANSAC (`findInliersRansac`) to eliminate outliers. Only geometrically consistent pairs are stored in `feature_matches`.
+
+5.  **Track Building & Initialization (`NfrMapper::build_tracks` and `NfrMapper::setup_opt`)**:
+    *   **Track Construction (`NfrMapper::build_tracks`)**: Uses a `TrackBuilder` to consolidate the pairwise feature matches into multi-view feature tracks spanning several keyframes, explicitly filtering out conflicting tracks that are too short (`mapper_min_track_length`). The result is stored in `feature_tracks`.
+    *   **Initialization (`NfrMapper::setup_opt`)**: Triangulates initial 3D landmark positions to seed the optimization. For each feature track, it selects a host keyframe and triangulates against another observing keyframe (`triangulate`), provided the baseline between them is large enough (`mapper_min_triangulation_dist`). Valid landmarks are then added to the `LandmarkDatabase` (`lmdb.addLandmark` and `lmdb.addObservation`).
+
+6.  **Global Optimization (`NfrMapper::optimize` and `NfrMapper::filterOutliers`)**:
+    *   The mapping system typically runs bundle adjustment in two steps to ensure robustness against outliers.
+    *   **Step 1: Initial Optimization (`NfrMapper::optimize`)**: Performs a full, joint Bundle Adjustment using Levenberg-Marquardt or Gauss-Newton algorithms. It creates a linear system (`MapperLinearizeAbsReduce`) whose cost function simultaneously minimizes visual reprojection errors (from the newly matched multi-view tracks) *and* the errors from the non-linear factors (`RelPoseFactor`, `RollPitchFactor`) recovered from the VIO prior. The system updates the states (`kv.second.applyInc`) and landmarks (`updatePoints`).
+    *   **Outlier Rejection (`BundleAdjustmentBase::filterOutliers`)**: Evaluates the optimized map. It calls `computeError` to calculate the reprojection error for every observation and removes observations (or entire landmarks via `lmdb.removeLandmark` and `lmdb.removeObservations`) that exceed an outlier threshold or exhibit invalid depths, or have fewer than `min_num_obs` valid observations.
+    *   **Step 2: Refinement (`NfrMapper::optimize`)**: The optimization is executed a second time on the cleaned map, producing the final, highly accurate globally consistent trajectory and 3D map.
+
+#### Feature Extraction and Descriptor Generation
+
+The mapping system relies heavily on discovering wide-baseline matches and loop closures across potentially disjoint keyframes. Because the offline mapper cannot rely on the sequential KLT tracking of the VIO front-end, it employs a robust feature extraction pipeline to compute rotation-invariant binary descriptors suitable for Bag-of-Words (BoW) querying. This is orchestrated within `NfrMapper::detect_keypoints` using helper functions defined in `src/utils/keypoints.cpp`.
+
+1.  **Corner Detection (`detectKeypointsMapping`)**:
+    *   The system first identifies salient corner points in the image. It enforces a uniform distribution across the image using a grid-based approach.
+    *   Internally, this relies on OpenCV's `goodFeaturesToTrack()` function, which is an implementation of the Shi-Tomasi corner detector. This ensures the selected keypoints have strong gradients in multiple directions.
+
+2.  **`computeAngles()`: Assigning Orientation**:
+    *   To make a feature descriptor robust to camera rotation (rotation-invariant), the system first assigns a canonical "angle" or orientation to each detected corner.
+    *   **Implementation Details**: The method uses the **Intensity Centroid** technique. It assumes that a corner's intensity is offset from its center, and this offset vector can define an orientation.
+        1. It iterates over a circular patch (radius defined by `HALF_PATCH_SIZE`) around the detected corner $(c_x, c_y)$.
+        2. It computes the image moments $m_{01}$ and $m_{10}$ by weighting the pixel coordinates $(x, y)$ by their image intensity $I(x,y)$:
+           * $m_{10} = \sum_{x,y} x \cdot I(x, y)$
+           * $m_{01} = \sum_{x,y} y \cdot I(x, y)$
+        3. The orientation angle $\theta$ is then simply the vector from the center to the centroid, computed as `angle = atan2(m01, m10)`.
+    *   This ensures that no matter how the camera is rotated, the angle computed relative to the patch's texture remains consistent.
+
+3.  **`computeDescriptors()`: Building the Binary Descriptor**:
+    *   Once the angle is known, the system computes a 256-bit binary descriptor. This is an implementation of a **Rotated BRIEF** (Binary Robust Independent Elementary Features) descriptor.
+    *   **Implementation Details**: Binary descriptors are extremely fast to match (using the Hamming distance/XOR operation) and are ideal for Bag-of-Words (BoW) querying.
+        1. **Rotation Matrix**: It uses the angle computed in `computeAngles()` to create a 2D rotation matrix (`mat_rot`).
+        2. **Sampling Pattern**: It loops 256 times. For each iteration, it reads a pair of 2D coordinates $(v_a, v_b)$ from a predefined, hardcoded spatial sampling pattern (stored in arrays like `pattern_31_x_a`, etc.).
+        3. **Steering the Pattern**: It rotates these sampling coordinates using the rotation matrix:
+           * `vva = mat_rot * va`
+           * `vvb = mat_rot * vb`
+           This "steers" the descriptor to align with the canonical orientation of the keypoint, achieving rotation invariance.
+        4. **Intensity Comparison**: It compares the image intensity of the pixel at rotated offset $v_{va}$ to the pixel at rotated offset $v_{vb}$.
+           * If `img(A) < img(B)`, the bit is set to 1 (true). Otherwise, 0.
+        5. The result is a `std::bitset<256>` which uniquely describes the visual appearance of the patch around the corner.
+
+**How this ties into Marginalization and Mapping**:
+In the Basalt mapping pipeline (1904.06504v3):
+1. The real-time VIO thread marginalizes out old states, packaging the non-linear prior information into `MargData` (the Non-Linear Factor Recovery aspect).
+2. The mapping thread consumes this `MargData`. However, to build a global map, it needs dense visual connections between keyframes that might not have been tracked sequentially.
+3. It runs `computeAngles()` and `computeDescriptors()` on the images packaged in the `MargData`.
+4. These 256-bit binary descriptors are fed into the `HashBow` (Bag-of-Words) database.
+5. When a new keyframe is processed, its BoW vector is compared against the database to instantly find candidates for loop closure.
+6. The descriptors of the candidate frames are matched using fast bitwise XOR (Hamming distance). The resulting geometrically verified matches are optimized alongside the relative pose constraints recovered from the marginalization data.
 
 ## Build System (CMake)
 

@@ -263,7 +263,7 @@ MargHelper<Scalar>::marginalizeHelperSqToSq(
     m.abs_H, m.abs_b, idx_to_keep, idx_to_marg, marg_H_new, marg_b_new);
 ```
 
-(`nfr_mapper.cpp:130–131`). The resulting `marg_H_new` is a pure $6K \times 6K$ pose-only information matrix (where $K$ is the number of keyframes), ready for the covariance inversion in `extractNonlinearFactors`.
+(`nfr_mapper.cpp:130–131`) to get the marginalised information matrix and information vector. The resulting `marg_H_new` is a pure $6K \times 6K$ pose-only information matrix (where $K$ is the number of keyframes), ready for the covariance inversion in `NfrMapper::extractNonlinearFactors`.
 
 ---
 
@@ -271,7 +271,7 @@ MargHelper<Scalar>::marginalizeHelperSqToSq(
 
 ### 3.1 Problem Formulation
 
-The global mapping problem is cast as a non-linear least squares optimisation over all keyframe poses $\{ \mathbf{T}_{w,i} \in SE(3) \}_{i=1}^{K}$ and all 3D landmark parameters $\{ \mathbf{l}_j \}_{j=1}^{L}$. The total objective function is:
+The global mapping problem is cast as a non-linear least squares optimisation over all keyframe poses $\{ \mathbf{T}_{w,i} \in SE(3) \}_{i=1}^{K}$ and all 3D landmark parameters $\{ \mathbf{l}_j \}_{j=1}^{L}$. The total objective function to minimise is:
 
 $$E(\mathbf{s}) = E_{\text{vision}}(\mathbf{s}) + E_{\text{rel}}(\mathbf{s}) + E_{\text{rp}}(\mathbf{s})$$
 
@@ -285,13 +285,13 @@ $$\mathbf{r}_{ij}^{\text{vis}} = \mathbf{z}_{ij} - \pi\!\left(\mathbf{T}_{w,i}^{
 
 where $\pi(\cdot)$ is the camera projection model and $\mathbf{q}_j$ is the 3D point reconstructed from the landmark parameters. The visual cost term is:
 
-$$E_{\text{vision}} = \sum_{(i,j) \in \mathcal{V}} \rho\!\left(\left\|\mathbf{r}_{ij}^{\text{vis}}\right\|_{\boldsymbol{\Sigma}_{ij}^{-1}}^2\right)$$
+$$E_{\text{vision}} = \sum_{(i,j)} \rho\!\left(\left\|\mathbf{r}_{ij}^{\text{vis}}\right\|_{\boldsymbol{\Sigma}_{ij}^{-1}}^2\right)$$
 
 where $\rho(\cdot)$ is the Huber loss function (threshold `mapper_obs_huber_thresh`) and $\boldsymbol{\Sigma}_{ij} = \sigma_{\text{obs}}^2 \mathbf{I}_2$ with `mapper_obs_std_dev`.
 
 #### 3.1.2 Relative Pose Error
 
-$$E_{\text{rel}} = \sum_{(i,j) \in \mathcal{R}} \mathbf{r}_{ij}^T \, \boldsymbol{\Omega}_{ij} \, \mathbf{r}_{ij}$$
+$$E_{\text{rel}} = \sum_{(i,j)} \mathbf{r}_{ij}^T \, \boldsymbol{\Omega}_{ij} \, \mathbf{r}_{ij}$$
 
 where $\mathbf{r}_{ij} \in \mathbb{R}^6$ is the SE(3) relative pose residual defined in Section 2.3.1, and $\boldsymbol{\Omega}_{ij}$ is the recovered information matrix from Section 2.3.3.
 
@@ -301,24 +301,7 @@ $$E_{\text{rp}} = \sum_{k \in \mathcal{P}} \mathbf{r}_k^T \, \boldsymbol{\Omega}
 
 where $\mathbf{r}_k \in \mathbb{R}^2$ is the roll-pitch residual defined in Section 2.4.2, and $\boldsymbol{\Omega}_k$ is the recovered $2 \times 2$ information matrix from Section 2.4.3.
 
-### 3.2 Landmark Parameterization and Triangulation
-
-Landmarks are parameterised identically to the VIO backend: each landmark $j$ is represented relative to its **host frame** $h(j)$ as a tuple $(u, v, \rho)$ where $(u, v) \in \mathbb{R}^2$ is the stereographic projection of the unit-sphere ray from the host camera, and $\rho > 0$ is the inverse distance (inverse depth). This minimal, singularity-free parameterisation is implemented in `StereographicParam<double>::project`.
-
-Landmark initialisation in `setup_opt` (`nfr_mapper.cpp:697`) proceeds via Direct Linear Transform (DLT) triangulation. For each feature track, the first observation is taken as the host frame. For each subsequent observation with sufficient baseline:
-
-$$\left\| \mathbf{T}_{h,o}.\mathbf{t} \right\|^2 \geq d_{\min}^2 \quad (\texttt{mapper\_min\_triangulation\_dist}^2)$$
-
-the 3D point is triangulated using `BundleAdjustmentBase::triangulate` and validated:
-
-```cpp
-if (!pos_3d.array().isFinite().all() || pos_3d[3] <= 0 || pos_3d[3] > 2.0)
-    continue;
-```
-
-The inverse depth is stored as `pos.inv_dist = pos_3d[3]` and the stereographic direction as `pos.direction = StereographicParam<double>::project(pos_3d)`. The landmark is then registered in the database via `lmdb.addLandmark` and all track observations are added via `lmdb.addObservation`.
-
-### 3.3 Feature Detection
+### 3.2 Feature Detection
 
 Fresh keypoint detection is performed on every keyframe image stored in `NfrMapper::img_data` (populated from `opt_flow_res` during `processMargData`). Detection runs in parallel over all frames using TBB (`nfr_mapper.cpp:465–499`):
 
@@ -331,7 +314,7 @@ Fresh keypoint detection is performed on every keyframe image stored in `NfrMapp
 
 Detected keypoints are stored in `NfrMapper::feature_corners` keyed by `TimeCamId` (a `(frame_id, cam_id)` pair).
 
-### 3.4 Feature Matching
+### 3.3 Feature Matching
 
 #### 3.4.1 Stereo Matching
 
@@ -347,13 +330,30 @@ For each stereo pair `(tcid_left, tcid_right)` at the same timestamp, `match_ste
 
 All verified match pairs are stored in `NfrMapper::feature_matches`.
 
-### 3.5 Feature Track Building
+### 3.4 Feature Track Building
 
 `build_tracks` (`nfr_mapper.cpp:671`) constructs multi-frame feature tracks from the pairwise matches using a `TrackBuilder` based on a Union-Find data structure:
 
 1. **Build**: `trackBuilder.Build(feature_matches)` fuses all pairwise correspondences into consistent multi-frame tracks.
 2. **Filter**: `trackBuilder.Filter(config.mapper_min_track_length)` removes any track observed in fewer than `mapper_min_track_length` frames, as well as tracks with conflicting observations (the same feature appearing twice in one frame).
 3. **Export**: `trackBuilder.Export(feature_tracks)` writes the tracks as `std::map<TrackId, std::map<TimeCamId, FeatureId>>` into `NfrMapper::feature_tracks`.
+
+### 3.5 Landmark Parameterization and Triangulation
+
+Landmarks are parameterised identically to the VIO backend: each landmark $j$ is represented relative to its **host frame** $h(j)$ as a tuple $(u, v, \rho)$ where $(u, v) \in \mathbb{R}^2$ is the stereographic projection of the unit-sphere ray from the host camera, and $\rho > 0$ is the inverse distance (inverse depth). This minimal, singularity-free parameterisation is implemented in `StereographicParam<double>::project`.
+
+Landmark initialisation in `setup_opt` (`nfr_mapper.cpp:697`) proceeds via Direct Linear Transform (DLT) triangulation. For each feature track, the first observation is taken as the host frame. For each subsequent observation with sufficient baseline:
+
+$$\left || \mathbf{T}_{h,o}.\mathbf{t} \right ||^2 \geq d_{\min}^2 \quad (\texttt{mapper\_min\_triangulation\_dist}^2)$$
+
+where $\mathbf{T}_{h,o}$ refers to the transform between the host keyframe $\mathbf{h}$ and the observation frame $\mathbf{o}$ and $d_{\min}$ is the minimum baseline distance between two keyframes required to perform triangulation accurately, the 3D point is triangulated using `BundleAdjustmentBase::triangulate` and validated:
+
+```cpp
+if (!pos_3d.array().isFinite().all() || pos_3d[3] <= 0 || pos_3d[3] > 2.0)
+    continue;
+```
+
+The inverse depth is stored as `pos.inv_dist = pos_3d[3]` and the stereographic direction as `pos.direction = StereographicParam<double>::project(pos_3d)`. The landmark is then registered in the database via `lmdb.addLandmark` and all track observations are added via `lmdb.addObservation`.
 
 ### 3.6 Global Bundle Adjustment
 
@@ -391,7 +391,104 @@ Convergence is declared when $\|\boldsymbol{\xi}\|_\infty < 10^{-5}$.
 
 ## 4. Implementation in the Code
 
-### 4a. Key Classes and Interface
+### 4a. Execution Flow & Pipeline
+
+The full mapping pipeline proceeds in seven sequential stages. In the current offline implementation these are driven by `src/mapper.cpp`; the equivalent calls for real-time integration are noted where relevant.
+
+---
+
+**Stage 1: Data Ingestion**
+
+`src/mapper.cpp:182–184`
+```cpp
+for (auto& kv : marg_data) {
+    nrf_mapper->addMargData(kv.second);
+}
+```
+
+`NfrMapper::addMargData` (`nfr_mapper.cpp:60`) is the entry point for each `MargData` packet:
+
+```cpp
+void NfrMapper::addMargData(MargData::Ptr& data) {
+    processMargData(*data);
+    bool valid = extractNonlinearFactors(*data);
+
+    if (valid) {
+        // register pose-only keyframes into frame_poses
+        for (const auto& kv : data->frame_poses) { ... }
+        for (const auto& kv : data->frame_states) {
+            if (data->kfs_all.count(kv.first) > 0) { ... }
+        }
+    }
+}
+```
+
+Only keyframes present in `kfs_all` are registered in `frame_poses`; non-keyframe navigation states are discarded after the IMU-state reduction.
+
+---
+
+**Stage 2: IMU State Reduction** (`processMargData`, `nfr_mapper.cpp:82`)
+
+For each entry in `m.aom`:
+- **Pure pose states** (`POSE_SIZE = 6`): all 6 columns added to `idx_to_keep`.
+- **Full navigation states** (`POSE_VEL_BIAS_SIZE = 15`) that are keyframes: the 6 pose columns added to `idx_to_keep`, the 9 velocity/bias columns added to `idx_to_marg`. A `PoseStateWithLin` is constructed and moved to `m.frame_poses`.
+- **Full navigation states** that are not keyframes: all 15 columns added to `idx_to_marg` and the state is erased.
+
+If `idx_to_marg` is non-empty, `MargHelper::marginalizeHelperSqToSq` applies the Schur complement to yield a pose-only `marg_H_new` and `marg_b_new`. These replace `m.abs_H` and `m.abs_b`. Image data from `m.opt_flow_res` is saved into `img_data` keyed by timestamp.
+
+---
+
+**Stage 3: Non-Linear Factor Extraction** (`extractNonlinearFactors`, `nfr_mapper.cpp:151`)
+
+1. Rank-check `m.abs_H`; return `false` if rank-deficient.
+2. Invert to obtain full marginal covariance `cov_old`.
+3. Identify the marginalised keyframe `kf_id = *m.kfs_to_marg.cbegin()` and its pose `T_w_i_kf`. Please note that we currently assume that only one keyframe may be marginalised at a time.
+4. Compute Jacobians for absolute position, yaw, and roll-pitch at `T_w_i_kf`; assemble full $6 \times n$ Jacobian; propagate `cov_new = J * cov_old * J^T`; extract $2 \times 2$ roll-pitch block; store as `RollPitchFactor` in `roll_pitch_factors` (only if `use_imu`).
+5. For each other keyframe `other_id` in `m.kfs_all`: compute relative pose `T_kf_o`; compute Jacobians `d_res_d_T_w_i` and `d_res_d_T_w_j`; assemble $6 \times n$ Jacobian; propagate `cov_new = J * cov_old * J^T`; invert via LDLT; store as `RelPoseFactor` in `rel_pose_factors`.
+
+---
+
+**Stage 4: Feature Detection** (`detect_keypoints`, `nfr_mapper.cpp:455`)
+
+Collects all timestamps present in both `img_data` and `frame_poses`, then dispatches a TBB parallel-for over them. Each thread processes one `TimeCamId`: detects keypoints, computes descriptors, unprojects corners, computes BoW vector, and inserts into `hash_bow_database`. Results are stored in `feature_corners`.
+
+---
+
+**Stage 5: Feature Matching** (`match_stereo` + `match_all`, `nfr_mapper.cpp:513,555`)
+
+`match_stereo`: Iterates over all timestamps, matches left and right camera keypoints using the stereo essential matrix. Stereo matches with $\geq 16$ inliers are stored in `feature_matches[{tcid_left, tcid_right}]`.
+
+`match_all`:
+1. Build index from `TimeCamId` to position in a flat `keys` vector.
+2. Parallel BoW query: each frame queries `hash_bow_database` for `mapper_num_frames_to_match` similar frames; candidate pairs exceeding the score threshold are pushed into a concurrent `ids_to_match` vector.
+3. Parallel geometric verification: for each candidate pair, run descriptor matching and `findInliersRansac`; pairs with inliers are stored in `feature_matches`.
+
+---
+
+**Stage 6: Track Building and Triangulation** (`build_tracks` + `setup_opt`, `nfr_mapper.cpp:671,697`)
+
+`build_tracks`: Runs `TrackBuilder::Build`, `Filter`, and `Export` to produce `feature_tracks`.
+
+`setup_opt`: Iterates over `feature_tracks`. For each track with $\geq 2$ observations, takes the first as host. Iterates over remaining observations; the first one with sufficient baseline is used to triangulate. A valid landmark (finite, positive, inverse-depth $\leq 2$) is added to `lmdb` with all track observations registered as `KeypointObservation`.
+
+---
+
+**Stage 7: Global Optimisation and Filtering** (`optimize` + `filterOutliers`, `nfr_mapper.cpp:244`)
+
+1. Build `AbsOrderMap aom` over all entries in `frame_poses`, assigning consecutive 6-column blocks.
+2. For each iteration:
+   a. `linearizeHelper` produces `rld_vec` — the relative linearisation data for the visual cost.
+   b. A `MapperLinearizeAbsReduce<SparseHashAccumulator<double>> lopt(aom, &frame_poses)` is constructed and reduced in parallel over `rld_vec` (vision), `roll_pitch_factors`, and `rel_pose_factors`.
+   c. `lopt.accum.setup_solver()` factorises the sparse Hessian.
+   d. LM or GN solve yields the pose increment vector `inc`.
+   e. Poses updated via `kv.second.applyInc(-inc.segment<POSE_SIZE>(idx))`.
+   f. Landmarks updated via parallel `updatePoints`.
+   g. If LM: evaluate new error; accept or reject step; adjust `lambda`.
+   h. Break on convergence (`max_inc < 1e-5`).
+3. After first optimisation pass: `filterOutliers(outlier_threshold, 4)` removes landmarks with excessive reprojection error.
+4. A second `optimize` pass refines the cleaned map.
+
+### 4b. Key Classes and Interface
 
 The following table provides a complete reference to all classes involved in the mapping pipeline.
 
@@ -461,6 +558,7 @@ The following table provides a complete reference to all classes involved in the
 
 | Method | Description |
 |---|---|
+| `linearizeHelper(...)` | Non-static entry point called by `NfrMapper::optimize`; dispatches to `linearizeHelperStatic` over `rld_vec` via TBB `parallel_for` |
 | `linearizeHelperStatic(...)` | Linearises all visual observations in parallel, producing a vector of `RelLinData` |
 | `linearizeRel(rld, H, b)` | Performs the Schur complement on a single `RelLinData` to eliminate landmarks, yielding a dense pose-pose H and b |
 | `linearizeAbs(rel_H, rel_b, rld, aom, accum)` | Scatters the dense pose-pose H/b block into the global sparse accumulator using `AbsOrderMap` indices |
@@ -493,6 +591,7 @@ The following table provides a complete reference to all classes involved in the
 | `triangulate(f0, f1, T_0_1)` | DLT triangulation returning a homogeneous 4-vector `(direction, inv_dist)` |
 | `get_current_points(points, ids)` | Extracts 3D world-frame landmark positions from `lmdb` |
 | `computeDelta(marg_order, delta)` | Computes the state increment from the stored linearisation points |
+| `applyInc(inc)` | Applies a 6-DOF $SE(3)$ perturbation (via exponential map) to the pose stored in `PoseStateWithLin`; called per-keyframe after each accepted solver step |
 
 ---
 
@@ -605,102 +704,237 @@ The following table provides a complete reference to all classes involved in the
 
 ---
 
-### 4b. Execution Flow & Pipeline
+**15. `TrackBuilder`**
+- **Header:** `include/basalt/utils/tracks.h`
+- **Purpose:** Union-Find (disjoint-set) based data structure that fuses pairwise feature correspondences from `feature_matches` into multi-frame tracks stored in `feature_tracks`.
+- **Key Methods:**
 
-The full mapping pipeline proceeds in seven sequential stages. In the current offline implementation these are driven by `src/mapper.cpp`; the equivalent calls for real-time integration are noted where relevant.
-
----
-
-**Stage 1: Data Ingestion**
-
-`src/mapper.cpp:182–184`
-```cpp
-for (auto& kv : marg_data) {
-    nrf_mapper->addMargData(kv.second);
-}
-```
-
-`NfrMapper::addMargData` (`nfr_mapper.cpp:60`) is the entry point for each `MargData` packet:
-
-```cpp
-void NfrMapper::addMargData(MargData::Ptr& data) {
-    processMargData(*data);
-    bool valid = extractNonlinearFactors(*data);
-
-    if (valid) {
-        // register pose-only keyframes into frame_poses
-        for (const auto& kv : data->frame_poses) { ... }
-        for (const auto& kv : data->frame_states) {
-            if (data->kfs_all.count(kv.first) > 0) { ... }
-        }
-    }
-}
-```
-
-Only keyframes present in `kfs_all` are registered in `frame_poses`; non-keyframe navigation states are discarded after the IMU-state reduction.
+| Method | Description |
+|---|---|
+| `Build(feature_matches)` | Iterates over all pairwise matches and merges connected observations into disjoint sets |
+| `Filter(min_track_length)` | Removes tracks shorter than `mapper_min_track_length` and tracks with conflicting observations (same feature appearing twice in one frame) |
+| `Export(feature_tracks)` | Writes surviving tracks as `std::map<TrackId, std::map<TimeCamId, FeatureId>>` into `NfrMapper::feature_tracks` |
 
 ---
 
-**Stage 2: IMU State Reduction** (`processMargData`, `nfr_mapper.cpp:82`)
+**16. Standalone Feature Processing Functions**
+- **Header/Source:** `src/vi_estimator/nfr_mapper.cpp` (static free functions called inside `detect_keypoints`, `match_stereo`, `match_all`)
+- **Purpose:** Low-level building blocks for keypoint detection, orientation estimation, descriptor extraction, and cross-frame matching used by the mapper's feature front-end.
 
-For each entry in `m.aom`:
-- **Pure pose states** (`POSE_SIZE = 6`): all 6 columns added to `idx_to_keep`.
-- **Full navigation states** (`POSE_VEL_BIAS_SIZE = 15`) that are keyframes: the 6 pose columns added to `idx_to_keep`, the 9 velocity/bias columns added to `idx_to_marg`. A `PoseStateWithLin` is constructed and moved to `m.frame_poses`.
-- **Full navigation states** that are not keyframes: all 15 columns added to `idx_to_marg` and the state is erased.
-
-If `idx_to_marg` is non-empty, `MargHelper::marginalizeHelperSqToSq` applies the Schur complement to yield a pose-only `marg_H_new` and `marg_b_new`. These replace `m.abs_H` and `m.abs_b`. Image data from `m.opt_flow_res` is saved into `img_data` keyed by timestamp.
-
----
-
-**Stage 3: Non-Linear Factor Extraction** (`extractNonlinearFactors`, `nfr_mapper.cpp:151`)
-
-1. Rank-check `m.abs_H`; return `false` if rank-deficient.
-2. Invert to obtain full marginal covariance `cov_old`.
-3. Identify the marginalised keyframe `kf_id = *m.kfs_to_marg.cbegin()` and its pose `T_w_i_kf`.
-4. Compute Jacobians for absolute position, yaw, and roll-pitch at `T_w_i_kf`; assemble full $6 \times n$ Jacobian; propagate `cov_new = J * cov_old * J^T`; extract $2 \times 2$ roll-pitch block; store as `RollPitchFactor` in `roll_pitch_factors` (only if `use_imu`).
-5. For each other keyframe `other_id` in `m.kfs_all`: compute relative pose `T_kf_o`; compute Jacobians `d_res_d_T_w_i` and `d_res_d_T_w_j`; assemble $6 \times n$ Jacobian; propagate `cov_new = J * cov_old * J^T`; invert via LDLT; store as `RelPoseFactor` in `rel_pose_factors`.
+| Function | Description |
+|---|---|
+| `detectKeypointsMapping(img, num_points)` | Extracts up to `mapper_detection_num_points` FAST/Harris corners from a single image |
+| `computeAngles(img, corners)` | Estimates the dominant orientation (angle) for each detected corner, needed for rotation-invariant ORB descriptors |
+| `computeDescriptors(img, corners)` | Computes binary (ORB-style) descriptors for each oriented corner |
+| `computeEssential(T_0_1)` | Derives the essential matrix $\mathbf{E}$ from a known relative pose $\mathbf{T}_{0,1}$ for stereo geometric verification |
+| `matchDescriptors(desc0, desc1, max_dist, ratio)` | Brute-force Hamming-distance descriptor matching with distance threshold and second-best ratio test |
+| `findInliersEssential(kd0, kd1, E, tol)` | Marks matches as inliers if the epipolar constraint $\mathbf{x}_1^T \mathbf{E} \mathbf{x}_0 < \text{tol}$ is satisfied |
+| `findInliersRansac(kd0, kd1, threshold, min_inliers)` | RANSAC-based fundamental-matrix estimation to geometrically verify cross-frame matches; rejects pairs below `mapper_min_matches` inliers |
 
 ---
 
-**Stage 4: Feature Detection** (`detect_keypoints`, `nfr_mapper.cpp:455`)
+**17. `SparseHashAccumulator<Scalar>`**
+- **Header:** `include/basalt/optimization/accumulator.h`
+- **Purpose:** A sparse hash-map based symmetric matrix accumulator used during linearisation. Accumulates $\mathbf{J}^T \boldsymbol{\Omega} \mathbf{J}$ and $\mathbf{J}^T \boldsymbol{\Omega} \mathbf{r}$ contributions from individual factors into a global pose-only Hessian $\mathbf{H}$ and gradient $\mathbf{b}$, using hash-indexed blocks to avoid materialising a dense matrix.
+- **Key Methods:**
 
-Collects all timestamps present in both `img_data` and `frame_poses`, then dispatches a TBB parallel-for over them. Each thread processes one `TimeCamId`: detects keypoints, computes descriptors, unprojects corners, computes BoW vector, and inserts into `hash_bow_database`. Results are stored in `feature_corners`.
-
----
-
-**Stage 5: Feature Matching** (`match_stereo` + `match_all`, `nfr_mapper.cpp:513,555`)
-
-`match_stereo`: Iterates over all timestamps, matches left and right camera keypoints using the stereo essential matrix. Stereo matches with $\geq 16$ inliers are stored in `feature_matches[{tcid_left, tcid_right}]`.
-
-`match_all`:
-1. Build index from `TimeCamId` to position in a flat `keys` vector.
-2. Parallel BoW query: each frame queries `hash_bow_database` for `mapper_num_frames_to_match` similar frames; candidate pairs exceeding the score threshold are pushed into a concurrent `ids_to_match` vector.
-3. Parallel geometric verification: for each candidate pair, run descriptor matching and `findInliersRansac`; pairs with inliers are stored in `feature_matches`.
+| Method | Description |
+|---|---|
+| `setup_solver()` | Converts the accumulated sparse hash entries into a factorisable sparse linear system (e.g., Cholesky or LDLT); must be called before `solve()` |
+| `solve(b)` | Solves $\mathbf{H} \boldsymbol{\xi} = \mathbf{b}$ for the pose increment vector using the factorisation produced by `setup_solver` |
 
 ---
 
-**Stage 6: Track Building and Triangulation** (`build_tracks` + `setup_opt`, `nfr_mapper.cpp:671,697`)
+**18. `StereographicParam<Scalar>`**
+- **Header:** `thirdparty/basalt-headers/include/basalt/camera/stereographic_param.hpp`
+- **Purpose:** Implements the stereographic projection used to represent unit-sphere bearing directions as a minimal 2-vector $(u, v)$. This singularity-free parameterisation underpins the landmark direction storage in `Keypoint`.
+- **Key Methods:**
 
-`build_tracks`: Runs `TrackBuilder::Build`, `Filter`, and `Export` to produce `feature_tracks`.
-
-`setup_opt`: Iterates over `feature_tracks`. For each track with $\geq 2$ observations, takes the first as host. Iterates over remaining observations; the first one with sufficient baseline is used to triangulate. A valid landmark (finite, positive, inverse-depth $\leq 2$) is added to `lmdb` with all track observations registered as `KeypointObservation`.
+| Method | Description |
+|---|---|
+| `project(bearing_3d)` | Maps a homogeneous 4-vector (or 3D unit ray) from the host camera onto the 2D stereographic plane, returning $(u, v)$ |
+| `unproject(u, v)` | Lifts a 2D stereographic point back to a unit-sphere 3D bearing vector |
 
 ---
 
-**Stage 7: Global Optimisation and Filtering** (`optimize` + `filterOutliers`, `nfr_mapper.cpp:244`)
+**19. `TimeCamId`**
+- **Header:** `include/basalt/utils/common_types.h`
+- **Purpose:** A composite key type representing a unique `(frame_id, cam_id)` pair. Used as the primary index into `feature_corners`, `feature_matches`, and `LandmarkDatabase` observations.
 
-1. Build `AbsOrderMap aom` over all entries in `frame_poses`, assigning consecutive 6-column blocks.
-2. For each iteration:
-   a. `linearizeHelper` produces `rld_vec` — the relative linearisation data for the visual cost.
-   b. A `MapperLinearizeAbsReduce<SparseHashAccumulator<double>> lopt(aom, &frame_poses)` is constructed and reduced in parallel over `rld_vec` (vision), `roll_pitch_factors`, and `rel_pose_factors`.
-   c. `lopt.accum.setup_solver()` factorises the sparse Hessian.
-   d. LM or GN solve yields the pose increment vector `inc`.
-   e. Poses updated via `kv.second.applyInc(-inc.segment<POSE_SIZE>(idx))`.
-   f. Landmarks updated via parallel `updatePoints`.
-   g. If LM: evaluate new error; accept or reject step; adjust `lambda`.
-   h. Break on convergence (`max_inc < 1e-5`).
-3. After first optimisation pass: `filterOutliers(outlier_threshold, 4)` removes landmarks with excessive reprojection error.
-4. A second `optimize` pass refines the cleaned map.
+| Field | Type | Description |
+|---|---|---|
+| `frame_id` | `int64_t` | Timestamp (nanoseconds) identifying the keyframe |
+| `cam_id` | `int` | Camera index within the multi-camera rig (0 = left, 1 = right) |
+
+---
+
+**20. `KeypointsData`**
+- **Header:** `include/basalt/utils/common_types.h`
+- **Purpose:** Container for all keypoints and their associated data for a single `(frame, camera)` image. Stored in `NfrMapper::feature_corners` keyed by `TimeCamId`.
+
+| Field | Type | Description |
+|---|---|---|
+| `corners` | `std::vector<Eigen::Vector2d>` | Pixel coordinates of detected keypoints |
+| `corner_angles` | `std::vector<double>` | Dominant orientations for each corner (set by `computeAngles`) |
+| `corner_descriptors` | `std::vector<std::bitset<256>>` | Binary descriptors for each corner (set by `computeDescriptors`) |
+| `bow_vector` | `HashBow<256>::BowVector` | Bag-of-Words encoding of the descriptor set |
+| `pyramid` | image pyramid | Multi-scale image pyramid used during descriptor computation |
+
+---
+
+**21. `OpticalFlowInput` / `OpticalFlowResult`**
+- **Header:** `include/basalt/optical_flow/optical_flow.h`
+- **Purpose:** Data exchange types between the optical-flow front-end and the VIO/mapper back-end.
+  - `OpticalFlowInput` carries raw image frames (timestamps + per-camera images). Stored in `NfrMapper::img_data` keyed by timestamp.
+  - `OpticalFlowResult` carries tracked feature observations from the optical-flow thread, embedded inside `MargData::opt_flow_res`. The mapper unpacks these in `processMargData` to populate `img_data`.
+
+---
+
+**22. `PoseStateWithLin<Scalar>`**
+- **Header:** `include/basalt/utils/imu_types.h`
+- **Purpose:** Wraps a single 6-DOF keyframe pose $\mathbf{T}_{w,i} \in SE(3)$ together with its **linearisation point** $\mathbf{T}_0$. The linearisation point allows the optimiser to track the state at the start of each iteration and compute increments in the tangent space. Used in `BundleAdjustmentBase::frame_poses` and `MargData::frame_poses`.
+- **Key Method:** `applyInc(xi)` — applies a 6-DOF tangent-space increment $\boldsymbol{\xi}$ via the exponential map to update the current pose.
+
+---
+
+**23. `PoseVelBiasStateWithLin<Scalar>`**
+- **Header:** `include/basalt/utils/imu_types.h`
+- **Purpose:** Extends `PoseStateWithLin` with IMU velocity and accelerometer/gyroscope bias estimates, forming a full 15-DOF navigation state. Used in `BundleAdjustmentBase::frame_states` and `MargData::frame_states` for frames that are still actively tracked by the IMU integrator.
+
+---
+
+**24. `Calibration<Scalar>`**
+- **Header:** `thirdparty/basalt-headers/include/basalt/calibration/calibration.hpp`
+- **Purpose:** Holds the complete sensor calibration for the multi-camera (+ IMU) rig: per-camera intrinsic models, camera-to-IMU extrinsic transforms, and time-offset parameters. Accessed via `BundleAdjustmentBase::calib`. The intrinsic model provides `unproject` and `project` methods used during feature unprojection and reprojection error computation.
+- **Key Field:** `intrinsics[cam_id]` — per-camera intrinsic model with `project(bearing)` and `unproject(pixel)` methods.
+
+---
+
+**25. Configuration Parameters (`VioConfig` — `mapper_*` fields)**
+- **Header:** `include/basalt/utils/vio_config.h`
+- **Purpose:** All mapper tuning parameters are grouped in the `VioConfig` struct and accessed via `NfrMapper::config`. The table below lists every `mapper_*` field referenced in this document.
+
+| Parameter | Default context | Description |
+|---|---|---|
+| `mapper_detection_num_points` | Feature detection | Maximum number of FAST/Harris corners to detect per image frame |
+| `mapper_max_hamming_distance` | Stereo + cross-frame matching | Maximum Hamming distance for a descriptor match to be accepted |
+| `mapper_second_best_test_ratio` | Stereo + cross-frame matching | Ratio-test threshold: a match is accepted only if `best_dist / second_best_dist < ratio` |
+| `mapper_num_frames_to_match` | BoW retrieval (`match_all`) | Number of nearest-neighbour frames to retrieve from the BoW database per query |
+| `mapper_frames_to_match_threshold` | BoW retrieval (`match_all`) | Minimum BoW similarity score; pairs below this threshold are discarded before descriptor matching |
+| `mapper_ransac_threshold` | Geometric verification (`match_all`) | RANSAC inlier threshold (pixels) for fundamental-matrix estimation |
+| `mapper_min_matches` | Geometric verification (`match_all`) | Minimum number of RANSAC inliers required to retain a frame pair |
+| `mapper_min_track_length` | Track filtering (`build_tracks`) | Minimum number of frames a track must span to be kept |
+| `mapper_min_triangulation_dist` | Triangulation (`setup_opt`) | Minimum baseline distance $d_{\min}$ between host and observation frame for DLT triangulation |
+| `mapper_obs_std_dev` | BA cost function | Standard deviation $\sigma$ of visual observations; scales the reprojection cost |
+| `mapper_obs_huber_thresh` | BA cost function | Huber loss threshold; observations with error above this are down-weighted |
+| `mapper_use_lm` | Optimiser | If true, use Levenberg–Marquardt; if false, use Gauss-Newton |
+| `mapper_use_factors` | Optimiser | If true, include NFR relative-pose and roll-pitch factors in the BA cost |
+| `mapper_lm_lambda_min` | LM damping | Lower bound on the LM damping parameter $\lambda$ |
+| `mapper_lm_lambda_max` | LM damping | Upper bound on the LM damping parameter $\lambda$ |
+| `mapper_no_factor_weights` | NFR factor recovery | If true, recovered NFR factors are not weighted by their information matrix |
+
+---
+
+**26. `FeatureId`, `FrameId`, `CamId`**
+- **Header:** `include/basalt/utils/common_types.h`
+- **Definition:**
+  ```cpp
+  using FeatureId = int;          // index of a 2D feature within a single image
+  using FrameId   = int64_t;      // nanosecond timestamp identifying a frame
+  using CamId     = std::size_t;  // camera index within the multi-camera rig
+  ```
+- **Purpose:** Fundamental scalar aliases used throughout the feature pipeline. `FeatureId` indexes into `KeypointsData::corners` for a specific image. `FrameId` is the primary key for all per-frame maps. `CamId` selects the camera (0 = left, 1 = right in a stereo rig).
+
+---
+
+**27. `MatchData`**
+- **Header:** `include/basalt/utils/common_types.h`
+- **Definition:** struct
+- **Purpose:** Stores all feature correspondences and the recovered relative pose for a single image pair `(i, j)`. Produced by `match_stereo` and `match_all`; consumed by `build_tracks`.
+
+| Field | Type | Description |
+|---|---|---|
+| `T_i_j` | `Sophus::SE3d` | Estimated transformation from camera `j` to camera `i` (either from stereo calibration or RANSAC homography) |
+| `matches` | `std::vector<std::pair<FeatureId, FeatureId>>` | All accepted descriptor matches `(featureId_i, featureId_j)` |
+| `inliers` | `std::vector<std::pair<FeatureId, FeatureId>>` | Geometrically verified inlier subset of `matches` |
+
+---
+
+**28. `Matches`**
+- **Header:** `include/basalt/utils/common_types.h`
+- **Definition:**
+  ```cpp
+  using Matches = tbb::concurrent_unordered_map<
+      std::pair<TimeCamId, TimeCamId>, MatchData,
+      std::hash<std::pair<TimeCamId, TimeCamId>>, ...>;
+  ```
+- **Purpose:** Thread-safe map from an image pair `(TimeCamId_i, TimeCamId_j)` to the corresponding `MatchData`. Populated concurrently by `match_stereo` and `match_all`; read sequentially by `build_tracks`. Stored in `NfrMapper::feature_matches`.
+
+---
+
+**29. `Corners`**
+- **Header:** `include/basalt/utils/common_types.h`
+- **Definition:**
+  ```cpp
+  using Corners = tbb::concurrent_unordered_map<TimeCamId, KeypointsData,
+                                                std::hash<TimeCamId>>;
+  ```
+- **Purpose:** Thread-safe map from a `(frame, camera)` id to all keypoints and descriptors detected in that image. Populated concurrently by `detect_keypoints`; read by `match_stereo`, `match_all`, and `setup_opt`. Stored in `NfrMapper::feature_corners`.
+
+---
+
+**30. `ImageFeaturePair`**
+- **Header:** `include/basalt/utils/common_types.h`
+- **Definition:**
+  ```cpp
+  using ImageFeaturePair = std::pair<TimeCamId, FeatureId>;
+  ```
+- **Purpose:** Uniquely identifies a single 2D feature observation: which image (`TimeCamId`) and which index within that image (`FeatureId`). Used internally by `TrackBuilder` as the node type in the Union-Find structure.
+
+---
+
+**31. `FeatureTrack`, `TrackId`, `FeatureTracks`**
+- **Header:** `include/basalt/utils/common_types.h`
+- **Definition:**
+  ```cpp
+  using FeatureTrack  = std::map<TimeCamId, FeatureId>;
+  using TrackId       = int64_t;
+  using FeatureTracks = std::unordered_map<TrackId, FeatureTrack>;
+  ```
+- **Purpose:**
+  - `FeatureTrack`: A single multi-frame landmark track — maps each image in which the landmark was observed to the local `FeatureId` within that image.
+  - `TrackId`: Integer identifier for a track; also serves as the `KeypointId` / `LandmarkId` used as the key in `LandmarkDatabase`.
+  - `FeatureTracks`: The complete collection of all tracks output by `TrackBuilder::Export`; stored in `NfrMapper::feature_tracks` and consumed by `setup_opt` to triangulate landmarks.
+
+---
+
+**32. `KeypointObservation<Scalar>`**
+- **Header:** `include/basalt/vi_estimator/landmark_database.h`
+- **Definition:** struct template
+- **Purpose:** Represents a single 2D measurement of a landmark in one image. Used as the value type stored in `Keypoint::obs` and passed to `LandmarkDatabase::addObservation`.
+
+| Field | Type | Description |
+|---|---|---|
+| `kpt_id` | `int` | Local `FeatureId` of this observation within its image |
+| `pos` | `Eigen::Matrix<Scalar, 2, 1>` | 2D pixel coordinates (or normalised bearing in stereographic space) of the observation |
+
+---
+
+**33. `Keypoint<Scalar>`**
+- **Header:** `include/basalt/vi_estimator/landmark_database.h`
+- **Definition:** struct template
+- **Purpose:** Stores a single 3D landmark in the map. The landmark is parameterised relative to a **host keyframe** using a stereographic bearing direction and inverse depth — a minimal, singularity-free representation that avoids Euclidean infinity. Stored in `LandmarkDatabase` keyed by `TrackId`.
+
+| Field | Type | Description |
+|---|---|---|
+| `host_kf_id` | `TimeCamId` | The `(frame, camera)` in which this landmark was first observed and relative to which `direction` / `inv_dist` are defined |
+| `direction` | `Eigen::Matrix<Scalar, 2, 1>` | 2D stereographic projection of the unit bearing vector from the host camera to the landmark |
+| `inv_dist` | `Scalar` | Inverse depth along the bearing ray from the host camera |
+| `obs` | `Eigen::aligned_map<TimeCamId, Eigen::Matrix<Scalar,2,1>>` | All subsequent observations of this landmark, keyed by `(frame, camera)` |
+
+- **Key Methods:** `backup()` / `restore()` — saves and restores `direction` and `inv_dist` during LM trial steps.
+
+---
 
 ---
 

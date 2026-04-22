@@ -33,39 +33,41 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include <basalt/vi_estimator/marg_helper.h>
-#include <basalt/vi_estimator/sqrt_keypoint_vio.h>
-
 #include <basalt/optimization/accumulator.h>
 #include <basalt/utils/assert.h>
-#include <basalt/utils/cast_utils.hpp>
-#include <basalt/utils/format.hpp>
 #include <basalt/utils/system_utils.h>
-#include <basalt/utils/time_utils.hpp>
+#include <basalt/vi_estimator/marg_helper.h>
 #include <basalt/vi_estimator/sc_ba_base.h>
-
-#include <basalt/linearization/linearization_base.hpp>
-
+#include <basalt/vi_estimator/sqrt_keypoint_vio.h>
 #include <fmt/format.h>
-
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_reduce.h>
 
-#include "basalt/imu/imu_types.h"
+#include <basalt/linearization/linearization_base.hpp>
+#include <basalt/utils/cast_utils.hpp>
+#include <basalt/utils/format.hpp>
+#include <basalt/utils/time_utils.hpp>
 #include <chrono>
+
+#include "basalt/imu/imu_types.h"
 
 namespace basalt {
 
 template <class Scalar_>
 SqrtKeypointVioEstimator<Scalar_>::SqrtKeypointVioEstimator(
-    const Eigen::Vector3d &g_, const basalt::Calibration<double> &calib_,
-    const VioConfig &config_, bool useProducerConsumerArchitecture)
-    : VioEstimatorBase<Scalar_>(), take_kf(true), frames_after_kf(0),
-      g(g_.cast<Scalar>()), initialized(false), config(config_),
+    const Eigen::Vector3d& g_, const basalt::Calibration<double>& calib_,
+    const VioConfig& config_, bool useProducerConsumerArchitecture)
+    : VioEstimatorBase<Scalar_>(),
+      take_kf(true),
+      frames_after_kf(0),
+      g(g_.cast<Scalar>()),
+      initialized(false),
+      config(config_),
       lambda(config_.vio_lm_lambda_initial),
       min_lambda(config_.vio_lm_lambda_min),
-      max_lambda(config_.vio_lm_lambda_max), lambda_vee(2),
+      max_lambda(config_.vio_lm_lambda_max),
+      lambda_vee(2),
       mpUseProducerConsumerArchitecture(useProducerConsumerArchitecture) {
     obs_std_dev = Scalar(config.vio_obs_std_dev);
     huber_thresh = Scalar(config.vio_obs_huber_thresh);
@@ -124,8 +126,8 @@ SqrtKeypointVioEstimator<Scalar_>::SqrtKeypointVioEstimator(
 
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::initialize(
-    int64_t t_ns, const Sophus::SE3d &T_w_i, const Eigen::Vector3d &vel_w_i,
-    const Eigen::Vector3d &bg, const Eigen::Vector3d &ba) {
+    int64_t t_ns, const Sophus::SE3d& T_w_i, const Eigen::Vector3d& vel_w_i,
+    const Eigen::Vector3d& bg, const Eigen::Vector3d& ba) {
     initialized = true;
     T_w_i_init = T_w_i.cast<Scalar>();
 
@@ -146,8 +148,8 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(
 }
 
 template <class Scalar_>
-void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d &bg_,
-                                                   const Eigen::Vector3d &ba_) {
+void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
+                                                   const Eigen::Vector3d& ba_) {
     Vec3 bg_init = bg_.cast<Scalar>();
     Vec3 ba_init = ba_.cast<Scalar>();
     this->mpBg = bg_init;
@@ -185,12 +187,9 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d &bg_,
                 }
             }
 
-            if (this->out_vis_queue)
-                this->out_vis_queue->push(nullptr);
-            if (this->out_marg_queue)
-                this->out_marg_queue->push(nullptr);
-            if (this->out_state_queue)
-                this->out_state_queue->push(nullptr);
+            if (this->out_vis_queue) this->out_vis_queue->push(nullptr);
+            if (this->out_marg_queue) this->out_marg_queue->push(nullptr);
+            if (this->out_state_queue) this->out_state_queue->push(nullptr);
 
             this->finished = true;
 
@@ -208,7 +207,7 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d &bg_,
 template <class Scalar>
 typename PoseVelBiasState<Scalar>::Ptr
 SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
-    OpticalFlowResult::Ptr &curr_frame) {
+    OpticalFlowResult::Ptr& curr_frame) {
     if (!curr_frame.get()) {
         return nullptr;
     }
@@ -228,8 +227,7 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
     if (!initialized) {
         while (imuData->t_ns < curr_frame->t_ns) {
             imuData = popFromImuDataQueue();
-            if (!imuData)
-                break;
+            if (!imuData) break;
             imuData->accel =
                 this->calib.calib_accel_bias.getCalibrated(imuData->accel);
             imuData->gyro =
@@ -280,8 +278,7 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
 
         while (imuData->t_ns <= this->prev_frame->t_ns) {
             imuData = popFromImuDataQueue();
-            if (!imuData)
-                return nullptr;
+            if (!imuData) return nullptr;
             imuData->accel =
                 this->calib.calib_accel_bias.getCalibrated(imuData->accel);
             imuData->gyro =
@@ -291,8 +288,7 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
         while (imuData->t_ns <= curr_frame->t_ns) {
             meas->integrate(*imuData, this->mpAccelCov, this->mpGyroCov);
             imuData = popFromImuDataQueue();
-            if (!imuData)
-                return nullptr;
+            if (!imuData) return nullptr;
             imuData->accel =
                 this->calib.calib_accel_bias.getCalibrated(imuData->accel);
             imuData->gyro =
@@ -300,8 +296,7 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
         }
 
         if (meas->get_start_t_ns() + meas->get_dt_ns() < curr_frame->t_ns) {
-            if (!imuData.get())
-                return nullptr;
+            if (!imuData.get()) return nullptr;
             int64_t tmp = imuData->t_ns;
             imuData->t_ns = curr_frame->t_ns;
             meas->integrate(*imuData, this->mpAccelCov, this->mpGyroCov);
@@ -317,13 +312,13 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
 
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::addIMUToQueue(
-    const ImuData<double>::Ptr &data) {
+    const ImuData<double>::Ptr& data) {
     this->imu_data_queue.emplace(data);
 }
 
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::addVisionToQueue(
-    const OpticalFlowResult::Ptr &data) {
+    const OpticalFlowResult::Ptr& data) {
     this->vision_data_queue.push(data);
 }
 
@@ -348,8 +343,8 @@ SqrtKeypointVioEstimator<Scalar_>::popFromImuDataQueue() {
 template <class Scalar_>
 typename PoseVelBiasState<Scalar_>::Ptr
 SqrtKeypointVioEstimator<Scalar_>::measure(
-    const OpticalFlowResult::Ptr &opt_flow_meas,
-    const typename IntegratedImuMeasurement<Scalar>::Ptr &meas) {
+    const OpticalFlowResult::Ptr& opt_flow_meas,
+    const typename IntegratedImuMeasurement<Scalar>::Ptr& meas) {
     stats_sums_.add("frame_id", opt_flow_meas->t_ns).format("none");
     Timer t_total;
 
@@ -385,11 +380,11 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
     for (size_t i = 0; i < opt_flow_meas->observations.size(); i++) {
         TimeCamId tcid_target(opt_flow_meas->t_ns, i);
 
-        for (const auto &kv_obs : opt_flow_meas->observations[i]) {
+        for (const auto& kv_obs : opt_flow_meas->observations[i]) {
             int kpt_id = kv_obs.first;
 
             if (lmdb.landmarkExists(kpt_id)) {
-                const TimeCamId &tcid_host =
+                const TimeCamId& tcid_host =
                     lmdb.getLandmark(kpt_id).host_kf_id;
 
                 KeypointObservation<Scalar> kobs;
@@ -404,8 +399,7 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
                 }
                 num_points_connected[tcid_host.frame_id]++;
 
-                if (i == 0)
-                    connected0++;
+                if (i == 0) connected0++;
             } else {
                 if (i == 0) {
                     unconnected_obs0.emplace(kpt_id);
@@ -438,7 +432,7 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
             // Find all observations
             std::map<TimeCamId, KeypointObservation<Scalar>> kp_obs;
 
-            for (const auto &kv : prev_opt_flow_res) {
+            for (const auto& kv : prev_opt_flow_res) {
                 for (size_t k = 0; k < kv.second->observations.size(); k++) {
                     auto it = kv.second->observations[k].find(lm_id);
                     if (it != kv.second->observations[k].end()) {
@@ -460,9 +454,8 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
             const Scalar min_triang_distance2 =
                 Scalar(config.vio_min_triangulation_dist *
                        config.vio_min_triangulation_dist);
-            for (const auto &kv_obs : kp_obs) {
-                if (valid_kp)
-                    break;
+            for (const auto& kv_obs : kp_obs) {
+                if (valid_kp) break;
                 TimeCamId tcido = kv_obs.first;
 
                 const Vec2 p0 = opt_flow_meas->observations.at(0)
@@ -479,8 +472,7 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
                 bool valid1 = this->calib.intrinsics[0].unproject(p0, p0_3d);
                 bool valid2 =
                     this->calib.intrinsics[tcido.cam_id].unproject(p1, p1_3d);
-                if (!valid1 || !valid2)
-                    continue;
+                if (!valid1 || !valid2) continue;
 
                 SE3 T_i0_i1 =
                     getPoseStateWithLin(tcidl.frame_id).getPose().inverse() *
@@ -509,7 +501,7 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
             }
 
             if (valid_kp) {
-                for (const auto &kv_obs : kp_obs) {
+                for (const auto& kv_obs : kp_obs) {
                     lmdb.addObservation(kv_obs.first, kv_obs.second);
                 }
             }
@@ -522,7 +514,7 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
 
     std::unordered_set<KeypointId> lost_landmaks;
     if (config.vio_marg_lost_landmarks) {
-        for (const auto &kv : lmdb.getLandmarks()) {
+        for (const auto& kv : lmdb.getLandmarks()) {
             bool connected = false;
             for (size_t i = 0; i < opt_flow_meas->observations.size(); i++) {
                 if (opt_flow_meas->observations[i].count(kv.first) > 0)
@@ -539,7 +531,6 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
     PoseVelBiasStateWithLin p = frame_states.at(last_state_t_ns);
 
     if (this->out_state_queue) {
-
         typename PoseVelBiasState<double>::Ptr data(
             new PoseVelBiasState<double>(p.getState().template cast<double>()));
 
@@ -553,12 +544,12 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
 
         BASALT_ASSERT(frame_states.empty());
 
-        for (const auto &kv : frame_states) {
+        for (const auto& kv : frame_states) {
             data->states.emplace_back(
                 kv.second.getState().T_w_i.template cast<double>());
         }
 
-        for (const auto &kv : frame_poses) {
+        for (const auto& kv : frame_poses) {
             data->frames.emplace_back(
                 kv.second.getPose().template cast<double>());
         }
@@ -603,17 +594,16 @@ Eigen::VectorXd SqrtKeypointVioEstimator<Scalar_>::checkMargNullspace() const {
 }
 
 template <class Scalar_>
-Eigen::VectorXd
-SqrtKeypointVioEstimator<Scalar_>::checkMargEigenvalues() const {
+Eigen::VectorXd SqrtKeypointVioEstimator<Scalar_>::checkMargEigenvalues()
+    const {
     return checkEigenvalues(nullspace_marg_data, false);
 }
 
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::marginalize(
-    const std::map<int64_t, int> &num_points_connected,
-    const std::unordered_set<KeypointId> &lost_landmaks) {
-    if (!opt_started)
-        return;
+    const std::map<int64_t, int>& num_points_connected,
+    const std::unordered_set<KeypointId>& lost_landmaks) {
+    if (!opt_started) return;
 
     Timer t_total;
 
@@ -623,20 +613,18 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
         const int states_to_remove = frame_states.size() - max_states + 1;
 
         auto it = frame_states.cbegin();
-        for (int i = 0; i < states_to_remove; i++)
-            it++;
+        for (int i = 0; i < states_to_remove; i++) it++;
         int64_t last_state_to_marg = it->first;
 
         AbsOrderMap aom;
 
         // remove all frame_poses that are not kfs
         std::set<int64_t> poses_to_marg;
-        for (const auto &kv : frame_poses) {
+        for (const auto& kv : frame_poses) {
             aom.abs_order_map[kv.first] =
                 std::make_pair(aom.total_size, POSE_SIZE);
 
-            if (kf_ids.count(kv.first) == 0)
-                poses_to_marg.emplace(kv.first);
+            if (kf_ids.count(kv.first) == 0) poses_to_marg.emplace(kv.first);
 
             // Check that we have the same order as marginalization
             BASALT_ASSERT(marg_data.order.abs_order_map.at(kv.first) ==
@@ -648,9 +636,8 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
 
         std::set<int64_t> states_to_marg_vel_bias;
         std::set<int64_t> states_to_marg_all;
-        for (const auto &kv : frame_states) {
-            if (kv.first > last_state_to_marg)
-                break;
+        for (const auto& kv : frame_states) {
+            if (kv.first > last_state_to_marg) break;
 
             if (kv.first != last_state_to_marg) {
                 if (kf_ids.count(kv.first) > 0) {
@@ -748,6 +735,7 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
 
             kf_ids.erase(id_to_marg);
         }
+        // keyframe selection for marginalisation ends here.
 
         //    std::cout << "marg order" << std::endl;
         //    aom.print_order();
@@ -787,7 +775,7 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
             ImuLinData<Scalar> ild = {
                 g, gyro_bias_sqrt_weight, accel_bias_sqrt_weight, {}};
 
-            for (const auto &kv : imu_meas) {
+            for (const auto& kv : imu_meas) {
                 int64_t start_t = kv.second.get_start_t_ns();
                 int64_t end_t =
                     kv.second.get_start_t_ns() + kv.second.get_dt_ns();
@@ -858,7 +846,7 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
         }
 
         std::set<int> idx_to_keep, idx_to_marg;
-        for (const auto &kv : aom.abs_order_map) {
+        for (const auto& kv : aom.abs_order_map) {
             if (kv.second.second == POSE_SIZE) {
                 int start_idx = kv.second.first;
                 if (poses_to_marg.count(kv.first) == 0) {
@@ -910,7 +898,7 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
             ImuLinData<Scalar> ild = {
                 g, gyro_bias_sqrt_weight, accel_bias_sqrt_weight, {}};
 
-            for (const auto &kv : imu_meas) {
+            for (const auto& kv : imu_meas) {
                 int64_t start_t = kv.second.get_start_t_ns();
                 int64_t end_t =
                     kv.second.get_start_t_ns() + kv.second.get_dt_ns();
@@ -992,7 +980,7 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
         }
 
         for (const int64_t id : states_to_marg_vel_bias) {
-            const PoseVelBiasStateWithLin<Scalar> &state = frame_states.at(id);
+            const PoseVelBiasStateWithLin<Scalar>& state = frame_states.at(id);
             PoseStateWithLin<Scalar> pose(state);
 
             frame_poses[id] = pose;
@@ -1008,13 +996,12 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
         lmdb.removeKeyframes(kfs_to_marg, poses_to_marg, states_to_marg_all);
 
         if (config.vio_marg_lost_landmarks) {
-            for (const auto &lm_id : lost_landmaks)
-                lmdb.removeLandmark(lm_id);
+            for (const auto& lm_id : lost_landmaks) lmdb.removeLandmark(lm_id);
         }
 
         AbsOrderMap marg_order_new;
 
-        for (const auto &kv : frame_poses) {
+        for (const auto& kv : frame_poses) {
             marg_order_new.abs_order_map[kv.first] =
                 std::make_pair(marg_order_new.total_size, POSE_SIZE);
 
@@ -1087,7 +1074,8 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
     stats_sums_.add("marginalize", t_total.elapsed()).format("ms");
 }
 
-template <class Scalar_> void SqrtKeypointVioEstimator<Scalar_>::optimize() {
+template <class Scalar_>
+void SqrtKeypointVioEstimator<Scalar_>::optimize() {
     if (config.vio_debug) {
         std::cout << "=================================" << std::endl;
     }
@@ -1108,7 +1096,7 @@ template <class Scalar_> void SqrtKeypointVioEstimator<Scalar_>::optimize() {
         // timestamp
         AbsOrderMap aom;
 
-        for (const auto &kv : frame_poses) {
+        for (const auto& kv : frame_poses) {
             aom.abs_order_map[kv.first] =
                 std::make_pair(aom.total_size, POSE_SIZE);
 
@@ -1120,7 +1108,7 @@ template <class Scalar_> void SqrtKeypointVioEstimator<Scalar_>::optimize() {
             aom.items++;
         }
 
-        for (const auto &kv : frame_states) {
+        for (const auto& kv : frame_states) {
             aom.abs_order_map[kv.first] =
                 std::make_pair(aom.total_size, POSE_VEL_BIAS_SIZE);
 
@@ -1155,7 +1143,7 @@ template <class Scalar_> void SqrtKeypointVioEstimator<Scalar_>::optimize() {
 
         ImuLinData<Scalar> ild = {
             g, gyro_bias_sqrt_weight, accel_bias_sqrt_weight, {}};
-        for (const auto &kv : imu_meas) {
+        for (const auto& kv : imu_meas) {
             ild.imu_meas[kv.first] = &kv.second;
         }
 
@@ -1340,12 +1328,12 @@ template <class Scalar_> void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                 //        }
 
                 // apply increment to poses
-                for (auto &[frame_id, state] : frame_poses) {
+                for (auto& [frame_id, state] : frame_poses) {
                     int idx = aom.abs_order_map.at(frame_id).first;
                     state.applyInc(inc.template segment<POSE_SIZE>(idx));
                 }
 
-                for (auto &[frame_id, state] : frame_states) {
+                for (auto& [frame_id, state] : frame_states) {
                     int idx = aom.abs_order_map.at(frame_id).first;
                     state.applyInc(
                         inc.template segment<POSE_VEL_BIAS_SIZE>(idx));
@@ -1492,8 +1480,9 @@ template <class Scalar_> void SqrtKeypointVioEstimator<Scalar_>::optimize() {
 
                     if (lambda > max_lambda) {
                         terminated = true;
-                        message = "Solver did not converge and reached maximum "
-                                  "damping lambda";
+                        message =
+                            "Solver did not converge and reached maximum "
+                            "damping lambda";
                     }
                 }
             }
@@ -1530,8 +1519,8 @@ template <class Scalar_> void SqrtKeypointVioEstimator<Scalar_>::optimize() {
 
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::optimize_and_marg(
-    const std::map<int64_t, int> &num_points_connected,
-    const std::unordered_set<KeypointId> &lost_landmaks) {
+    const std::map<int64_t, int>& num_points_connected,
+    const std::unordered_set<KeypointId>& lost_landmaks) {
     optimize();
     marginalize(num_points_connected, lost_landmaks);
 }
@@ -1559,4 +1548,4 @@ template class SqrtKeypointVioEstimator<double>;
 template class SqrtKeypointVioEstimator<float>;
 #endif
 
-} // namespace basalt
+}  // namespace basalt

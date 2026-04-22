@@ -35,13 +35,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <basalt/controller.h>
 #include <basalt/serialization/headers_serialization.h>
+
 #include <fstream>
 #include <iostream>
 
 namespace basalt {
 
-Controller::Controller(const std::string &config_path,
-                       const std::string &calib_path, SlamMode mode)
+Controller::Controller(const std::string& config_path,
+                       const std::string& calib_path, SlamMode mode)
     : config_path_(config_path), calib_path_(calib_path), mode_(mode) {
     // Ideally we'd set queue capacities here if not default
     out_state_queue_.set_capacity(100);
@@ -86,14 +87,15 @@ void Controller::initialize() {
                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 }
 
-void Controller::initialize(int64_t t_ns, const Sophus::SE3d &T_w_i,
-                            const Eigen::Vector3d &vel_w_i,
-                            const Eigen::Vector3d &bg,
-                            const Eigen::Vector3d &ba,
+void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
+                            const Eigen::Vector3d& vel_w_i,
+                            const Eigen::Vector3d& bg,
+                            const Eigen::Vector3d& ba,
                             bool useProducerConsumerArchitecture) {
+    mpUseProducerConsumerArchitecture = useProducerConsumerArchitecture;
     // 1. Create Optical Flow Frontend
     opt_flow_ptr_ = basalt::OpticalFlowFactory::getOpticalFlow(
-        vio_config_, calib_, useProducerConsumerArchitecture);
+        vio_config_, calib_, mpUseProducerConsumerArchitecture);
 
     // 2. Create VIO/VO Backend
     bool use_imu = (mode_ == SlamMode::VIO);
@@ -101,7 +103,7 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d &T_w_i,
     // parameterized if needed
     vio_estimator_ = basalt::VioEstimatorFactory::getVioEstimator<double>(
         vio_config_, calib_, basalt::constants::g, use_imu,
-        useProducerConsumerArchitecture); // true for use_double
+        mpUseProducerConsumerArchitecture);  // true for use_double
 
     // 3. Initialize the backend
     if (t_ns == 0 && T_w_i.log().norm() < 1e-9 && vel_w_i.norm() < 1e-9) {
@@ -110,7 +112,7 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d &T_w_i,
         vio_estimator_->initialize(t_ns, T_w_i, vel_w_i, bg, ba);
     }
 
-    if (useProducerConsumerArchitecture) {
+    if (mpUseProducerConsumerArchitecture) {
         // 4. Connect Queues
         // Connect frontend output to backend input
         opt_flow_ptr_->output_queue = &vio_estimator_->vision_data_queue;
@@ -125,8 +127,8 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d &T_w_i,
     }
 }
 
-void Controller::TrackMonocular(OpticalFlowInput::Ptr &frame,
-                                Sophus::SE3f &tcw) {
+void Controller::TrackMonocular(OpticalFlowInput::Ptr& frame,
+                                Sophus::SE3f& tcw) {
     OpticalFlowResult::Ptr res =
         opt_flow_ptr_->processFrame(frame->t_ns, frame);
     current_latest_pose_ = vio_estimator_->ProcessFrame(res);
@@ -150,7 +152,7 @@ basalt::PoseVelBiasState<double>::Ptr Controller::GetLatestPose() const {
     return current_latest_pose_;
 }
 
-bool Controller::TryPopPose(basalt::PoseVelBiasState<double>::Ptr &pose) {
+bool Controller::TryPopPose(basalt::PoseVelBiasState<double>::Ptr& pose) {
     return out_state_queue_.try_pop(pose);
 }
 
@@ -159,8 +161,8 @@ void Controller::process_pose_queue_loop() {
     basalt::PoseVelBiasState<double>::Ptr pose;
     while (!terminate_processing_thread_ || !out_state_queue_.empty()) {
         if (out_state_queue_.try_pop(pose)) {
-            if (pose) { // Check for nullptr indicating end of stream or
-                        // shutdown
+            if (pose) {  // Check for nullptr indicating end of stream or
+                         // shutdown
                 std::lock_guard<std::mutex> lock(pose_mutex_);
                 current_latest_pose_ = pose;
             } else {
@@ -174,4 +176,4 @@ void Controller::process_pose_queue_loop() {
     }
 }
 
-} // namespace basalt
+}  // namespace basalt

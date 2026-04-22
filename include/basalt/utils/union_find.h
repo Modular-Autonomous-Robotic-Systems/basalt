@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstdint>
 #include <limits>
 #include <numeric>
@@ -57,6 +58,28 @@ struct UnionFind {
     std::iota(m_cc_parent.begin(), m_cc_parent.end(), 0);
     // Rank array (0)
     m_cc_rank.resize(num_cc, 0);
+  }
+
+  // Append a single new independent node (self-parent) to the UF forest.
+  // Returns the DSU index of the newly added node — equal to GetNumNodes()
+  // before the call. Used by incremental trackers that discover new features
+  // one-at-a-time rather than from a known batch.
+  ValueType AddIndex() {
+    const ValueType new_idx = static_cast<ValueType>(m_cc_size.size());
+    m_cc_parent.push_back(new_idx);
+    m_cc_rank.push_back(0);
+    m_cc_size.push_back(1);
+    return new_idx;
+  }
+
+  // Mark root_idx as invalid. Subsequent Find() calls on any node in this
+  // set will return InvalidIndex() via path compression.
+  // PRECONDITION: root_idx must currently be a root (Find(root_idx)==root_idx).
+  // The caller is responsible for clearing any external maps keyed on
+  // root_idx (e.g. mpUFNodeIndexToTrackIdMap).
+  void InvalidateRoot(ValueType root_idx) {
+    assert(root_idx < m_cc_parent.size());
+    m_cc_parent[root_idx] = InvalidIndex();
   }
 
   // Return the number of nodes that have been initialized in the UF tree
