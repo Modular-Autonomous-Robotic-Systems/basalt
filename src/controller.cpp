@@ -139,7 +139,7 @@ void Controller::GrabImage(basalt::OpticalFlowInput::Ptr data) {
     }
 }
 
-void Controller::GrabImu(basalt::ImuData<double>::Ptr data) {
+void Controller::GrabIMU(basalt::ImuData<double>::Ptr data) {
     if (vio_estimator_) {
         vio_estimator_->imu_data_queue.push(data);
     }
