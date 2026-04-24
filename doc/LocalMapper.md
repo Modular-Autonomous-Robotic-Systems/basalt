@@ -818,7 +818,7 @@ LocalMapper::LocalMapper(const Calibration<double>& calib, const VioConfig& conf
 LocalMapper::~LocalMapper() {
     Stop();
 }
-
+.ResetTrackId();
 void LocalMapper::Stop() {
     mpStopLocalMapping = true;
     // Do NOT push nullptr to mpMargInputQueue here — VIO is the sole owner
@@ -827,7 +827,7 @@ void LocalMapper::Stop() {
     if (mpLocalMappingThread.joinable()) {
         mpLocalMappingThread.join();
     }
-    mpNextTrackId = 0;
+    mpTrackBuilder.ResetTrackId();
 }
 ```
 
@@ -1298,7 +1298,7 @@ If `total(a) == 0` (KF hosts no landmarks), the fraction is undefined so the key
 
 ```cpp
 size_t LocalMapper::ComputeCovisibility(int64_t tid_a, int64_t tid_b, int num_cameras){
-    int covisibility = 0;
+    size_t covisibility = 0;
     for(int i = 0; i < num_cameras; i++){
         for(int j = 0; j < num_cameras; j++){
             covisibility += lmdb.getObservationsCountForPair(TimeCamId(tid_a, i), TimeCamId(tid_b, j));
@@ -1361,8 +1361,14 @@ int64_t LocalMapper::SelectKeyframeToCull() {
         // Compute total(a).
         size_t total_a = 0;
         for (size_t cam = 0; cam < calib.intrinsics.size(); ++cam){
-            total_a += lmdb.getLandmarksForHost(TimeCamId(a, cam)).size();
-            total_a += lmdb.getNonLandmarkObservationsCountForKeyFrame(TimeCamId(a, cam));
+            TimeCamId tcid_a(a, cam);
+            auto obs_it = obs.find(tcid_a);
+            if (obs_it != obs.end()) {
+                for (const auto& [target, kpt_set] : obs_it->second) {
+                   total_a += kpt_set.size();
+                }
+            }
+            total_a += lmdb.getNonLandmarkObservationsCountForKeyFrame(tcid_a);
         }
         if (total_a == 0){
             continue;
@@ -1404,7 +1410,7 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
     TimeCamId new_host_tcid(new_host_kf, 0);
     if (obs_copy.count(new_host_tcid) == 0 && calib.intrinsics.size() > 1) {
         bool found_obs = false;
-        for(int i = 1; i < calib.intrinsics.size(); i++){
+        for(size_t i = 1; i < calib.intrinsics.size(); i++){
             TimeCamId alt(new_host_kf, i);
             if (obs_copy.count(alt)){
                 new_host_tcid = alt;
@@ -1529,23 +1535,19 @@ void LocalMapper::CullRedundantKeyframes() {
     std::set<int64_t> candidates;
     for (const auto& kv : frame_poses) candidates.insert(kv.first);
 
-    // Collect landmark IDs BEFORE any removal to avoid iterator invalidation.
-    std::vector<TrackId> hosted_lm_ids;
+    // Collect unique landmark IDs hosted by the culled KF via the
+    // observations index. This avoids getLandmarksForHost (which throws
+    const auto& obs = lmdb.getObservations();
+    std::set<KeypointId> hosted_lm_set;
     for (size_t cam = 0; cam < calib.intrinsics.size(); ++cam) {
-        auto v = lmdb.getLandmarksForHost(TimeCamId(culled, cam));
-        for (const Keypoint<double>* kpt : v) {
-            // Need to find the TrackId; lmdb stores Keypoint by TrackId in kpts.
-            // getLandmarksForHost returns pointers without TrackId.
-            // Traverse getLandmarks() to find matching pointer — O(N);
-            // acceptable for bounded local maps.
-            for (const auto& lm_kv : lmdb.getLandmarks()) {
-                if (&lm_kv.second == kpt) {
-                    hosted_lm_ids.push_back(lm_kv.first);
-                    break;
-                }
-            }
+        TimeCamId tcid(culled, cam);
+        auto obs_it = obs.find(tcid);
+        if (obs_it == obs.end()) continue;
+        for (const auto& [target, kpt_set] : obs_it->second) {
+            hosted_lm_set.insert(kpt_set.begin(), kpt_set.end());
         }
     }
+    std::vector<TrackId> hosted_lm_ids(hosted_lm_set.begin(), hosted_lm_set.end());}
 
     landmarksToRemove.clear();
     for (TrackId lm : hosted_lm_ids) {

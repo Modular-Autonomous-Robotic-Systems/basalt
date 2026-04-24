@@ -456,6 +456,8 @@ struct TrackBuilder {
         mpUFNodeIndexToTrackIdMap = std::move(new_tid_map);
     }
 
+    void ResetTrackId() { mpNextTrackId = 0; }
+
 private:
     // Returns the number of entries in map_node_to_index whose Find() resolves
     // to a non-invalid root. Used by AddNewMatches to decide when to compact.
