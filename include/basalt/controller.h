@@ -3,6 +3,7 @@
 #include <basalt/optical_flow/optical_flow.h>
 #include <basalt/utils/vio_config.h>
 #include <basalt/vi_estimator/vio_estimator.h>
+#include <basalt/vi_estimator/local_mapper.h>
 
 #include <basalt/calibration/calibration.hpp>
 #include <mutex>
@@ -18,6 +19,10 @@ public:
                SlamMode mode);
 
     ~Controller();
+
+    // Gracefully shut down the full SLAM pipeline (OF → VIO → LocalMapper)
+    // using the cascade sentinel-nullptr pattern. Safe to call multiple times.
+    void Stop();
 
     void load_config();
 
@@ -55,6 +60,12 @@ private:
 
     tbb::concurrent_bounded_queue<basalt::PoseVelBiasState<double>::Ptr>
         out_state_queue_;
+
+    // Local mapper input queue and instance. Created only when
+    // useProducerConsumerArchitecture == true in initialize().
+    tbb::concurrent_bounded_queue<basalt::MargData::Ptr>
+        local_map_input_queue_;
+    std::shared_ptr<basalt::LocalMapper> local_mapper_;
 
     // Member for latest pose, updated by an internal thread
     basalt::PoseVelBiasState<double>::Ptr current_latest_pose_;

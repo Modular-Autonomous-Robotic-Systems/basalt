@@ -48,13 +48,36 @@ Controller::Controller(const std::string& config_path,
     out_state_queue_.set_capacity(100);
 }
 
-Controller::~Controller() {
+Controller::~Controller() { Stop(); }
+
+void Controller::Stop() {
+    // (1) Unblock optical flow — it will propagate nullptr to VIO.
+    if (opt_flow_ptr_) opt_flow_ptr_->input_queue.push(nullptr);
+
+    // (2) VIO's processing loop, on receiving nullptr, pushes nullptr to
+    //     out_marg_queue (= local_map_input_queue_) and out_state_queue.
+
+    // (3) Local mapper receives nullptr from VIO → exits its loop.
+    //     Stop() joins the mapper thread.
+    if (local_mapper_) local_mapper_->Stop();
+
+    // (4) Join VIO thread explicitly (already finished by this point
+    //     since VIO pushes nullptr before mapper can pop it).
+    if (vio_estimator_) {
+        vio_estimator_->maybe_join();
+        vio_estimator_->drain_input_queues();
+    }
+
+    // (5) Join optical flow via destructor.
+    opt_flow_ptr_.reset();
+
+    // (6) Drain and join the pose processing thread.
     terminate_processing_thread_ = true;
-    // Push a null pointer to unblock the queue if the processing thread is
-    // waiting
     out_state_queue_.push(nullptr);
-    if (pose_processing_thread_.joinable()) {
-        pose_processing_thread_.join();
+    if (mpUseProducerConsumerArchitecture) {
+        if (pose_processing_thread_.joinable()) {
+            pose_processing_thread_.join();
+        }
     }
 }
 
@@ -119,6 +142,21 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
 
         // Connect backend output to our output queue
         vio_estimator_->out_state_queue = &out_state_queue_;
+
+        // 5. Wire marginalisation output to local mapper input queue.
+        local_map_input_queue_.set_capacity(10);
+        vio_estimator_->out_marg_queue = &local_map_input_queue_;
+
+        // 6. Create and wire the local mapper.
+        local_mapper_ =
+            std::make_shared<basalt::LocalMapper>(calib_, vio_config_);
+        local_mapper_->SetMarginalisationDataInputQueue(
+            &local_map_input_queue_);
+        local_mapper_->SetVIOPoseUpdateCallback(
+            [this](const auto& poses) {
+                vio_estimator_->QueuePoseUpdates(poses);
+            });
+        local_mapper_->Initialise();
 
         // Start the pose processing thread
         terminate_processing_thread_ = false;
