@@ -348,6 +348,51 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
     stats_sums_.add("frame_id", opt_flow_meas->t_ns).format("none");
     Timer t_total;
 
+    // ── Apply local-mapper pose corrections to frame_poses ──────────
+    // Only frame_poses entries are updated (already-marginalised KFs with
+    // pose-only state). frame_states entries are left untouched because
+    // they are coupled to ongoing IMU preintegration and overwriting them
+    // would violate the BASALT_ASSERT at line 352.
+    {
+        std::lock_guard<std::mutex> lock(mpPosesToUpdateMutex);
+        if (!mpPosesToUpdate.empty()) {
+            for (auto it = mpPosesToUpdate.begin();
+                 it != mpPosesToUpdate.end();) {
+                const int64_t t_ns = it->first;
+                const PoseStateWithLin<double>& lm_pose = it->second;
+                const SE3 T_new =
+                    lm_pose.getPose().template cast<Scalar>();
+
+                auto it_fp = frame_poses.find(t_ns);
+                if (it_fp != frame_poses.end()) {
+                    const SE3 T_old = it_fp->second.getPose();
+                    const SE3 diff = T_new.inverse() * T_old;
+                    const Scalar trans_err = diff.translation().norm();
+                    const Scalar rot_err = diff.so3().log().norm();
+                    if (trans_err > kRelinThresholdTrans ||
+                        rot_err > kRelinThresholdRot) {
+                        // Large correction — skip to preserve FEJ
+                        // consistency. The entry stays so the mapper
+                        // can send a refined (smaller) update next time.
+                        std::cout << "too large update in pose, not updating"
+                                  << std::endl;
+                    } else {
+                        // Small correction — apply and preserve the
+                        // linearised flag to avoid tripping the
+                        // isLinearized() assertion in computeDelta.
+                        const bool was_lin =
+                            it_fp->second.isLinearized();
+                        it_fp->second = PoseStateWithLin<Scalar>(
+                            t_ns, T_new, was_lin);
+                        it = mpPosesToUpdate.erase(it);
+                        continue;
+                    }
+                }
+                ++it;
+            }
+        }
+    }
+
     if (meas.get()) {
         BASALT_ASSERT(frame_states[last_state_t_ns].getState().t_ns ==
                       meas->get_start_t_ns());

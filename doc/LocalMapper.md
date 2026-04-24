@@ -1815,6 +1815,7 @@ Each sub-section in this section is to be committed together. Thus, we will impl
 
 - [ ] `include/basalt/vi_estimator/local_mapper.h`: full rewrite per §6.1.
 - [ ] `src/vi_estimator/local_mapper.cpp`: implement constructor, `Initialise`, `Stop`, queue-setter, callback-setter, `MapLocally`, `IngestMargData`, `CollectNewKeyframesAfterMatching`, `MatchLocal`, `build_tracks`, `setup_opt`, `CullRedundantKeyframes`, helpers (`SelectKeyframeToCull`, `FindBestRehostKf`, `RehostLandmark`, `ComputeCovisibility`).
+- [ ] Add `src/vi_estimator/local_mapper.cpp` to the `basalt` library sources in the root `CMakeLists.txt`.
 
 ### 11.3 VIO Extensions
 
@@ -1827,11 +1828,7 @@ Each sub-section in this section is to be committed together. Thus, we will impl
 - [ ] `include/basalt/controller.h`: add `local_map_input_queue_`, `local_mapper_`, `Stop()`.
 - [ ] `src/controller.cpp`: wire queues in `initialize()`; implement `Stop()`; update destructor to call `Stop()`.
 
-### 11.5 Build System
-
-- [ ] Add `src/vi_estimator/local_mapper.cpp` to the `basalt` library sources in the root `CMakeLists.txt`.
-
-### 11.6 Testing
+### 11.5 Testing
 
 - [ ] Unit tests for `UnionFind::AddIndex`/`InvalidateRoot`.
 - [ ] Unit tests for `TrackBuilder::AddNewMatches` covering: (a) brand-new track, (b) append to existing track, (c) merge of two tracks where one has a landmark, (d) merge where both have landmarks.

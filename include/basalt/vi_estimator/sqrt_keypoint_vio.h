@@ -34,6 +34,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #pragma once
 
+#include <mutex>
 #include <thread>
 
 #include <basalt/imu/preintegration.h>
@@ -209,6 +210,15 @@ class SqrtKeypointVioEstimator : public VioEstimatorBase<Scalar_>,
         return T_w_i_init.template cast<double>();
     }
 
+    // Accept refined keyframe poses from the local mapper. Called from the
+    // mapper thread; the mutex ensures thread-safe handoff to the VIO thread.
+    void QueuePoseUpdates(
+        const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>& updates)
+        override {
+        std::lock_guard<std::mutex> lock(mpPosesToUpdateMutex);
+        for (const auto& kv : updates) mpPosesToUpdate[kv.first] = kv.second;
+    }
+
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
   private:
@@ -266,5 +276,18 @@ class SqrtKeypointVioEstimator : public VioEstimatorBase<Scalar_>,
     typename ImuData<Scalar>::Ptr imuData;
     Vec3 mpBg, mpBa;
     Vec3 mpAccelCov, mpGyroCov;
+
+    // ── Local-mapper pose feedback ──────────────────────────────────
+    // Staging map written by LocalMapper (via QueuePoseUpdates callback)
+    // and consumed at the top of measure(). Hardcoded to double because
+    // the LocalMapper always operates in double precision.
+    Eigen::aligned_unordered_map<int64_t, PoseStateWithLin<double>>
+        mpPosesToUpdate;
+    mutable std::mutex mpPosesToUpdateMutex;
+
+    // Thresholds above which a mapper correction is considered too large
+    // to apply safely (to preserve FEJ consistency).
+    static constexpr Scalar kRelinThresholdTrans = Scalar(0.10);
+    static constexpr Scalar kRelinThresholdRot = Scalar(0.05);
 };
 } // namespace basalt
