@@ -1835,7 +1835,8 @@ Each sub-section in this section is to be committed together. Thus, we will impl
 - [ ] Unit tests for `TrackBuilder::CompactTree` with partial invalidation.
 - [ ] Unit test for `HashBowStl::RemoveKeyframes`.
 - [ ] Integration test: feed a recorded EuRoC dataset through `Controller`; verify that `local_mapper_` produces non-empty `frame_poses` with bounded size over runtime.
-
+- [ ] All Integration tests are to be performed through an executable with its main function in `src/basalt_slam.cpp`. This file will be used to create an executable in `CMakeLists.txt`. The vio executable at `src/vio.cpp` may be used as a reference for implementing the executable for testing the slam system with EuRoC dataset. Currently we will not implement the GUI for visualisation.
+- [ ] Integration tests are to be implemented at `test/src/test_local_mapper.cpp`. This file will be used to create an executable in `test/CMakeLists.txt`that performs all unit tests related to the local mapper in a sequence and computes a test success rate value and logs a list of failed tests if any.
 ---
 
 ## 12. References
