@@ -427,6 +427,9 @@ target_link_libraries(basalt_opt_flow basalt pangolin basalt::cli11)
 add_executable(basalt_vio src/vio.cpp)
 target_link_libraries(basalt_vio basalt pangolin basalt::cli11)
 
+add_executable(basalt_slam src/basalt_slam.cpp)
+target_link_libraries(basalt_slam basalt basalt::cli11)
+
 add_executable(basalt_time_alignment src/time_alignment.cpp)
 target_link_libraries(basalt_time_alignment basalt pangolin basalt::cli11)
 

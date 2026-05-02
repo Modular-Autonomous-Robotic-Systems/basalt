@@ -88,7 +88,7 @@ struct TrackBuilder {
         for (const auto& iter : map_pair_wise_matches) {
             const auto I = iter.first.first;
             const auto J = iter.first.second;
-            const MatchData& matchData = iter.second;
+            const MatchData& matchData = *iter.second;
             for (const auto& match : matchData.inliers) {
                 allFeatures.emplace(I, match.first);
                 allFeatures.emplace(J, match.second);
@@ -107,7 +107,7 @@ struct TrackBuilder {
         for (const auto& iter : map_pair_wise_matches) {
             const auto I = iter.first.first;
             const auto J = iter.first.second;
-            const MatchData& matchData = iter.second;
+            const MatchData& matchData = *iter.second;
             for (const auto& match : matchData.inliers) {
                 const ImageFeaturePair pairI(I, match.first);
                 const ImageFeaturePair pairJ(J, match.second);
@@ -213,7 +213,7 @@ struct TrackBuilder {
         for (const auto& iter : new_matches) {
             const auto I = iter.first.first;
             const auto J = iter.first.second;
-            const MatchData& matchData = iter.second;
+            const MatchData& matchData = *iter.second;
             for (const auto& match : matchData.inliers) {
                 new_feats.emplace(I, match.first);
                 new_feats.emplace(J, match.second);
@@ -234,7 +234,7 @@ struct TrackBuilder {
         for (const auto& iter : new_matches) {
             const auto I = iter.first.first;
             const auto J = iter.first.second;
-            const MatchData& matchData = iter.second;
+            const MatchData& matchData = *iter.second;
 
             for (const auto& match : matchData.inliers) {
                 const uint32_t idx_i = map_node_to_index.at({I, match.first});

@@ -39,6 +39,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <fstream>
 #include <iostream>
 
+#include "basalt/vi_estimator/vio_estimator.h"
+
 namespace basalt {
 
 Controller::Controller(const std::string& config_path,
@@ -59,7 +61,10 @@ void Controller::Stop() {
 
     // (3) Local mapper receives nullptr from VIO → exits its loop.
     //     Stop() joins the mapper thread.
-    if (local_mapper_) local_mapper_->Stop();
+    if (local_mapper_) {
+        local_map_input_queue_.push(nullptr);
+        local_mapper_->Stop();
+    }
 
     // (4) Join VIO thread explicitly (already finished by this point
     //     since VIO pushes nullptr before mapper can pop it).
@@ -106,6 +111,7 @@ void Controller::load_config() {
 
 void Controller::initialize() {
     // Default initialization with zero biases
+    std::cout << "Invoke default initialisation" << std::endl;
     initialize(0, Sophus::SE3d(), Eigen::Vector3d::Zero(),
                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 }
@@ -115,8 +121,11 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
                             const Eigen::Vector3d& bg,
                             const Eigen::Vector3d& ba,
                             bool useProducerConsumerArchitecture) {
+    std::cout << "Initialising SLAM with mpUseProducerConsumerArchitecture: "
+              << useProducerConsumerArchitecture << std::endl;
     mpUseProducerConsumerArchitecture = useProducerConsumerArchitecture;
     // 1. Create Optical Flow Frontend
+    std::cout << "Setting up Optical Flow and VIO" << std::endl;
     opt_flow_ptr_ = basalt::OpticalFlowFactory::getOpticalFlow(
         vio_config_, calib_, mpUseProducerConsumerArchitecture);
 
@@ -129,40 +138,38 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
         mpUseProducerConsumerArchitecture);  // true for use_double
 
     // 3. Initialize the backend
+    std::cout << "Initializing VIO" << std::endl;
     if (t_ns == 0 && T_w_i.log().norm() < 1e-9 && vel_w_i.norm() < 1e-9) {
         vio_estimator_->initialize(bg, ba);
     } else {
         vio_estimator_->initialize(t_ns, T_w_i, vel_w_i, bg, ba);
     }
 
+    // 4. Wire marginalisation output to local mapper input queue.
+    local_map_input_queue_.set_capacity(10);
+    vio_estimator_->out_marg_queue = &local_map_input_queue_;
+
+    // 5. Create and wire the local mapper.
+    local_mapper_ = std::make_shared<basalt::LocalMapper>(calib_, vio_config_);
+    local_mapper_->SetMarginalisationDataInputQueue(&local_map_input_queue_);
+    local_mapper_->SetVIOPoseUpdateCallback(
+        [this](const auto& poses) { vio_estimator_->QueuePoseUpdates(poses); });
+    local_mapper_->Initialise();
+
     if (mpUseProducerConsumerArchitecture) {
-        // 4. Connect Queues
+        // 6. Connect Queues for producer consumer architecture
         // Connect frontend output to backend input
         opt_flow_ptr_->output_queue = &vio_estimator_->vision_data_queue;
 
         // Connect backend output to our output queue
         vio_estimator_->out_state_queue = &out_state_queue_;
 
-        // 5. Wire marginalisation output to local mapper input queue.
-        local_map_input_queue_.set_capacity(10);
-        vio_estimator_->out_marg_queue = &local_map_input_queue_;
-
-        // 6. Create and wire the local mapper.
-        local_mapper_ =
-            std::make_shared<basalt::LocalMapper>(calib_, vio_config_);
-        local_mapper_->SetMarginalisationDataInputQueue(
-            &local_map_input_queue_);
-        local_mapper_->SetVIOPoseUpdateCallback(
-            [this](const auto& poses) {
-                vio_estimator_->QueuePoseUpdates(poses);
-            });
-        local_mapper_->Initialise();
-
         // Start the pose processing thread
         terminate_processing_thread_ = false;
         pose_processing_thread_ =
             std::thread(&Controller::process_pose_queue_loop, this);
     }
+    std::cout << "SLAM initialisation done" << std::endl;
 }
 
 void Controller::TrackMonocular(OpticalFlowInput::Ptr& frame,
@@ -213,5 +220,15 @@ void Controller::process_pose_queue_loop() {
         }
     }
 }
+
+std::shared_ptr<basalt::LocalMapper> Controller::GetLocalMapper() const {
+    return local_mapper_;
+}
+
+basalt::VioEstimatorBase<double>::Ptr Controller::GetVIO() const {
+    return vio_estimator_;
+}
+
+basalt::Calibration<double>& Controller::GetCalibration() { return calib_; }
 
 }  // namespace basalt

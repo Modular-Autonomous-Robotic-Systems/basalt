@@ -360,8 +360,7 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
                  it != mpPosesToUpdate.end();) {
                 const int64_t t_ns = it->first;
                 const PoseStateWithLin<double>& lm_pose = it->second;
-                const SE3 T_new =
-                    lm_pose.getPose().template cast<Scalar>();
+                const SE3 T_new = lm_pose.getPose().template cast<Scalar>();
 
                 auto it_fp = frame_poses.find(t_ns);
                 if (it_fp != frame_poses.end()) {
@@ -380,10 +379,9 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
                         // Small correction — apply and preserve the
                         // linearised flag to avoid tripping the
                         // isLinearized() assertion in computeDelta.
-                        const bool was_lin =
-                            it_fp->second.isLinearized();
-                        it_fp->second = PoseStateWithLin<Scalar>(
-                            t_ns, T_new, was_lin);
+                        const bool was_lin = it_fp->second.isLinearized();
+                        it_fp->second =
+                            PoseStateWithLin<Scalar>(t_ns, T_new, was_lin);
                         it = mpPosesToUpdate.erase(it);
                         continue;
                     }

@@ -38,19 +38,16 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
 
-#include <thread>
-
-#include <sophus/se2.hpp>
-
+#include <basalt/image/image_pyr.h>
+#include <basalt/optical_flow/optical_flow.h>
+#include <basalt/optical_flow/patch.h>
+#include <basalt/utils/keypoints.h>
 #include <tbb/blocked_range.h>
 #include <tbb/concurrent_unordered_map.h>
 #include <tbb/parallel_for.h>
 
-#include <basalt/optical_flow/optical_flow.h>
-#include <basalt/optical_flow/patch.h>
-
-#include <basalt/image/image_pyr.h>
-#include <basalt/utils/keypoints.h>
+#include <sophus/se2.hpp>
+#include <thread>
 
 namespace basalt {
 
@@ -59,7 +56,7 @@ namespace basalt {
 /// pyramid.
 template <typename Scalar, template <typename> typename Pattern>
 class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
-  public:
+public:
     typedef OpticalFlowPatch<Scalar, Pattern<Scalar>> PatchT;
 
     typedef Eigen::Matrix<Scalar, 2, 1> Vector2;
@@ -74,7 +71,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
     typedef Sophus::SE2<Scalar> SE2;
 
     MultiscaleFrameToFrameOpticalFlow(
-        const VioConfig &config, const basalt::Calibration<double> &calib,
+        const VioConfig& config, const basalt::Calibration<double>& calib,
         bool useProducerConsumerArchitecture = false)
         : t_ns(-1), frame_counter(0), last_keypoint_id(0), config(config) {
         input_queue.set_capacity(10);
@@ -103,8 +100,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
             input_queue.pop(input_ptr);
 
             if (!input_ptr.get()) {
-                if (output_queue)
-                    output_queue->push(nullptr);
+                if (output_queue) output_queue->push(nullptr);
                 break;
             }
 
@@ -112,12 +108,13 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
         }
     }
 
-    bool processFrame(int64_t curr_t_ns, OpticalFlowInput::Ptr &new_img_vec) {
-        for (const auto &v : new_img_vec->img_data) {
+    OpticalFlowResult::Ptr processFrame(int64_t curr_t_ns,
+                                        OpticalFlowInput::Ptr& new_img_vec) {
+        for (const auto& v : new_img_vec->img_data) {
             if (!v.img.get()) {
                 std::cout << "Image for " << curr_t_ns << " not present!"
                           << std::endl;
-                return true;
+                return nullptr;
             }
         }
         if (t_ns < 0) {
@@ -133,7 +130,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
 
             tbb::parallel_for(
                 tbb::blocked_range<size_t>(0, calib.intrinsics.size()),
-                [&](const tbb::blocked_range<size_t> &r) {
+                [&](const tbb::blocked_range<size_t>& r) {
                     for (size_t i = r.begin(); i != r.end(); ++i) {
                         pyramid->at(i).setFromImage(
                             *new_img_vec->img_data[i].img,
@@ -154,7 +151,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
             pyramid->resize(calib.intrinsics.size());
             tbb::parallel_for(
                 tbb::blocked_range<size_t>(0, calib.intrinsics.size()),
-                [&](const tbb::blocked_range<size_t> &r) {
+                [&](const tbb::blocked_range<size_t>& r) {
                     for (size_t i = r.begin(); i != r.end(); ++i) {
                         pyramid->at(i).setFromImage(
                             *new_img_vec->img_data[i].img,
@@ -191,23 +188,23 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
         if (frame_counter % config.optical_flow_skip_frames == 0) {
             try {
                 output_queue->push(transforms);
-            } catch (const tbb::user_abort &) {
-                return false;
+            } catch (const tbb::user_abort&) {
+                return nullptr;
             };
         }
 
         frame_counter++;
-        return true;
+        return transforms;
     }
 
     void trackPoints(
-        const basalt::ManagedImagePyr<uint16_t> &pyr_1,
-        const basalt::ManagedImagePyr<uint16_t> &pyr_2,
-        const Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>
-            &transform_map_1,
-        const std::map<KeypointId, size_t> &pyramid_levels_1,
-        Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f> &transform_map_2,
-        std::map<KeypointId, size_t> &pyramid_levels_2) const {
+        const basalt::ManagedImagePyr<uint16_t>& pyr_1,
+        const basalt::ManagedImagePyr<uint16_t>& pyr_2,
+        const Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>&
+            transform_map_1,
+        const std::map<KeypointId, size_t>& pyramid_levels_1,
+        Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>& transform_map_2,
+        std::map<KeypointId, size_t>& pyramid_levels_2) const {
         size_t num_points = transform_map_1.size();
 
         std::vector<KeypointId> ids;
@@ -218,7 +215,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
         init_vec.reserve(num_points);
         pyramid_level.reserve(num_points);
 
-        for (const auto &kv : transform_map_1) {
+        for (const auto& kv : transform_map_1) {
             ids.push_back(kv.first);
             init_vec.push_back(kv.second);
             pyramid_level.push_back(pyramid_levels_1.at(kv.first));
@@ -230,11 +227,11 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
         tbb::concurrent_unordered_map<KeypointId, size_t, std::hash<KeypointId>>
             result_pyramid_level;
 
-        auto compute_func = [&](const tbb::blocked_range<size_t> &range) {
+        auto compute_func = [&](const tbb::blocked_range<size_t>& range) {
             for (size_t r = range.begin(); r != range.end(); ++r) {
                 const KeypointId id = ids[r];
 
-                const Eigen::AffineCompact2f &transform_1 = init_vec[r];
+                const Eigen::AffineCompact2f& transform_1 = init_vec[r];
                 Eigen::AffineCompact2f transform_2 = transform_1;
 
                 bool valid = trackPoint(pyr_1, pyr_2, transform_1,
@@ -275,11 +272,11 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
                                 result_pyramid_level.end());
     }
 
-    inline bool trackPoint(const basalt::ManagedImagePyr<uint16_t> &old_pyr,
-                           const basalt::ManagedImagePyr<uint16_t> &pyr,
-                           const Eigen::AffineCompact2f &old_transform,
+    inline bool trackPoint(const basalt::ManagedImagePyr<uint16_t>& old_pyr,
+                           const basalt::ManagedImagePyr<uint16_t>& pyr,
+                           const Eigen::AffineCompact2f& old_transform,
                            const size_t pyramid_level,
-                           Eigen::AffineCompact2f &transform) const {
+                           Eigen::AffineCompact2f& transform) const {
         bool patch_valid = true;
 
         transform.linear().setIdentity();
@@ -318,9 +315,9 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
         return patch_valid;
     }
 
-    inline bool trackPointAtLevel(const Image<const uint16_t> &img_2,
-                                  const PatchT &dp,
-                                  Eigen::AffineCompact2f &transform) const {
+    inline bool trackPointAtLevel(const Image<const uint16_t>& img_2,
+                                  const PatchT& dp,
+                                  Eigen::AffineCompact2f& transform) const {
         bool patch_valid = true;
 
         for (int iteration = 0;
@@ -370,7 +367,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
              level++) {
             Eigen::aligned_vector<Eigen::Vector2d> pts;
 
-            for (const auto &kv : transforms->observations.at(0)) {
+            for (const auto& kv : transforms->observations.at(0)) {
                 const ssize_t point_level =
                     transforms->pyramid_levels.at(0).at(kv.first);
 
@@ -393,7 +390,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
                 Eigen::AffineCompact2f transform;
                 transform.setIdentity();
                 transform.translation() =
-                    kd.corners[i].cast<Scalar>() * scale; // TODO cast float?
+                    kd.corners[i].cast<Scalar>() * scale;  // TODO cast float?
 
                 transforms->observations.at(0)[last_keypoint_id] = transform;
                 transforms->pyramid_levels.at(0)[last_keypoint_id] = level;
@@ -407,7 +404,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
                         new_pyramid_levels_main, new_poses_stereo,
                         new_pyramid_levels_stereo);
 
-            for (const auto &kv : new_poses_stereo) {
+            for (const auto& kv : new_poses_stereo) {
                 transforms->observations.at(1).emplace(kv);
                 transforms->pyramid_levels.at(1)[kv.first] =
                     new_pyramid_levels_stereo.at(kv.first);
@@ -421,7 +418,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
         std::vector<KeypointId> kpid;
         Eigen::aligned_vector<Eigen::Vector2f> proj0, proj1;
 
-        for (const auto &kv : transforms->observations.at(1)) {
+        for (const auto& kv : transforms->observations.at(1)) {
             auto it = transforms->observations.at(0).find(kv.first);
 
             if (it != transforms->observations.at(0).end()) {
@@ -460,7 +457,7 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
     }
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-  private:
+private:
     int64_t t_ns;
 
     size_t frame_counter;
@@ -480,4 +477,4 @@ class MultiscaleFrameToFrameOpticalFlow : public OpticalFlowBase {
     std::shared_ptr<std::thread> processing_thread;
 };
 
-} // namespace basalt
+}  // namespace basalt

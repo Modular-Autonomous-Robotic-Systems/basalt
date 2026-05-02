@@ -562,7 +562,9 @@ void NfrMapper::match_stereo() {
 
         if (md.inliers.size() > 16) {
             num_inliers += md.inliers.size();
-            feature_matches[std::make_pair(tcid1, tcid2)] = md;
+            feature_matches[std::make_pair(tcid1, tcid2)] =
+                std::allocate_shared<MatchData>(
+                    Eigen::aligned_allocator<MatchData>{}, md);
         }
     }
 
@@ -656,7 +658,9 @@ void NfrMapper::match_all() {
             }
 
             if (!md.inliers.empty())
-                feature_matches[std::make_pair(id1, id2)] = md;
+                feature_matches[std::make_pair(id1, id2)] =
+                    std::allocate_shared<MatchData>(
+                        Eigen::aligned_allocator<MatchData>{}, md);
         }
         total_matched += matched;
     };
@@ -676,8 +680,8 @@ void NfrMapper::match_all() {
     int num_inliers = 0;
 
     for (const auto& kv : feature_matches) {
-        num_matches += kv.second.matches.size();
-        num_inliers += kv.second.inliers.size();
+        num_matches += kv.second->matches.size();
+        num_inliers += kv.second->inliers.size();
     }
 
     std::cout << "Matched " << ids_to_match.size() << " image pairs with "
@@ -702,7 +706,7 @@ void NfrMapper::build_tracks() {
     // info
     size_t inlier_match_count = 0;
     for (const auto& it : feature_matches) {
-        inlier_match_count += it.second.inliers.size();
+        inlier_match_count += it.second->inliers.size();
     }
 
     size_t total_track_obs_count = 0;

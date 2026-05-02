@@ -119,7 +119,7 @@ The implemented executables perform the following specific tests:
    - `HashBowStlRemoveKeyframes` — After adding 3 KFs and removing 1, queries return only the remaining 2.
 
 8. **`basalt_slam` — Full SLAM Integration Test**
-   Feeds a recorded EuRoC dataset through `Controller` with `useProducerConsumerArchitecture=true`; verifies that: (a) the local mapper thread runs, (b) `frame_poses` in the local mapper is non-empty after processing, (c) the local map size stays bounded by `mpMaxLocalMapSize`.
+   Feeds a recorded EuRoC dataset through `Controller` with `useProducerConsumerArchitecture=false`; verifies that: (a) the local mapper thread runs, (b) `frame_poses` in the local mapper is non-empty after processing, (c) the local map size stays bounded by `mpMaxLocalMapSize`.
 
 The remainder of this document is organised as follows:
 - **Section 2** provides an overview of `gtest` and the API used in the basalt testing framework
@@ -847,7 +847,7 @@ The implementation adapts `src/vio.cpp`. The following pseudo code describes the
 
 **New in `basalt_slam.cpp`:**
 - `Controller` object replaces the separate `opt_flow_ptr_` and `vio` objects.
-- `Controller::initialize()` with `useProducerConsumerArchitecture=true` creates the full four-thread pipeline (OpticalFlow, VIO, LocalMapper, PoseConsumer).
+- `Controller::initialize()` with `useProducerConsumerArchitecture=true` creates the full four-thread pipeline (OpticalFlow, VIO, LocalMapper, PoseConsumer), otherwise, only two threads are created (OpticalFlow and VIO in one and LocalMapper in the other).
 - Post-pipeline assertions on `local_mapper_->frame_poses` for test validation.
 
 ```
@@ -906,13 +906,21 @@ FUNCTION main(argc, argv):
 
     controller = NEW Controller(config_path, cam_calib_path, SlamMode::VIO)
     controller->load_config()
+    calib = controller->GetCalibration();
+    Eigen::Matrix<double, 3, 1> bg;
+    Eigen::Matrix<double, 3, 3> sg;
+    Eigen::Matrix<double, 3, 1> ba;
+    Eigen::Matrix<double, 3, 3> sa;
+    calib.calib_gyro_bias.getBiasAndScale(bg, sg);
+    calib.calib_accel_bias.getBiasAndScale(ba, sa);
+    // convert ba and bg to Eigen::Vector3d for passing to initialize()
     controller->initialize(
         t_ns    = 0,                               // start at origin
         T_w_i   = SE3d::Identity(),                // identity pose
         vel_w_i = Vector3d::Zero(),                // zero velocity
-        bg      = Vector3d::Zero(),                // zero gyro bias
-        ba      = Vector3d::Zero(),                // zero accel bias
-        useProducerConsumerArchitecture = true      // ← KEY: enables 4-thread pipeline
+        bg,                                        // to be read and converted using calib.calib_gyro_bias.getBiasAndScale(...)
+        ba,                                        // to be read and converted from calib.calib_accel_bias.getBiasAndScale(...)
+        useProducerConsumerArchitecture = false    // ← KEY: enables 2-thread pipeline, setting to true enables 4 thread pipeline
     )
     // This internally:
     //   - Creates OpticalFlowBase (frontend, thread T1)
@@ -921,7 +929,7 @@ FUNCTION main(argc, argv):
     //   - Wires: VIO out_state_queue → Controller's pose buffer (thread T4)
     //   - Wires: VIO out_marg_queue → local_map_input_queue
     //   - Creates LocalMapper, sets marg queue and pose-feedback callback (thread T3)
-    //   - Starts all four threads
+    //   - Starts all threads needed
 
     // ─── 4. DATASET LOADING (RETAINED from vio.cpp) ──────────────────
 
@@ -929,45 +937,51 @@ FUNCTION main(argc, argv):
     dataset_io->read(dataset_path)
     vio_dataset = dataset_io->get_data()
 
-    // ─── 5. DATA FEEDING (ADAPTED from vio.cpp) ──────────────────────
+    // ─── 5. DATA FEEDING ──────────────────────
 
     // In vio.cpp:
     //   feed_images() pushes to opt_flow_ptr->input_queue
     //   feed_imu()    pushes to vio->imu_data_queue
     //
     // In basalt_slam.cpp:
-    //   feed_images() pushes via controller->GrabImage(data)
-    //   feed_imu()    pushes via controller->GrabIMU(data)
+    //   feed_data() iterates over the frame datasets and filters out imu data till the current frame and processes both the imu and frame data while ensuring time synchronisation.
 
-    THREAD t1 = feed_images:
+    vio_estimator = controller->GetVIO();
+    THREAD t1 = feed_data:
+        k = 0;
         FOR i IN 0..vio_dataset->get_image_timestamps().size():
-            IF terminate OR (max_frames > 0 AND i >= max_frames):
+            IF vio_estimator->finished OR terminate OR (max_frames > 0 AND i >= max_frames):
                 BREAK
 
             data = NEW OpticalFlowInput
             data->t_ns     = vio_dataset->get_image_timestamps()[i]
             data->img_data = vio_dataset->get_image_data(data->t_ns)
 
-            controller->GrabImage(data)    // NEW: was opt_flow_ptr->input_queue.push(data)
+            while(k < get_gyro_data().size() && vio_dataset->get_gyro_data()[k].timestamp_ns <= data->t_ns){
+                imu_data = NEW ImuData<double>
+                imu_data->t_ns  = vio_dataset->get_gyro_data()[k].timestamp_ns
+                imu_data->accel  = vio_dataset->get_accel_data()[k].data
+                imu_data->gyro   = vio_dataset->get_gyro_data()[k].data
+                k++;
 
+                controller->GrabIMU(imu_data)      // NEW: was vio->imu_data_queue.push(imu_data)
+            }
+            if(k<vio_dataset->get_gyro_data().size()){
+                imu_data = NEW ImuData<double>
+                imu_data->t_ns  = vio_dataset->get_gyro_data()[k].timestamp_ns
+                imu_data->accel  = vio_dataset->get_accel_data()[k].data
+                imu_data->gyro   = vio_dataset->get_gyro_data()[k].data
+                k++;
+                controller->GrabIMU(imu_data)      // NEW: was vio->imu_data_queue.push(imu_data)
+            }
+            Sophus::SE3f tcw;
+            controller->TrackMonocular(data, tcw)    // NEW: was opt_flow_ptr->input_queue.push(data)
+
+        
         // NOTE: Do NOT push nullptr here — Controller::Stop() handles the
         // cascade sentinel. In vio.cpp, feed_images pushed nullptr to
         // opt_flow_ptr->input_queue to signal end-of-stream. Here, Stop()
         // does this.
-
-    THREAD t2 = feed_imu:
-        FOR i IN 0..vio_dataset->get_gyro_data().size():
-            IF terminate:
-                BREAK
-
-            data = NEW ImuData<double>
-            data->t_ns  = vio_dataset->get_gyro_data()[i].timestamp_ns
-            data->accel  = vio_dataset->get_accel_data()[i].data
-            data->gyro   = vio_dataset->get_gyro_data()[i].data
-
-            controller->GrabIMU(data)      // NEW: was vio->imu_data_queue.push(data)
-
-        // NOTE: Do NOT push nullptr here — Controller::Stop() handles this.
 
     // REMOVED from vio.cpp:
     //   thread t3 (visualisation consumer) — Controller has no vis queue
@@ -976,8 +990,7 @@ FUNCTION main(argc, argv):
 
     // ─── 6. WAIT FOR DATA FEEDING TO COMPLETE ────────────────────────
 
-    t1.join()    // Image feed finished
-    t2.join()    // IMU feed finished
+    t1.join()    // Data feed finished
 
     // At this point all data has been pushed into the pipeline, but the
     // pipeline threads (T1–T4) are still processing the tail end of the
@@ -1013,14 +1026,14 @@ FUNCTION main(argc, argv):
     //
     // It contains one entry per keyframe currently in the local map.
 
-    local_mapper = controller->local_mapper_
+    local_mapper = controller->GetLocalMapper();
 
     // Assertion 1: The local mapper processed at least some data
-    ASSERT frame_poses.size() > 0
+    ASSERT local_mapper->frame_poses.size() > 0
         "LocalMapper should have at least one keyframe after processing"
 
     // Assertion 2: The local map respects the size bound
-    ASSERT frame_poses.size() <= local_mapper->mpMaxLocalMapSize
+    ASSERT local_mapper->frame_poses.size() <= local_mapper->mpMaxLocalMapSize
         "Local map size should not exceed mpMaxLocalMapSize"
 
     // Assertion 3 (optional): No hanging state
@@ -1029,18 +1042,343 @@ FUNCTION main(argc, argv):
     RETURN 0   // Success
 ```
 
+The following will be added to `CMakeLists.txt` to build the integration test binary.
+```cmake
+add_executable(basalt_slam src/basalt_slam.cpp)
+target_link_libraries(basalt_slam basalt basalt::cli11)
+```
+
 **Key architectural differences from `vio.cpp` summarised:**
 
 | Aspect | `vio.cpp` (reference) | `basalt_slam.cpp` (integration test) |
 |---|---|---|
 | Pipeline wiring | Manual: create `opt_flow_ptr`, `vio`, wire queues explicitly | `Controller` encapsulates all wiring in `initialize()` |
 | Data ingestion | `opt_flow_ptr->input_queue.push(data)`, `vio->imu_data_queue.push(data)` | `controller->GrabImage(data)`, `controller->GrabIMU(data)` |
-| LocalMapper | Not present | Created by `Controller` when `useProducerConsumerArchitecture=true` |
+| LocalMapper | Not present | Created by `Controller` in `Controller::initialize`|
 | Pose output | Explicit `out_state_queue` + manual thread `t4` | `Controller::process_pose_queue_loop()` (internal thread T4) |
 | Visualisation | Pangolin GUI with `out_vis_queue`, draw functions, event loop | None — headless test executable |
 | Shutdown | Manual: `vio->maybe_join()`, `drain_input_queues()`, join each thread | `controller->Stop()` — cascade sentinel handles all threads |
 | End-of-stream | `feed_images` pushes `nullptr` to `opt_flow_ptr->input_queue` | `Controller::Stop()` pushes `nullptr` — feed threads do **not** push sentinels |
 | Post-run | Trajectory saving, alignment, RMSE computation | Assertions on `local_mapper_->frame_poses` |
+
+#### 4.9.5 Eigen Alignment and TBB Containers — The `MatchData` Issue
+
+##### 4.9.5.1 Prerequisites: SIMD, Alignment, and Eigen
+
+Modern CPUs accelerate floating-point arithmetic through SIMD (Single Instruction, Multiple Data) instruction sets. These instructions operate on small, fixed-size vectors of data loaded from memory in a single cycle, but they impose strict **alignment** constraints on the memory addresses they read from:
+
+| Instruction Set | Register Width | Required Alignment |
+|-----------------|---------------|--------------------|
+| SSE / NEON      | 128-bit       | 16 bytes           |
+| AVX             | 256-bit       | 32 bytes           |
+| AVX-512         | 512-bit       | 64 bytes           |
+
+An address is *N*-byte aligned when `address % N == 0`. Loading a 256-bit (32-byte) AVX register from an address that is only 16-byte aligned triggers undefined behaviour — on some hardware a silent performance penalty, on others a hard fault.
+
+**Eigen** is a C++ template library for linear algebra that maps its fixed-size matrix and vector types directly onto SIMD registers. When Eigen detects AVX support at compile time (e.g. via `-march=native`), it sets the internal macro `EIGEN_MAX_STATIC_ALIGN_BYTES` and declares fixed-size vectorisable types with the corresponding `alignof`:
+
+| Eigen Type | `sizeof` | `alignof` (AVX) | `alignof` (AVX-512) | Fixed-Size Vectorisable? |
+|---|---|---|---|---|
+| `Vector2d` | 16 | 16 | 16 | Yes (SSE) |
+| `Vector3d` | 24 | 8 | 8 | No (odd size) |
+| `Vector4d` | 32 | 32 | 32 | Yes (AVX) |
+| `Quaterniond` | 32 | 32 | 32 | Yes (AVX) |
+| `Matrix2d` | 32 | 32 | 32 | Yes (AVX) |
+| `Matrix4d` | 128 | 64 | 64 | Yes (AVX-512) |
+| `AffineCompact2f` | 24 | 4 | 4 | No |
+
+A type is *over-aligned* when `alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__` (typically 16 on x86-64 Linux). For AVX builds, `Quaterniond` and `Vector4d` are over-aligned at 32 bytes.
+
+**Sophus** wraps Eigen types to represent Lie groups. `Sophus::SO3d` stores an `Eigen::Quaterniond`; `Sophus::SE3d` stores an `SO3d` plus a `Vector3d`. Therefore **any struct containing `Sophus::SE3d` inherits the 32-byte alignment requirement** of its internal `Quaterniond`.
+
+Eigen's documentation ([Explanation of the assertion on unaligned arrays](https://libeigen.gitlab.io/eigen/docs-nightly/group__TopicUnalignedArrayAssert.html)) enumerates four causes of alignment violations:
+
+1. **Struct/class member** — a class containing a fixed-size vectorisable member is heap-allocated via `operator new`, which may not honour the type's alignment. Fix: add `EIGEN_MAKE_ALIGNED_OPERATOR_NEW` to the class.
+2. **STL containers** — node-based containers (`std::map`, `std::unordered_map`) allocate nodes internally; the default allocator may not respect the value type's alignment. Fix: use `Eigen::aligned_allocator`.
+3. **Pass by value** — passing a fixed-size vectorisable type by value may violate alignment on the callee's stack frame. Fix: pass by const reference.
+4. **Compiler stack alignment** — some compilers (old GCC on Windows) assume only 16-byte stack alignment. Fix: compiler flags or `alignas`.
+
+In C++17 (which Basalt requires — see `CMakeLists.txt:87`), `std::allocator<T>::allocate()` for over-aligned types calls `::operator new(size, std::align_val_t(alignof(T)))`, which correctly handles over-alignment. This means **STL containers with the default allocator are safe in C++17** for over-aligned types.
+
+##### 4.9.5.2 Prerequisites: How TBB `concurrent_unordered_map` Stores Values
+
+Intel TBB's `concurrent_unordered_map` is a lock-free hash map built on a split-ordered list. Internally, each key-value pair is stored in a heap-allocated **node**. The relevant class hierarchy from [oneTBB `_concurrent_unordered_base.h`](https://github.com/uxlfoundation/oneTBB/blob/master/include/oneapi/tbb/detail/_concurrent_unordered_base.h) is:
+
+```cpp
+// Base node for the split-ordered linked list
+class list_node {                              // sizeof = 16
+    std::atomic<list_node*> my_next;           // offset  0: 8 bytes
+    size_t                  my_order_key;       // offset  8: 8 bytes
+};
+
+// Derived node that holds the actual key-value pair
+template <typename ValueType, typename SokeyType>
+class value_node : public list_node {
+    union {
+        ValueType my_value;                    // offset 16...or more with padding
+    };
+};
+```
+
+The user provides an allocator for the *value type* (e.g. `Eigen::aligned_allocator<std::pair<const Key, Value>>`). TBB **rebinds** this allocator to `value_node`:
+
+```cpp
+using value_node_allocator_type =
+    typename allocator_traits_type::template rebind_alloc<value_node_type>;
+```
+
+Node allocation in `create_node()` then uses the rebound allocator:
+
+```cpp
+value_node_ptr new_node = value_node_allocator_traits::allocate(allocator, 1);
+```
+
+The C++ compiler propagates the alignment of `ValueType` to `value_node` (because a derived class's alignment is `max(alignof(base), alignof(members))`). So `alignof(value_node)` equals `alignof(ValueType)` when the value is over-aligned. The compiler also inserts padding between `list_node` and the `my_value` union member to satisfy this alignment:
+
+```
+value_node layout (when ValueType has alignof = 32):
+
+Offset  0: [my_next]       8 bytes   ← list_node base
+Offset  8: [my_order_key]  8 bytes   ← list_node base
+Offset 16: [PADDING]      16 bytes   ← compiler-inserted
+Offset 32: [my_value]      ...       ← ValueType starts here (32-byte aligned relative to node base)
+```
+
+This means the `ValueType` sits at **offset 32** within the node. For the value to actually be 32-byte aligned in absolute terms, the **node itself** must be allocated at a 32-byte aligned address. This is where the allocator becomes critical.
+
+##### 4.9.5.3 The Root Cause: `Eigen::aligned_allocator` Uses a Global Alignment Constant
+
+`Eigen::aligned_allocator<T>::allocate()` does **not** use `alignof(T)`. It calls:
+
+```cpp
+pointer allocate(size_type num, const void* = 0) {
+    return static_cast<pointer>(internal::aligned_malloc(num * sizeof(T)));
+}
+```
+
+And `internal::aligned_malloc()` aligns to `EIGEN_DEFAULT_ALIGN_BYTES` — a **compile-time global constant** determined by SIMD feature detection:
+
+| Architecture | `EIGEN_DEFAULT_ALIGN_BYTES` |
+|---|---|
+| SSE only | 16 |
+| AVX | 32 |
+| AVX-512 | 64 |
+
+This is **not** the same as `alignof(T)`. It is a single value for the entire translation unit, regardless of what type `T` the allocator is instantiated for.
+
+The alignment chain works correctly **only when** `EIGEN_DEFAULT_ALIGN_BYTES >= alignof(value_node)`:
+
+| Scenario | `EIGEN_DEFAULT_ALIGN_BYTES` | `alignof(value_node)` | Offset of `my_value` | Effective alignment | Result |
+|---|---|---|---|---|---|
+| AVX-512 system | 64 | 32 | 32 | `(64n + 32) % 32 = 0` | **OK** |
+| AVX system | 32 | 32 | 32 | `(32n + 32) % 32 = 0` | **OK** |
+| SSE system compiling with `-march=native` on AVX hardware | 16 | 32 | 32 | `(16n + 32) % 32 = ?` | **FAILS** when `n` is odd |
+| Mixed flags across TUs | varies | 32 | 32 | unpredictable | **FAILS** |
+
+The last two scenarios are the dangerous ones. They occur when:
+- The system's Eigen package (e.g. `/usr/include/eigen3/`) detects different SIMD capabilities than the project's bundled Eigen.
+- TBB was pre-compiled without AVX, so its internal allocator paths use `malloc` (which guarantees only 16-byte alignment on glibc x86-64).
+- Different translation units are compiled with inconsistent `-march` flags.
+
+By contrast, C++17's `std::allocator<T>::allocate()` uses `alignof(T)` directly via `::operator new(size, std::align_val_t(alignof(T)))`. This is **per-type**, not global, making it inherently safer.
+
+##### 4.9.5.4 The Crash in Basalt: `MatchData` in `feature_matches`
+
+The `MatchData` struct in `common_types.h` contains `Sophus::SE3d T_i_j`, which contains `Eigen::Quaterniond` (`alignof = 32` on AVX):
+
+```cpp
+struct MatchData {
+    Sophus::SE3d T_i_j;                                   // alignof = 32
+    std::vector<std::pair<FeatureId, FeatureId>> matches;  // alignof = 8
+    std::vector<std::pair<FeatureId, FeatureId>> inliers;  // alignof = 8
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+```
+
+The `Matches` typedef originally stored `MatchData` **by value** inside a `tbb::concurrent_unordered_map`:
+
+```cpp
+// ORIGINAL (before fix)
+using Matches = tbb::concurrent_unordered_map<
+    std::pair<TimeCamId, TimeCamId>, MatchData,
+    std::hash<std::pair<TimeCamId, TimeCamId>>,
+    std::equal_to<std::pair<TimeCamId, TimeCamId>>,
+    Eigen::aligned_allocator<
+        std::pair<const std::pair<TimeCamId, TimeCamId>, MatchData>>>;
+```
+
+At `nfr_mapper.cpp:565`, the `operator[]` call triggers TBB's internal `create_node()`, which default-constructs a `MatchData` inside the node. If the node's memory is not 32-byte aligned, the `Quaterniond` constructor inside `SE3d` fires Eigen's alignment assertion:
+
+```
+basalt_slam: /usr/include/eigen3/Eigen/src/Core/DenseStorage.h:128: Eigen::internal::plain_array<T, Size, MatrixOrArrayOptions, 32>::plain_array() [with T = double; int Size = 4; int MatrixOrArrayOptions = 0]: Assertion `(internal::UIntPtr(eigen_unaligned_array_assert_workaround_gcc47(array)) & (31)) == 0 && "this assertion is explained here: " "http://eigen.tuxfamily.org/dox-devel/group__TopicUnalignedArrayAssert.html" " **** READ THIS WEB PAGE !!! ****"' failed.
+
+Thread 2 "basalt_slam" received signal SIGABRT, Aborted.
+[Switching to Thread 0x7fffebbff640 (LWP 16350)]
+0x00007ffff72419fc in pthread_kill () from /lib/x86_64-linux-gnu/libc.so.6
+(gdb) bt
+#0 0x00007ffff72419fc in pthread_kill () from /lib/x86_64-linux-gnu/libc.so.6
+#1 0x00007ffff71ed476 in raise () from /lib/x86_64-linux-gnu/libc.so.6
+#2 0x00007ffff71d37f3 in abort () from /lib/x86_64-linux-gnu/libc.so.6
+#3 0x00007ffff71d371b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#4 0x00007ffff71e4e96 in __assert_fail () from /lib/x86_64-linux-gnu/libc.so.6
+#5 0x00007ffff79b009e in Eigen::internal::plain_array<double, 4, 0, 32>::plain_array (this=<optimized out>)
+at /usr/include/eigen3/Eigen/src/Core/DenseStorage.h:128
+#6 Eigen::DenseStorage<double, 4, 4, 1, 0>::DenseStorage (this=<optimized out>) at /usr/include/eigen3/Eigen/src/Core/DenseStorage.h:211
+#7 Eigen::PlainObjectBase<Eigen::Matrix<double, 4, 1, 0, 4, 1> >::PlainObjectBase (this=<optimized out>)
+at /usr/include/eigen3/Eigen/src/Core/PlainObjectBase.h:476
+#8 Eigen::Matrix<double, 4, 1, 0, 4, 1>::Matrix (w=<optimized out>, z=<optimized out>, y=<optimized out>, x=<optimized out>, this=<optimized out>)
+at /usr/include/eigen3/Eigen/src/Core/Matrix.h:402
+#9 Eigen::Quaternion<double, 0>::Quaternion (z=<optimized out>, y=<optimized out>, x=<optimized out>, w=<optimized out>, this=<optimized out>)
+at /usr/include/eigen3/Eigen/src/Geometry/Quaternion.h:297
+#10 Sophus::SO3<double, 0>::SO3 (this=<optimized out>) at /ws/ros_ws/src/slam/ext/basalt/thirdparty/basalt-headers/thirdparty/Sophus/sophus/so3.hpp:499
+#11 Sophus::SE3<double, 0>::SE3 (this=<optimized out>) at /ws/ros_ws/src/slam/ext/basalt/thirdparty/basalt-headers/thirdparty/Sophus/sophus/se3.hpp:1050
+#12 0x00007ffff79bd8cc in basalt::MatchData::MatchData (this=0x7fff54001c30) at /ws/ros_ws/src/slam/ext/basalt/include/basalt/utils/common_types.h:117
+#13 std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&, 0ul>(std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>&, std::tuple<>&, std::_Index_tuple<0ul>, std::_Index_tuple<>) (
+__tuple2=<synthetic pointer>empty std::tuple, __tuple1=..., this=0x7fff54001c10) at /usr/include/c++/11/tuple:1820
+#14 std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>(std::piecewise_construct_t, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>, std::tuple<>) (__second=..., __first=..., this=0x7fff54001c10)
+at /usr/include/c++/11/tuple:1809
+#15 __gnu_cxx::new_allocator<tbb::detail::d1::value_node<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>, unsigned long> >::construct<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>, std::piecewise_construct_t const&, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>, std::tuple<> >(std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>*, std::piecewise_construct_t const&, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>&&, std::tuple<>&&) (__p=0x7fff54001c10, this=<optimized out>)
+at /usr/include/c++/11/ext/new_allocator.h:162
+#16 std::allocator_traits<Eigen::aligned_allocator<tbb::detail::d1::value_node<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>, unsigned long> > >::_S_construct<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>, std::piecewise_construct_t const&, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>, std::tuple<> >(Eigen::aligned_allocator<tbb::detail::d1::value_node<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>, unsigned long> >&, std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>*, std::piecewise_construct_t const&, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>&&, std::tuple<>&&) (__p=0x7fff54001c10, __a=...)
+at /usr/include/c++/11/bits/alloc_traits.h:251
+#17 std::allocator_traits<Eigen::aligned_allocator<tbb::detail::d1::value_node<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>, unsigned long> > >::construct<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>, std::piecewise_construct_t const&, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>, std::tuple<> >(Eigen::aligned_allocator<tbb::detail::d1::value_node<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>, unsigned long> >&, std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData>*, std::piecewise_construct_t const&, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>&&, std::tuple<>&&) (__p=0x7fff54001c10, __a=...)
+at /usr/include/c++/11/bits/alloc_traits.h:364
+#18 tbb::detail::d1::concurrent_unordered_base<tbb::detail::d1::concurrent_unordered_map_traits<std::pair<basalt::TimeCamId, basalt::TimeCamId>, basalt::MatchData, std::hash<std::pair<basalt::TimeCamId, basalt::TimeCamId> >, std::equal_to<std::pair<basalt::TimeCamId, basalt::TimeCamId> >, Eigen::aligned_allocator<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData> >, false> >::create_node<std::piecewise_construct_t const&, std::tuple<std:--Type <RET> for more, q to quit, c to continue without paging--
+:pair<basalt::TimeCamId, basalt::TimeCamId>&&>, std::tuple<> >(unsigned long, std::piecewise_construct_t const&, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>&&, std::tuple<>&&) (this=0x555555a84dd8, order_key=0) at /usr/include/oneapi/tbb/detail/_concurrent_unordered_base.h:1132
+#19 tbb::detail::d1::concurrent_unordered_base<tbb::detail::d1::concurrent_unordered_map_traits<std::pair<basalt::TimeCamId, basalt::TimeCamId>, basalt::MatchData, std::hash<std::pair<basalt::TimeCamId, basalt::TimeCamId> >, std::equal_to<std::pair<basalt::TimeCamId, basalt::TimeCamId> >, Eigen::aligned_allocator<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData> >, false> >::emplace<std::piecewise_construct_t const&, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>, std::tuple<> >(std::piecewise_construct_t const&, std::tuple<std::pair<basalt::TimeCamId, basalt::TimeCamId>&&>&&, std::tuple<>&&) (this=0x555555a84dd8) at /usr/include/oneapi/tbb/detail/_concurrent_unordered_base.h:470
+^[[A#20 tbb::detail::d1::concurrent_unordered_map<std::pair<basalt::TimeCamId, basalt::TimeCamId>, basalt::MatchData, std::hash<std::pair<basalt::TimeCamId, basalt::TimeCamId> >, std::equal_to<std::pair<basalt::TimeCamId, basalt::TimeCamId> >, Eigen::aligned_allocator<std::pair<std::pair<basalt::TimeCamId, basalt::TimeCamId> const, basalt::MatchData> > >::operator[] (this=this@entry=0x555555a84dd8, key=...) at /usr/include/oneapi/tbb/concurrent_unordered_map.h:99
+#21 0x00007ffff799e23e in basalt::NfrMapper::match_stereo (this=this@entry=0x555555a848a0)
+at /ws/ros_ws/src/slam/ext/basalt/src/vi_estimator/nfr_mapper.cpp:565
+#22 0x00007ffff7ad1626 in basalt::LocalMapper::MapLocally (this=<optimized out>) at /ws/ros_ws/src/slam/ext/basalt/src/vi_estimator/local_mapper.cpp:81
+```
+
+The backtrace confirms the crash path:
+
+```
+#10 Sophus::SO3<double>::SO3()          ← identity quaternion constructor
+#11 Sophus::SE3<double>::SE3()          ← default SE3 constructor
+#12 basalt::MatchData::MatchData()      ← default MatchData constructor
+ ...
+#18 tbb::concurrent_unordered_base::create_node()  ← TBB allocates the node
+#20 tbb::concurrent_unordered_map::operator[]()     ← triggered by subscript
+#21 basalt::NfrMapper::match_stereo()   ← nfr_mapper.cpp:565
+#22 basalt::LocalMapper::MapLocally()   ← local_mapper.cpp:81
+```
+
+The crash was observed in the `LocalMapper`'s mapping thread (`std::thread mpLocalMappingThread`). However, the same code path exists in the original offline `NfrMapper::match_stereo()` and `NfrMapper::match_all()` — the bug is latent in upstream Basalt but was not triggered there because:
+
+1. The offline mapper (`basalt_mapper`) runs the code path infrequently.
+2. On developer hardware, `EIGEN_DEFAULT_ALIGN_BYTES` may have matched or exceeded 32, masking the issue.
+3. Release builds with `-DNDEBUG` disable Eigen's alignment assertions, turning the crash into silent undefined behaviour (misaligned SIMD loads producing subtly wrong results).
+
+##### 4.9.5.5 Which Types Are Affected?
+
+Not all Eigen types in Basalt containers are at risk. Only types with `alignof > 16` (i.e. over-aligned beyond `__STDCPP_DEFAULT_NEW_ALIGNMENT__`) are affected:
+
+| Container | Value Type | `alignof` | Over-Aligned? | At Risk? |
+|---|---|---|---|---|
+| `Matches` (`feature_matches`) | `MatchData` (via `SE3d`) | 32 | Yes | Yes |
+| `Cameras` | `Camera` (via `SE3d`) | 32 | Yes | No — uses `std::map` with `Eigen::aligned_allocator` |
+| `Corners` (`feature_corners`) | `KeypointsData` | 8 | No | No |
+| `Landmarks` | `Landmark` (`Vector3d`) | 8 | No | No |
+| Optical flow maps | `AffineCompact2f` | 4 | No | No |
+
+`KeypointsData` is safe despite containing `std::vector<Vector2d, Eigen::aligned_allocator<Vector2d>>` and `Eigen::aligned_vector<Vector4d>` because these are `std::vector` members that manage their own heap storage independently. The `KeypointsData` struct itself holds only vector metadata (three pointers per vector) and has `alignof(KeypointsData) = 8`.
+
+`Landmark` is safe because `Eigen::Vector3d` is 24 bytes with `alignof = 8` — it is not a power-of-two size, so Eigen does not try to vectorise it with AVX.
+
+##### 4.9.5.6 Architecture-Dependent Behaviour
+
+This issue manifests differently across architectures and build configurations:
+
+**x86-64 with AVX-512 (e.g. Intel Xeon Skylake-SP, Ice Lake):**
+- `EIGEN_DEFAULT_ALIGN_BYTES = 64`, `alignof(Quaterniond) = 32`.
+- `Eigen::aligned_allocator` returns 64-byte-aligned memory.
+- Node base is 64-byte aligned; `my_value` at offset 32 → `64n + 32` → always 32-byte aligned.
+- **Bug is masked.** The code works by accident.
+
+**x86-64 with AVX (e.g. Intel Haswell, AMD Zen):**
+- `EIGEN_DEFAULT_ALIGN_BYTES = 32`, `alignof(Quaterniond) = 32`.
+- `Eigen::aligned_allocator` returns 32-byte-aligned memory.
+- Node base is 32-byte aligned; `my_value` at offset 32 → `32n + 32 = 32(n+1)` → always 32-byte aligned.
+- **Bug is masked.** The alignment happens to work.
+
+**x86-64 with SSE only, compiled with `-march=native` on AVX hardware:**
+- `EIGEN_DEFAULT_ALIGN_BYTES = 16` (SSE detection), but `alignof(Quaterniond) = 32` (AVX instructions enabled by `-march=native`).
+- `Eigen::aligned_allocator` returns only 16-byte-aligned memory.
+- Node base at `16n`; `my_value` at offset 32 → `16n + 32`. When `n` is odd: `16(2k+1) + 32 = 32k + 48`, and `48 % 32 = 16` → **misaligned. Crash.**
+
+**Mixed compilation (e.g. system TBB pre-compiled without AVX + project compiled with AVX):**
+- TBB's internal allocator may use `malloc` (16-byte aligned on glibc x86-64).
+- Even if `Eigen::aligned_allocator` is specified, TBB may delegate to its own `scalable_malloc` for some node types.
+- **Unpredictable failures** depending on heap layout.
+
+**ARM (e.g. Apple M-series, Jetson):**
+- NEON requires 16-byte alignment; `alignof(Quaterniond) = 16`.
+- Standard `malloc` on ARM returns 16-byte-aligned memory.
+- **No issue.** The types are not over-aligned relative to the platform's default.
+
+##### 4.9.5.7 The Fix: Pointer Indirection via `std::shared_ptr<MatchData>`
+
+The fix decouples the `MatchData` object's memory from TBB's internal node layout by storing a pointer instead of the value:
+
+```cpp
+// FIXED
+using Matches = tbb::concurrent_unordered_map<
+    std::pair<TimeCamId, TimeCamId>, std::shared_ptr<MatchData>,
+    std::hash<std::pair<TimeCamId, TimeCamId>>>;
+```
+
+**Why this works:**
+
+1. `alignof(std::shared_ptr<MatchData>) = 8`. A `shared_ptr` is just two pointers (16 bytes on x86-64), with no over-alignment requirement. TBB's `value_node` now only needs 8-byte alignment for the value — trivially satisfied by any allocator.
+
+2. The `MatchData` object is allocated on the heap separately via `std::allocate_shared<MatchData>(Eigen::aligned_allocator<MatchData>{}, ...)`. This calls `Eigen::aligned_allocator<MatchData>::allocate()`, which returns memory aligned to `EIGEN_DEFAULT_ALIGN_BYTES`. Critically, the `MatchData` is the **only** object at this address — there is no TBB node header shifting it to an unaligned offset.
+
+3. The `Eigen::aligned_allocator` is no longer needed on the `Matches` typedef itself (since `shared_ptr` has no alignment requirement), simplifying the type.
+
+At every insertion site, `MatchData` is wrapped:
+
+```cpp
+// Before (crashed):
+feature_matches[std::make_pair(tcid1, tcid2)] = md;
+
+// After (safe):
+feature_matches[std::make_pair(tcid1, tcid2)] =
+    std::allocate_shared<MatchData>(Eigen::aligned_allocator<MatchData>{}, md);
+```
+
+All read sites change `.` to `->`:
+
+```cpp
+// Before:
+const MatchData& matchData = iter.second;
+
+// After:
+const MatchData& matchData = *iter.second;
+```
+
+The same approach is applied to `LocalMapper::mpLatestKeyframesMatches` for consistency, so that copies between `feature_matches` and `mpLatestKeyframesMatches` are pointer copies (no `MatchData` duplication, no re-allocation):
+
+```cpp
+// local_mapper.h
+std::unordered_map<std::pair<TimeCamId, TimeCamId>,
+                   std::shared_ptr<MatchData>,
+                   std::hash<std::pair<TimeCamId, TimeCamId>>>
+    mpLatestKeyframesMatches;
+```
+
+**Trade-offs:**
+
+| Aspect | Before (by value) | After (`shared_ptr`) |
+|---|---|---|
+| Alignment safety | Depends on allocator + TBB internals | Guaranteed by `allocate_shared` |
+| Memory layout | `MatchData` inline in node (cache-friendly) | One extra heap allocation + indirection |
+| Copy semantics | Deep copy on insert/iteration | Pointer copy (cheaper) |
+| Thread safety | TBB map is lock-free; value is owned | `shared_ptr` ref-count is atomic (thread-safe) |
+| Code changes | — | `~22 sites`: `.` → `->`, wrap insertions |
+
+The extra indirection is negligible in practice: `MatchData` is accessed infrequently (once per match pair per frame), and the pointer dereference cost is dwarfed by the descriptor matching and geometric verification that produce the data.
 
 ---
 

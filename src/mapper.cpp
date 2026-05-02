@@ -438,9 +438,9 @@ void draw_image_overlay(pangolin::View& v, size_t view_id) {
           nrf_mapper->feature_corners.end()) {
         const basalt::KeypointsData& cr = nrf_mapper->feature_corners.at(tcid);
 
-        for (size_t i = 0; i < it->second.matches.size(); i++) {
-          size_t c_idx = idx == 0 ? it->second.matches[i].first
-                                  : it->second.matches[i].second;
+        for (size_t i = 0; i < it->second->matches.size(); i++) {
+          size_t c_idx = idx == 0 ? it->second->matches[i].first
+                                  : it->second->matches[i].second;
 
           Eigen::Vector2d c = cr.corners[c_idx];
           double angle = cr.corner_angles[c_idx];
@@ -458,7 +458,7 @@ void draw_image_overlay(pangolin::View& v, size_t view_id) {
         }
 
         pangolin::GlFont::I()
-            .Text("Detected %d matches", it->second.matches.size())
+            .Text("Detected %d matches", it->second->matches.size())
             .Draw(5, text_row);
         text_row += 20;
       }
@@ -471,9 +471,9 @@ void draw_image_overlay(pangolin::View& v, size_t view_id) {
           nrf_mapper->feature_corners.end()) {
         const basalt::KeypointsData& cr = nrf_mapper->feature_corners.at(tcid);
 
-        for (size_t i = 0; i < it->second.inliers.size(); i++) {
-          size_t c_idx = idx == 0 ? it->second.inliers[i].first
-                                  : it->second.inliers[i].second;
+        for (size_t i = 0; i < it->second->inliers.size(); i++) {
+          size_t c_idx = idx == 0 ? it->second->inliers[i].first
+                                  : it->second->inliers[i].second;
 
           Eigen::Vector2d c = cr.corners[c_idx];
           double angle = cr.corner_angles[c_idx];
@@ -491,7 +491,7 @@ void draw_image_overlay(pangolin::View& v, size_t view_id) {
         }
 
         pangolin::GlFont::I()
-            .Text("Detected %d inliers", it->second.inliers.size())
+            .Text("Detected %d inliers", it->second->inliers.size())
             .Draw(5, text_row);
         text_row += 20;
       }
