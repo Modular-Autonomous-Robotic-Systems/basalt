@@ -503,16 +503,14 @@ void NfrMapper::detect_keypoints() {
 
     auto t1 = std::chrono::high_resolution_clock::now();
 
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, keys.size()),
-                      [&](const tbb::blocked_range<size_t>& r) {
-                          for (size_t j = r.begin(); j != r.end(); ++j) {
-                              auto kv = img_data.find(keys[j]);
-                              if (kv->second.get()) {
-                                  detect_timestamp_keypoints(kv->first,
-                                                             kv->second);
-                              }
-                          }
-                      });
+    // parallelisation removed due to crash because of invalid update of
+    // `HashBowStl::inverted_index` from two threads
+    for (size_t j = 0; j != keys.size(); ++j) {
+        auto kv = img_data.find(keys[j]);
+        if (kv->second.get()) {
+            detect_timestamp_keypoints(kv->first, kv->second);
+        }
+    }
 
     auto t2 = std::chrono::high_resolution_clock::now();
 

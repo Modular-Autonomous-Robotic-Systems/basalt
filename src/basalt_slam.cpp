@@ -35,10 +35,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <basalt/controller.h>
 #include <basalt/io/dataset_io.h>
+#include <basalt/visualisation/visualiser.h>
 #include <tbb/global_control.h>
 
 #include <CLI/CLI.hpp>
+#include <algorithm>
 #include <iostream>
+#include <optional>
 #include <thread>
 
 // Globals shared with feed thread
@@ -54,6 +57,24 @@ void feed_data(std::shared_ptr<basalt::Controller> controller,
     const auto& gyro_data = vio_dataset->get_gyro_data();
     const auto& accel_data = vio_dataset->get_accel_data();
     const auto& image_timestamps = vio_dataset->get_image_timestamps();
+
+    // Ground-truth poses are sampled at the mocap rate, which rarely coincides
+    // with an image timestamp, so resolve the nearest GT sample per frame.
+    const auto& gt_timestamps = vio_dataset->get_gt_timestamps();
+    const auto& gt_poses = vio_dataset->get_gt_pose_data();
+    auto gt_pose_for =
+        [&](int64_t t_ns) -> std::optional<Sophus::SE3d> {
+        if (gt_timestamps.empty()) return std::nullopt;
+        auto it =
+            std::lower_bound(gt_timestamps.begin(), gt_timestamps.end(), t_ns);
+        size_t idx = static_cast<size_t>(it - gt_timestamps.begin());
+        if (idx == gt_timestamps.size()) idx = gt_timestamps.size() - 1;
+        // Prefer the closer of the two neighbouring samples.
+        else if (idx > 0 && (t_ns - gt_timestamps[idx - 1]) <
+                                (gt_timestamps[idx] - t_ns))
+            idx = idx - 1;
+        return gt_poses[idx];
+    };
 
     size_t k = 0;
     std::cout << "number of images found: " << image_timestamps.size()
@@ -91,9 +112,12 @@ void feed_data(std::shared_ptr<basalt::Controller> controller,
             controller->GrabIMU(imu_data);
         }
 
-        // Process frame synchronously (optical flow + VIO on this thread)
+        // Process frame synchronously (optical flow + VIO on this thread). The
+        // ground-truth pose is forwarded only when the GUI is enabled, which
+        // the Controller decides internally.
         Sophus::SE3f tcw;
-        controller->TrackMonocular(data, tcw);
+        std::optional<Sophus::SE3d> gtcw = gt_pose_for(image_timestamps[i]);
+        controller->TrackMonocular(data, tcw, gtcw);
     }
 
     std::cout << "Finished feed_data thread" << std::endl;
@@ -105,6 +129,7 @@ int main(int argc, char** argv) {
     std::string dataset_type;
     std::string config_path;
     int num_threads = 0;
+    bool show_gui = false;
 
     CLI::App app{"Basalt SLAM integration test"};
 
@@ -122,6 +147,7 @@ int main(int argc, char** argv) {
     app.add_option(
         "--max-frames", max_frames,
         "Limit number of frames to process from dataset (0 means unlimited)");
+    app.add_option("--show-gui", show_gui, "Show the SLAM GUI");
 
     try {
         app.parse(argc, argv);
@@ -155,7 +181,8 @@ int main(int argc, char** argv) {
                            Eigen::Vector3d::Zero(),  // vel_w_i: zero velocity
                            bg.cast<double>(),  // gyro bias from calibration
                            ba.cast<double>(),  // accel bias from calibration
-                           false  // useProducerConsumerArchitecture = false
+                           false,    // useProducerConsumerArchitecture = false
+                           show_gui  // enableVisualisation
     );
 
     // ── Dataset loading ─────────────────────────────────────────────
@@ -169,14 +196,26 @@ int main(int argc, char** argv) {
               << vio_dataset->get_gyro_data().size() << " IMU samples"
               << std::endl;
 
-    // ── Data feeding ────────────────────────────────────────────────
-    std::thread t1(feed_data, controller, vio_dataset);
+    // ── Data feeding + optional GUI ─────────────────────────────────
+    if (show_gui) {
+        // Start the visualiser first so its queues are wired before the feeder
+        // pushes any frames (no frame is missed). The render loop owns the GL
+        // context and must run on this main thread.
+        basalt::SlamVisualiser visualiser(*controller);
+        visualiser.Start();
 
-    // ── Wait for data feeding to complete ───────────────────────────
-    t1.join();
+        std::thread t1(feed_data, controller, vio_dataset);
+        visualiser.Run();  // blocks until the window is closed
 
-    // ── Shutdown ────────────────────────────────────────────────────
-    controller->Stop();
+        terminate = true;  // stop the feeder early if the user quit first
+        t1.join();
+        controller->Stop();   // drains VIO + local mapper via their sentinels
+        visualiser.Stop();    // releases the visualiser's consumer threads
+    } else {
+        std::thread t1(feed_data, controller, vio_dataset);
+        t1.join();
+        controller->Stop();
+    }
 
     // ── Test assertions ─────────────────────────────────────────────
     auto local_mapper = controller->GetLocalMapper();

@@ -12,6 +12,7 @@
 #include "basalt/hash_bow/hash_bow.h"
 #include "basalt/utils/tracks.h"
 #include "basalt/vi_estimator/nfr_mapper.h"
+#include "basalt/visualisation/utils.h"  // LocalMapperVisualizationData (Pangolin-free)
 
 namespace basalt {
 
@@ -43,6 +44,13 @@ public:
     void CullRedundantKeyframes();
     size_t ComputeCovisibility(int64_t tid_a, int64_t tid_b, int num_cameras);
     void CollectNewKeyframesAfterMatching();
+
+    // ── Visualisation publish hook ──────────────────────────────────
+    // A null pointer means the mapper assembles no snapshot, so the GUI tap
+    // costs nothing. This mirrors the contract of VioEstimatorBase::out_vis_queue
+    // exactly. The name is kept un-prefixed for API symmetry with the VIO hook.
+    tbb::concurrent_bounded_queue<LocalMapperVisualizationData::Ptr>*
+        out_vis_queue = nullptr;
 
     // ── Config ──────────────────────────────────────────────────────
     size_t mpMaxLocalMapSize = 50;
