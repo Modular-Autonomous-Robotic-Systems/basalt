@@ -176,6 +176,33 @@ int LandmarkDatabase<Scalar_>::numObservations(KeypointId lm_id) const {
 }
 
 template <class Scalar_>
+size_t LandmarkDatabase<Scalar_>::getObservationsCountForPair(
+    const TimeCamId &tid_a, const TimeCamId &tid_b) const {
+  const auto it = observations.find(tid_a);
+  if (it != observations.end()) {
+    const auto jt = it->second.find(tid_b);
+    if (jt != it->second.end()) {
+      return jt->second.size();
+    }
+  }
+  return 0;
+}
+
+template <class Scalar_>
+size_t LandmarkDatabase<Scalar_>::getNonLandmarkObservationsCountForKeyFrame(
+    const TimeCamId &tid) const {
+  size_t observations_count = 0;
+  for (auto it = observations.begin(); it != observations.end(); ++it) {
+    if (it->first == tid) continue;
+    const auto jt = it->second.find(tid);
+    if (jt != it->second.end()) {
+      observations_count += jt->second.size();
+    }
+  }
+  return observations_count;
+}
+
+template <class Scalar_>
 typename LandmarkDatabase<Scalar_>::MapIter
 LandmarkDatabase<Scalar_>::removeLandmarkHelper(
     LandmarkDatabase<Scalar>::MapIter it) {

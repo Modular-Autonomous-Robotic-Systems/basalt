@@ -40,128 +40,128 @@ namespace basalt {
 
 template <class Scalar_>
 class BundleAdjustmentBase {
- public:
-  using Scalar = Scalar_;
-  using Vec2 = Eigen::Matrix<Scalar, 2, 1>;
-  using Vec3 = Eigen::Matrix<Scalar, 3, 1>;
-  using Vec4 = Eigen::Matrix<Scalar, 4, 1>;
-  using Vec6 = Eigen::Matrix<Scalar, 6, 1>;
-  using VecX = Eigen::Matrix<Scalar, Eigen::Dynamic, 1>;
+public:
+    using Scalar = Scalar_;
+    using Vec2 = Eigen::Matrix<Scalar, 2, 1>;
+    using Vec3 = Eigen::Matrix<Scalar, 3, 1>;
+    using Vec4 = Eigen::Matrix<Scalar, 4, 1>;
+    using Vec6 = Eigen::Matrix<Scalar, 6, 1>;
+    using VecX = Eigen::Matrix<Scalar, Eigen::Dynamic, 1>;
 
-  using Mat4 = Eigen::Matrix<Scalar, 4, 4>;
-  using Mat6 = Eigen::Matrix<Scalar, 6, 6>;
-  using MatX = Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>;
+    using Mat4 = Eigen::Matrix<Scalar, 4, 4>;
+    using Mat6 = Eigen::Matrix<Scalar, 6, 6>;
+    using MatX = Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>;
 
-  using SE3 = Sophus::SE3<Scalar>;
+    using SE3 = Sophus::SE3<Scalar>;
 
-  void computeError(Scalar& error,
-                    std::map<int, std::vector<std::pair<TimeCamId, Scalar>>>*
-                        outliers = nullptr,
-                    Scalar outlier_threshold = 0) const;
+    void computeError(Scalar& error,
+                      std::map<int, std::vector<std::pair<TimeCamId, Scalar>>>*
+                          outliers = nullptr,
+                      Scalar outlier_threshold = 0) const;
 
-  void filterOutliers(Scalar outlier_threshold, int min_num_obs);
+    void filterOutliers(Scalar outlier_threshold, int min_num_obs);
 
-  void optimize_single_frame_pose(
-      PoseStateWithLin<Scalar>& state_t,
-      const std::vector<std::vector<int>>& connected_obs) const;
+    void optimize_single_frame_pose(
+        PoseStateWithLin<Scalar>& state_t,
+        const std::vector<std::vector<int>>& connected_obs) const;
 
-  template <class Scalar2>
-  void get_current_points(
-      Eigen::aligned_vector<Eigen::Matrix<Scalar2, 3, 1>>& points,
-      std::vector<int>& ids) const;
+    template <class Scalar2>
+    void get_current_points(
+        Eigen::aligned_vector<Eigen::Matrix<Scalar2, 3, 1>>& points,
+        std::vector<int>& ids) const;
 
-  void computeDelta(const AbsOrderMap& marg_order, VecX& delta) const;
+    void computeDelta(const AbsOrderMap& marg_order, VecX& delta) const;
 
-  void linearizeMargPrior(const MargLinData<Scalar>& mld,
-                          const AbsOrderMap& aom, MatX& abs_H, VecX& abs_b,
-                          Scalar& marg_prior_error) const;
+    void linearizeMargPrior(const MargLinData<Scalar>& mld,
+                            const AbsOrderMap& aom, MatX& abs_H, VecX& abs_b,
+                            Scalar& marg_prior_error) const;
 
-  void computeMargPriorError(const MargLinData<Scalar>& mld,
-                             Scalar& marg_prior_error) const;
+    void computeMargPriorError(const MargLinData<Scalar>& mld,
+                               Scalar& marg_prior_error) const;
 
-  Scalar computeMargPriorModelCostChange(const MargLinData<Scalar>& mld,
-                                         const VecX& marg_scaling,
-                                         const VecX& marg_pose_inc) const;
+    Scalar computeMargPriorModelCostChange(const MargLinData<Scalar>& mld,
+                                           const VecX& marg_scaling,
+                                           const VecX& marg_pose_inc) const;
 
-  // TODO: Old version for squared H and b. Remove when no longer needed.
-  Scalar computeModelCostChange(const MatX& H, const VecX& b,
-                                const VecX& inc) const;
+    // TODO: Old version for squared H and b. Remove when no longer needed.
+    Scalar computeModelCostChange(const MatX& H, const VecX& b,
+                                  const VecX& inc) const;
 
-  template <class Scalar2>
-  void computeProjections(
-      std::vector<Eigen::aligned_vector<Eigen::Matrix<Scalar2, 4, 1>>>& data,
-      FrameId last_state_t_ns) const;
+    template <class Scalar2>
+    void computeProjections(
+        std::vector<Eigen::aligned_vector<Eigen::Matrix<Scalar2, 4, 1>>>& data,
+        FrameId last_state_t_ns) const;
 
-  /// Triangulates the point and returns homogenous representation. First 3
-  /// components - unit-length direction vector. Last component inverse
-  /// distance.
-  template <class Derived>
-  static Eigen::Matrix<typename Derived::Scalar, 4, 1> triangulate(
-      const Eigen::MatrixBase<Derived>& f0,
-      const Eigen::MatrixBase<Derived>& f1,
-      const Sophus::SE3<typename Derived::Scalar>& T_0_1) {
-    EIGEN_STATIC_ASSERT_VECTOR_SPECIFIC_SIZE(Derived, 3);
+    /// Triangulates the point and returns homogenous representation. First 3
+    /// components - unit-length direction vector. Last component inverse
+    /// distance.
+    template <class Derived>
+    static Eigen::Matrix<typename Derived::Scalar, 4, 1> triangulate(
+        const Eigen::MatrixBase<Derived>& f0,
+        const Eigen::MatrixBase<Derived>& f1,
+        const Sophus::SE3<typename Derived::Scalar>& T_0_1) {
+        EIGEN_STATIC_ASSERT_VECTOR_SPECIFIC_SIZE(Derived, 3);
 
-    // suffix "2" to avoid name clash with class-wide typedefs
-    using Scalar_2 = typename Derived::Scalar;
-    using Vec4_2 = Eigen::Matrix<Scalar_2, 4, 1>;
+        // suffix "2" to avoid name clash with class-wide typedefs
+        using Scalar_2 = typename Derived::Scalar;
+        using Vec4_2 = Eigen::Matrix<Scalar_2, 4, 1>;
 
-    Eigen::Matrix<Scalar_2, 3, 4> P1, P2;
-    P1.setIdentity();
-    P2 = T_0_1.inverse().matrix3x4();
+        Eigen::Matrix<Scalar_2, 3, 4> P1, P2;
+        P1.setIdentity();
+        P2 = T_0_1.inverse().matrix3x4();
 
-    Eigen::Matrix<Scalar_2, 4, 4> A(4, 4);
-    A.row(0) = f0[0] * P1.row(2) - f0[2] * P1.row(0);
-    A.row(1) = f0[1] * P1.row(2) - f0[2] * P1.row(1);
-    A.row(2) = f1[0] * P2.row(2) - f1[2] * P2.row(0);
-    A.row(3) = f1[1] * P2.row(2) - f1[2] * P2.row(1);
+        Eigen::Matrix<Scalar_2, 4, 4> A(4, 4);
+        A.row(0) = f0[0] * P1.row(2) - f0[2] * P1.row(0);
+        A.row(1) = f0[1] * P1.row(2) - f0[2] * P1.row(1);
+        A.row(2) = f1[0] * P2.row(2) - f1[2] * P2.row(0);
+        A.row(3) = f1[1] * P2.row(2) - f1[2] * P2.row(1);
 
-    Eigen::JacobiSVD<Eigen::Matrix<Scalar_2, 4, 4>> mySVD(A,
-                                                          Eigen::ComputeFullV);
-    Vec4_2 worldPoint = mySVD.matrixV().col(3);
-    worldPoint /= worldPoint.template head<3>().norm();
+        Eigen::JacobiSVD<Eigen::Matrix<Scalar_2, 4, 4>> mySVD(
+            A, Eigen::ComputeFullV);
+        Vec4_2 worldPoint = mySVD.matrixV().col(3);
+        worldPoint /= worldPoint.template head<3>().norm();
 
-    // Enforce same direction of bearing vector and initial point
-    if (f0.dot(worldPoint.template head<3>()) < 0) worldPoint *= -1;
+        // Enforce same direction of bearing vector and initial point
+        if (f0.dot(worldPoint.template head<3>()) < 0) worldPoint *= -1;
 
-    return worldPoint;
-  }
-
-  inline void backup() {
-    for (auto& kv : this->frame_states) kv.second.backup();
-    for (auto& kv : this->frame_poses) kv.second.backup();
-    this->lmdb.backup();
-  }
-
-  inline void restore() {
-    for (auto& kv : this->frame_states) kv.second.restore();
-    for (auto& kv : this->frame_poses) kv.second.restore();
-    this->lmdb.restore();
-  }
-
-  // protected:
-  PoseStateWithLin<Scalar> getPoseStateWithLin(int64_t t_ns) const {
-    auto it = this->frame_poses.find(t_ns);
-    if (it != this->frame_poses.end()) return it->second;
-
-    auto it2 = this->frame_states.find(t_ns);
-    if (it2 == this->frame_states.end()) {
-      std::cerr << "Could not find pose " << t_ns << std::endl;
-      std::abort();
+        return worldPoint;
     }
 
-    return PoseStateWithLin<Scalar>(it2->second);
-  }
+    inline void backup() {
+        for (auto& kv : this->frame_states) kv.second.backup();
+        for (auto& kv : this->frame_poses) kv.second.backup();
+        this->lmdb.backup();
+    }
 
-  Eigen::aligned_map<int64_t, PoseVelBiasStateWithLin<Scalar>> frame_states;
-  Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>> frame_poses;
+    inline void restore() {
+        for (auto& kv : this->frame_states) kv.second.restore();
+        for (auto& kv : this->frame_poses) kv.second.restore();
+        this->lmdb.restore();
+    }
 
-  // Point management
-  LandmarkDatabase<Scalar> lmdb;
+    // protected:
+    PoseStateWithLin<Scalar> getPoseStateWithLin(int64_t t_ns) const {
+        auto it = this->frame_poses.find(t_ns);
+        if (it != this->frame_poses.end()) return it->second;
 
-  Scalar obs_std_dev;
-  Scalar huber_thresh;
+        auto it2 = this->frame_states.find(t_ns);
+        if (it2 == this->frame_states.end()) {
+            std::cerr << "Could not find pose " << t_ns << std::endl;
+            std::abort();
+        }
 
-  basalt::Calibration<Scalar> calib;
+        return PoseStateWithLin<Scalar>(it2->second);
+    }
+
+    Eigen::aligned_map<int64_t, PoseVelBiasStateWithLin<Scalar>> frame_states;
+    Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>> frame_poses;
+
+    // Point management
+    LandmarkDatabase<Scalar> lmdb;
+
+    Scalar obs_std_dev;
+    Scalar huber_thresh;
+
+    basalt::Calibration<Scalar> calib;
 };
 }  // namespace basalt

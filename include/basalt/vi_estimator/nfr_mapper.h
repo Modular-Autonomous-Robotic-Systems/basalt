@@ -34,176 +34,192 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #pragma once
 
-#include <memory>
-#include <thread>
-
-#include <Eigen/Dense>
-#include <sophus/se3.hpp>
-
 #include <basalt/utils/common_types.h>
 #include <basalt/utils/nfr.h>
 #include <basalt/vi_estimator/sc_ba_base.h>
 #include <basalt/vi_estimator/vio_estimator.h>
-
 #include <tbb/concurrent_unordered_map.h>
 #include <tbb/concurrent_vector.h>
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_reduce.h>
 
+#include <Eigen/Dense>
+#include <memory>
+#include <sophus/se3.hpp>
+#include <thread>
+
 namespace basalt {
 
+template <size_t N>
+class HashBowBase;
 template <size_t N>
 class HashBow;
 
 class NfrMapper : public ScBundleAdjustmentBase<double> {
- public:
-  using Scalar = double;
+public:
+    using Scalar = double;
 
-  using Ptr = std::shared_ptr<NfrMapper>;
+    using Ptr = std::shared_ptr<NfrMapper>;
 
-  template <class AccumT>
-  struct MapperLinearizeAbsReduce
-      : public ScBundleAdjustmentBase<Scalar>::LinearizeAbsReduce<AccumT> {
-    using RollPitchFactorConstIter =
-        Eigen::aligned_vector<RollPitchFactor>::const_iterator;
-    using RelPoseFactorConstIter =
-        Eigen::aligned_vector<RelPoseFactor>::const_iterator;
-    using RelLinDataConstIter =
-        Eigen::aligned_vector<RelLinData>::const_iterator;
+    template <class AccumT>
+    struct MapperLinearizeAbsReduce
+        : public ScBundleAdjustmentBase<Scalar>::LinearizeAbsReduce<AccumT> {
+        using RollPitchFactorConstIter =
+            Eigen::aligned_vector<RollPitchFactor>::const_iterator;
+        using RelPoseFactorConstIter =
+            Eigen::aligned_vector<RelPoseFactor>::const_iterator;
+        using RelLinDataConstIter =
+            Eigen::aligned_vector<RelLinData>::const_iterator;
 
-    MapperLinearizeAbsReduce(
-        AbsOrderMap& aom,
+        MapperLinearizeAbsReduce(
+            AbsOrderMap& aom,
+            const Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>>*
+                frame_poses)
+            : ScBundleAdjustmentBase<Scalar>::LinearizeAbsReduce<AccumT>(aom),
+              frame_poses(frame_poses) {
+            this->accum.reset(aom.total_size);
+            roll_pitch_error = 0;
+            rel_error = 0;
+        }
+
+        MapperLinearizeAbsReduce(const MapperLinearizeAbsReduce& other,
+                                 tbb::split)
+            : ScBundleAdjustmentBase<Scalar>::LinearizeAbsReduce<AccumT>(
+                  other.aom),
+              frame_poses(other.frame_poses) {
+            this->accum.reset(this->aom.total_size);
+            roll_pitch_error = 0;
+            rel_error = 0;
+        }
+
+        void join(MapperLinearizeAbsReduce& rhs) {
+            this->accum.join(rhs.accum);
+            roll_pitch_error += rhs.roll_pitch_error;
+            rel_error += rhs.rel_error;
+        }
+
+        void operator()(const tbb::blocked_range<RelLinDataConstIter>& range) {
+            for (const RelLinData& rld : range) {
+                Eigen::MatrixXd rel_H;
+                Eigen::VectorXd rel_b;
+                linearizeRel(rld, rel_H, rel_b);
+
+                linearizeAbs(rel_H, rel_b, rld, this->aom, this->accum);
+            }
+        }
+
+        void operator()(
+            const tbb::blocked_range<RollPitchFactorConstIter>& range) {
+            for (const RollPitchFactor& rpf : range) {
+                const Sophus::SE3d& pose = frame_poses->at(rpf.t_ns).getPose();
+
+                int idx = this->aom.abs_order_map.at(rpf.t_ns).first;
+
+                Eigen::Matrix<double, 2, POSE_SIZE> J;
+                Sophus::Vector2d res =
+                    basalt::rollPitchError(pose, rpf.R_w_i_meas, &J);
+
+                this->accum.template addH<POSE_SIZE, POSE_SIZE>(
+                    idx, idx, J.transpose() * rpf.cov_inv * J);
+                this->accum.template addB<POSE_SIZE>(
+                    idx, J.transpose() * rpf.cov_inv * res);
+
+                roll_pitch_error += res.transpose() * rpf.cov_inv * res;
+            }
+        }
+
+        void operator()(
+            const tbb::blocked_range<RelPoseFactorConstIter>& range) {
+            for (const RelPoseFactor& rpf : range) {
+                const Sophus::SE3d& pose_i =
+                    frame_poses->at(rpf.t_i_ns).getPose();
+                const Sophus::SE3d& pose_j =
+                    frame_poses->at(rpf.t_j_ns).getPose();
+
+                int idx_i = this->aom.abs_order_map.at(rpf.t_i_ns).first;
+                int idx_j = this->aom.abs_order_map.at(rpf.t_j_ns).first;
+
+                Sophus::Matrix6d Ji, Jj;
+                Sophus::Vector6d res =
+                    basalt::relPoseError(rpf.T_i_j, pose_i, pose_j, &Ji, &Jj);
+
+                this->accum.template addH<POSE_SIZE, POSE_SIZE>(
+                    idx_i, idx_i, Ji.transpose() * rpf.cov_inv * Ji);
+                this->accum.template addH<POSE_SIZE, POSE_SIZE>(
+                    idx_i, idx_j, Ji.transpose() * rpf.cov_inv * Jj);
+                this->accum.template addH<POSE_SIZE, POSE_SIZE>(
+                    idx_j, idx_i, Jj.transpose() * rpf.cov_inv * Ji);
+                this->accum.template addH<POSE_SIZE, POSE_SIZE>(
+                    idx_j, idx_j, Jj.transpose() * rpf.cov_inv * Jj);
+
+                this->accum.template addB<POSE_SIZE>(
+                    idx_i, Ji.transpose() * rpf.cov_inv * res);
+                this->accum.template addB<POSE_SIZE>(
+                    idx_j, Jj.transpose() * rpf.cov_inv * res);
+
+                rel_error += res.transpose() * rpf.cov_inv * res;
+            }
+        }
+
+        double roll_pitch_error;
+        double rel_error;
+
         const Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>>*
-            frame_poses)
-        : ScBundleAdjustmentBase<Scalar>::LinearizeAbsReduce<AccumT>(aom),
-          frame_poses(frame_poses) {
-      this->accum.reset(aom.total_size);
-      roll_pitch_error = 0;
-      rel_error = 0;
-    }
+            frame_poses;
+    };
 
-    MapperLinearizeAbsReduce(const MapperLinearizeAbsReduce& other, tbb::split)
-        : ScBundleAdjustmentBase<Scalar>::LinearizeAbsReduce<AccumT>(other.aom),
-          frame_poses(other.frame_poses) {
-      this->accum.reset(this->aom.total_size);
-      roll_pitch_error = 0;
-      rel_error = 0;
-    }
+    NfrMapper(const basalt::Calibration<double>& calib,
+              const VioConfig& config);
 
-    void join(MapperLinearizeAbsReduce& rhs) {
-      this->accum.join(rhs.accum);
-      roll_pitch_error += rhs.roll_pitch_error;
-      rel_error += rhs.rel_error;
-    }
+    void addMargData(basalt::MargData::Ptr& data);
 
-    void operator()(const tbb::blocked_range<RelLinDataConstIter>& range) {
-      for (const RelLinData& rld : range) {
-        Eigen::MatrixXd rel_H;
-        Eigen::VectorXd rel_b;
-        linearizeRel(rld, rel_H, rel_b);
+    void processMargData(basalt::MargData& m);
 
-        linearizeAbs(rel_H, rel_b, rld, this->aom, this->accum);
-      }
-    }
+    bool extractNonlinearFactors(basalt::MargData& m);
 
-    void operator()(const tbb::blocked_range<RollPitchFactorConstIter>& range) {
-      for (const RollPitchFactor& rpf : range) {
-        const Sophus::SE3d& pose = frame_poses->at(rpf.t_ns).getPose();
+    void optimize(int num_iterations = 10);
 
-        int idx = this->aom.abs_order_map.at(rpf.t_ns).first;
+    Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>>& getFramePoses();
 
-        Eigen::Matrix<double, 2, POSE_SIZE> J;
-        Sophus::Vector2d res = basalt::rollPitchError(pose, rpf.R_w_i_meas, &J);
+    void computeRelPose(double& rel_error);
 
-        this->accum.template addH<POSE_SIZE, POSE_SIZE>(
-            idx, idx, J.transpose() * rpf.cov_inv * J);
-        this->accum.template addB<POSE_SIZE>(idx,
-                                             J.transpose() * rpf.cov_inv * res);
+    void computeRollPitch(double& roll_pitch_error);
 
-        roll_pitch_error += res.transpose() * rpf.cov_inv * res;
-      }
-    }
+    void detect_keypoints();
 
-    void operator()(const tbb::blocked_range<RelPoseFactorConstIter>& range) {
-      for (const RelPoseFactor& rpf : range) {
-        const Sophus::SE3d& pose_i = frame_poses->at(rpf.t_i_ns).getPose();
-        const Sophus::SE3d& pose_j = frame_poses->at(rpf.t_j_ns).getPose();
+    void detect_timestamp_keypoints(int64_t frame_id,
+                                    OpticalFlowInput::Ptr data);
 
-        int idx_i = this->aom.abs_order_map.at(rpf.t_i_ns).first;
-        int idx_j = this->aom.abs_order_map.at(rpf.t_j_ns).first;
+    // Feature matching and inlier filtering for stereo pairs with known pose
+    void match_stereo();
 
-        Sophus::Matrix6d Ji, Jj;
-        Sophus::Vector6d res =
-            basalt::relPoseError(rpf.T_i_j, pose_i, pose_j, &Ji, &Jj);
+    void match_all();
 
-        this->accum.template addH<POSE_SIZE, POSE_SIZE>(
-            idx_i, idx_i, Ji.transpose() * rpf.cov_inv * Ji);
-        this->accum.template addH<POSE_SIZE, POSE_SIZE>(
-            idx_i, idx_j, Ji.transpose() * rpf.cov_inv * Jj);
-        this->accum.template addH<POSE_SIZE, POSE_SIZE>(
-            idx_j, idx_i, Jj.transpose() * rpf.cov_inv * Ji);
-        this->accum.template addH<POSE_SIZE, POSE_SIZE>(
-            idx_j, idx_j, Jj.transpose() * rpf.cov_inv * Jj);
+    void build_tracks();
 
-        this->accum.template addB<POSE_SIZE>(
-            idx_i, Ji.transpose() * rpf.cov_inv * res);
-        this->accum.template addB<POSE_SIZE>(
-            idx_j, Jj.transpose() * rpf.cov_inv * res);
+    void setup_opt();
 
-        rel_error += res.transpose() * rpf.cov_inv * res;
-      }
-    }
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-    double roll_pitch_error;
-    double rel_error;
+    Eigen::aligned_vector<RollPitchFactor> roll_pitch_factors;
+    Eigen::aligned_vector<RelPoseFactor> rel_pose_factors;
 
-    const Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>>* frame_poses;
-  };
+    std::unordered_map<int64_t, OpticalFlowInput::Ptr> img_data;
 
-  NfrMapper(const basalt::Calibration<double>& calib, const VioConfig& config);
+    Corners feature_corners;
 
-  void addMargData(basalt::MargData::Ptr& data);
+    Matches feature_matches;
 
-  void processMargData(basalt::MargData& m);
+    FeatureTracks feature_tracks;
 
-  bool extractNonlinearFactors(basalt::MargData& m);
+    // Base-pointer to allow LocalMapper to swap in a HashBowStl<256> instance
+    // for single-threaded incremental mapping. NfrMapper's constructor still
+    // assigns a HashBow<256> (TBB-backed) by default to preserve the offline
+    // mapper's concurrent-insertion semantics.
+    std::shared_ptr<HashBowBase<256>> hash_bow_database;
 
-  void optimize(int num_iterations = 10);
+    VioConfig config;
 
-  Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>>& getFramePoses();
-
-  void computeRelPose(double& rel_error);
-
-  void computeRollPitch(double& roll_pitch_error);
-
-  void detect_keypoints();
-
-  // Feature matching and inlier filtering for stereo pairs with known pose
-  void match_stereo();
-
-  void match_all();
-
-  void build_tracks();
-
-  void setup_opt();
-
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-  Eigen::aligned_vector<RollPitchFactor> roll_pitch_factors;
-  Eigen::aligned_vector<RelPoseFactor> rel_pose_factors;
-
-  std::unordered_map<int64_t, OpticalFlowInput::Ptr> img_data;
-
-  Corners feature_corners;
-
-  Matches feature_matches;
-
-  FeatureTracks feature_tracks;
-
-  std::shared_ptr<HashBow<256>> hash_bow_database;
-
-  VioConfig config;
-
-  double lambda, min_lambda, max_lambda, lambda_vee;
+    double lambda, min_lambda, max_lambda, lambda_vee;
 };
 }  // namespace basalt

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <bitset>
 #include <iostream>
@@ -13,14 +14,21 @@
 
 namespace basalt {
 
+// Abstract base for Bag-of-Words databases.
+// Holds the constexpr permutation tables and the two non-virtual helpers
+// (compute_hash, compute_bow) that both TBB- and STL-backed subclasses share.
+// add_to_database / querry_database / RemoveKeyframes are the storage-specific
+// operations that subclasses must (or may) override.
 template <size_t N>
-class HashBow {
+class HashBowBase {
  public:
-  HashBow(size_t num_bits) : num_bits(num_bits < 32 ? num_bits : 32) {
+  HashBowBase(size_t num_bits) : num_bits(num_bits < 32 ? num_bits : 32) {
     static_assert(N < 512,
                   "This implementation of HashBow only supports the descriptor "
                   "length below 512.");
   }
+
+  virtual ~HashBowBase() = default;
 
   inline FeatureHash compute_hash(const std::bitset<N>& descriptor) const {
     FeatureHash res;
@@ -58,47 +66,21 @@ class HashBow {
     }
   }
 
-  inline void add_to_database(const TimeCamId& tcid,
-                              const HashBowVector& bow_vector) {
-    for (const auto& kv : bow_vector) {
-      // std::pair<TimeCamId, double> p = std::make_pair(tcid, kv.second);
-      inverted_index[kv.first].emplace_back(tcid, kv.second);
-    }
-  }
+  virtual void add_to_database(const TimeCamId& tcid,
+                               const HashBowVector& bow_vector) = 0;
 
-  inline void querry_database(
+  virtual void querry_database(
       const HashBowVector& bow_vector, size_t num_results,
       std::vector<std::pair<TimeCamId, double>>& results,
-      const int64_t* max_t_ns = nullptr) const {
-    results.clear();
+      const int64_t* max_t_ns = nullptr) const = 0;
 
-    std::unordered_map<TimeCamId, double> scores;
-
-    for (const auto& kv : bow_vector) {
-      const auto range_it = inverted_index.find(kv.first);
-
-      if (range_it != inverted_index.end())
-        for (const auto& v : range_it->second) {
-          // if there is a maximum query time select only the frames that have
-          // timestamp below max_t_ns
-          if (!max_t_ns || v.first.frame_id < (*max_t_ns))
-            scores[v.first] += std::abs(kv.second - v.second) -
-                               std::abs(kv.second) - std::abs(v.second);
-        }
-    }
-
-    results.reserve(scores.size());
-
-    for (const auto& kv : scores)
-      results.emplace_back(kv.first, -kv.second / 2.0);
-
-    if (results.size() > num_results) {
-      std::partial_sort(
-          results.begin(), results.begin() + num_results, results.end(),
-          [](const auto& a, const auto& b) { return a.second > b.second; });
-
-      results.resize(num_results);
-    }
+  // Default no-op so TBB-backed subclasses (which cannot support safe removal)
+  // are not forced to override. STL-backed subclasses override with a real
+  // implementation used by the local mapper when culling keyframes.
+  virtual void RemoveKeyframes(const std::vector<TimeCamId>& tcids) {
+    (void)tcids;
+    std::cout << "HashBowBase::RemoveKeyframes not implemented for this backend"
+              << std::endl;
   }
 
  protected:
@@ -157,11 +139,162 @@ class HashBow {
       word_bit_permutation = compute_permutation();
 
   size_t num_bits;
+};
 
+// TBB-backed Bag-of-Words database. Supports concurrent insertion from
+// parallel_for stages (offline NfrMapper use case). RemoveKeyframes is not
+// supported because tbb::concurrent_vector does not support safe element
+// erasure; the inherited no-op default logs a warning if called.
+template <size_t N>
+class HashBow : public HashBowBase<N> {
+ public:
+  HashBow(size_t num_bits) : HashBowBase<N>(num_bits) {}
+
+  inline void add_to_database(const TimeCamId& tcid,
+                              const HashBowVector& bow_vector) override {
+    for (const auto& kv : bow_vector) {
+      inverted_index[kv.first].emplace_back(tcid, kv.second);
+    }
+  }
+
+  inline void querry_database(
+      const HashBowVector& bow_vector, size_t num_results,
+      std::vector<std::pair<TimeCamId, double>>& results,
+      const int64_t* max_t_ns = nullptr) const override {
+    results.clear();
+
+    std::unordered_map<TimeCamId, double> scores;
+
+    for (const auto& kv : bow_vector) {
+      const auto range_it = inverted_index.find(kv.first);
+
+      if (range_it != inverted_index.end())
+        for (const auto& v : range_it->second) {
+          // if there is a maximum query time select only the frames that have
+          // timestamp below max_t_ns
+          if (!max_t_ns || v.first.frame_id < (*max_t_ns))
+            scores[v.first] += std::abs(kv.second - v.second) -
+                               std::abs(kv.second) - std::abs(v.second);
+        }
+    }
+
+    results.reserve(scores.size());
+
+    for (const auto& kv : scores)
+      results.emplace_back(kv.first, -kv.second / 2.0);
+
+    if (results.size() > num_results) {
+      std::partial_sort(
+          results.begin(), results.begin() + num_results, results.end(),
+          [](const auto& a, const auto& b) { return a.second > b.second; });
+
+      results.resize(num_results);
+    }
+  }
+
+ protected:
   tbb::concurrent_unordered_map<
       FeatureHash, tbb::concurrent_vector<std::pair<TimeCamId, double>>,
       std::hash<FeatureHash>>
       inverted_index;
+};
+
+// STL-backed Bag-of-Words database for single-threaded use.
+//
+// THREADING CONTRACT: This class is NOT thread-safe. All calls
+// (add_to_database / querry_database / RemoveKeyframes) must come from the
+// same thread. In the live SLAM pipeline only the LocalMapper thread touches
+// this instance, so no synchronisation is required. If a concurrent-access
+// requirement is added later, wrap access with a mutex at the call site.
+//
+// Unlike HashBow<N>, this backend supports RemoveKeyframes by storing a
+// reverse TimeCamId → hashes index (mpTcidHashIndex) that lets us locate all
+// inverted_index rows that reference a culled keyframe in O(|hashes_of_kf|)
+// time, then erase the matching entries from those rows.
+template <size_t N>
+class HashBowStl : public HashBowBase<N> {
+ public:
+  HashBowStl(size_t num_bits) : HashBowBase<N>(num_bits) {}
+
+  inline void add_to_database(const TimeCamId& tcid,
+                              const HashBowVector& bow_vector) override {
+    auto& hash_list = mpTcidHashIndex[tcid];
+    hash_list.reserve(hash_list.size() + bow_vector.size());
+    for (const auto& kv : bow_vector) {
+      inverted_index[kv.first].emplace_back(tcid, kv.second);
+      hash_list.push_back(kv.first);
+    }
+  }
+
+  inline void querry_database(
+      const HashBowVector& bow_vector, size_t num_results,
+      std::vector<std::pair<TimeCamId, double>>& results,
+      const int64_t* max_t_ns = nullptr) const override {
+    results.clear();
+
+    std::unordered_map<TimeCamId, double> scores;
+
+    for (const auto& kv : bow_vector) {
+      const auto range_it = inverted_index.find(kv.first);
+
+      if (range_it != inverted_index.end())
+        for (const auto& v : range_it->second) {
+          if (!max_t_ns || v.first.frame_id < (*max_t_ns))
+            scores[v.first] += std::abs(kv.second - v.second) -
+                               std::abs(kv.second) - std::abs(v.second);
+        }
+    }
+
+    results.reserve(scores.size());
+
+    for (const auto& kv : scores)
+      results.emplace_back(kv.first, -kv.second / 2.0);
+
+    if (results.size() > num_results) {
+      std::partial_sort(
+          results.begin(), results.begin() + num_results, results.end(),
+          [](const auto& a, const auto& b) { return a.second > b.second; });
+
+      results.resize(num_results);
+    }
+  }
+
+  // Erase every reference to the given keyframes from the inverted index and
+  // drop the reverse index rows. Rows in inverted_index that become empty are
+  // removed so that subsequent queries don't scan dead buckets.
+  inline void RemoveKeyframes(const std::vector<TimeCamId>& tcids) override {
+    for (const TimeCamId& tcid : tcids) {
+      auto it = mpTcidHashIndex.find(tcid);
+      if (it == mpTcidHashIndex.end()) continue;
+
+      for (const FeatureHash& h : it->second) {
+        auto vec_it = inverted_index.find(h);
+        if (vec_it == inverted_index.end()) continue;
+
+        auto& vec = vec_it->second;
+        vec.erase(std::remove_if(vec.begin(), vec.end(),
+                                 [&tcid](const std::pair<TimeCamId, double>& p) {
+                                   return p.first == tcid;
+                                 }),
+                  vec.end());
+        if (vec.empty()) inverted_index.erase(vec_it);
+      }
+      mpTcidHashIndex.erase(it);
+    }
+  }
+
+ protected:
+  std::unordered_map<FeatureHash,
+                     std::vector<std::pair<TimeCamId, double>>,
+                     std::hash<FeatureHash>>
+      inverted_index;
+
+  // Reverse index: for each keyframe, the list of hashes it contributed.
+  // Enables RemoveKeyframes in time proportional to the culled keyframe's own
+  // BoW size (rather than scanning the entire inverted_index).
+  std::unordered_map<TimeCamId, std::vector<FeatureHash>,
+                     std::hash<TimeCamId>>
+      mpTcidHashIndex;
 };
 
 }  // namespace basalt

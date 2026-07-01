@@ -1,9 +1,11 @@
 #pragma once
 
-#include <basalt/calibration/calibration.hpp>
 #include <basalt/optical_flow/optical_flow.h>
 #include <basalt/utils/vio_config.h>
+#include <basalt/vi_estimator/local_mapper.h>
 #include <basalt/vi_estimator/vio_estimator.h>
+
+#include <basalt/calibration/calibration.hpp>
 #include <mutex>
 #include <string>
 
@@ -12,11 +14,15 @@ namespace basalt {
 enum class SlamMode { VO, VIO };
 
 class Controller {
-  public:
-    Controller(const std::string &config_path, const std::string &calib_path,
+public:
+    Controller(const std::string& config_path, const std::string& calib_path,
                SlamMode mode);
 
     ~Controller();
+
+    // Gracefully shut down the full SLAM pipeline (OF → VIO → LocalMapper)
+    // using the cascade sentinel-nullptr pattern. Safe to call multiple times.
+    void Stop();
 
     void load_config();
 
@@ -24,9 +30,9 @@ class Controller {
     void initialize();
 
     // Initialize mid-flight with specific state
-    void initialize(int64_t t_ns, const Sophus::SE3d &T_w_i,
-                    const Eigen::Vector3d &vel_w_i, const Eigen::Vector3d &bg,
-                    const Eigen::Vector3d &ba,
+    void initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
+                    const Eigen::Vector3d& vel_w_i, const Eigen::Vector3d& bg,
+                    const Eigen::Vector3d& ba,
                     bool useProducerConsumerArchitecture = false);
 
     void GrabImage(basalt::OpticalFlowInput::Ptr data);
@@ -36,11 +42,15 @@ class Controller {
     basalt::PoseVelBiasState<double>::Ptr GetLatestPose() const;
 
     // Explicitly pop a pose reading from the queue
-    bool TryPopPose(basalt::PoseVelBiasState<double>::Ptr &pose);
+    bool TryPopPose(basalt::PoseVelBiasState<double>::Ptr& pose);
 
-    void TrackMonocular(OpticalFlowInput::Ptr &frame, Sophus::SE3f &tcw);
+    void TrackMonocular(OpticalFlowInput::Ptr& frame, Sophus::SE3f& tcw);
 
-  private:
+    std::shared_ptr<basalt::LocalMapper> GetLocalMapper() const;
+    basalt::VioEstimatorBase<double>::Ptr GetVIO() const;
+    basalt::Calibration<double>& GetCalibration();
+
+private:
     // configuration
     std::string config_path_;
     std::string calib_path_;
@@ -55,6 +65,10 @@ class Controller {
     tbb::concurrent_bounded_queue<basalt::PoseVelBiasState<double>::Ptr>
         out_state_queue_;
 
+    // Local mapper input queue and instance
+    tbb::concurrent_bounded_queue<basalt::MargData::Ptr> local_map_input_queue_;
+    std::shared_ptr<basalt::LocalMapper> local_mapper_;
+
     // Member for latest pose, updated by an internal thread
     basalt::PoseVelBiasState<double>::Ptr current_latest_pose_;
     mutable std::mutex pose_mutex_;
@@ -62,6 +76,7 @@ class Controller {
     std::atomic<bool> terminate_processing_thread_ = false;
 
     void process_pose_queue_loop();
+    bool mpUseProducerConsumerArchitecture = true;
 };
 
-} // namespace basalt
+}  // namespace basalt

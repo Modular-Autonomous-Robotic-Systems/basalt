@@ -34,18 +34,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #pragma once
 
-#include <memory>
+#include <basalt/io/dataset_io.h>
+#include <basalt/utils/vio_config.h>
+#include <tbb/concurrent_queue.h>
 
 #include <Eigen/Geometry>
-
-#include <basalt/utils/vio_config.h>
-
 #include <basalt/calibration/calibration.hpp>
 #include <basalt/camera/stereographic_param.hpp>
-#include <basalt/io/dataset_io.h>
 #include <basalt/utils/sophus_utils.hpp>
-
-#include <tbb/concurrent_queue.h>
+#include <memory>
 
 namespace basalt {
 
@@ -71,25 +68,25 @@ struct OpticalFlowResult {
 };
 
 class OpticalFlowBase {
-  public:
+public:
     using Ptr = std::shared_ptr<OpticalFlowBase>;
 
     tbb::concurrent_bounded_queue<OpticalFlowInput::Ptr> input_queue;
-    tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr> *output_queue =
+    tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr>* output_queue =
         nullptr;
 
     Eigen::MatrixXf patch_coord;
-    OpticalFlowResult::Ptr processFrame(int64_t curr_t_ns,
-                                        OpticalFlowInput::Ptr &new_img_vec) {
+    virtual OpticalFlowResult::Ptr processFrame(
+        int64_t curr_t_ns, OpticalFlowInput::Ptr& new_img_vec) {
         std::cout << "Not Implemented" << std::endl;
         return nullptr;
     }
 };
 
 class OpticalFlowFactory {
-  public:
-    static OpticalFlowBase::Ptr
-    getOpticalFlow(const VioConfig &config, const Calibration<double> &cam,
-                   bool useProducerConsumerArchitecture = false);
+public:
+    static OpticalFlowBase::Ptr getOpticalFlow(
+        const VioConfig& config, const Calibration<double>& cam,
+        bool useProducerConsumerArchitecture = false);
 };
-} // namespace basalt
+}  // namespace basalt

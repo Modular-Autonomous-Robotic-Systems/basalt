@@ -112,6 +112,14 @@ template <class Scalar> class VioEstimatorBase {
 
     virtual inline void debug_finalize() {}
 
+    // Accept refined poses from the local mapper. The default no-op is
+    // appropriate for the VO path (no mapper) and for any estimator that
+    // does not participate in the mapper feedback loop.
+    virtual void QueuePoseUpdates(
+        const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>& updates) {
+      (void)updates;
+    }
+
     virtual Sophus::SE3d getT_w_i_init() = 0;
 
     // Legacy functions. Should not be used in the new code.

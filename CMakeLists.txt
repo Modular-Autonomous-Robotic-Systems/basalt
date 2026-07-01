@@ -354,6 +354,7 @@ target_sources(basalt
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/landmark_database.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/marg_helper.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/nfr_mapper.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/local_mapper.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/sc_ba_base.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/sqrt_ba_base.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/vi_estimator/sqrt_keypoint_vio.h
@@ -385,6 +386,7 @@ target_sources(basalt
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vi_estimator/sqrt_keypoint_vio.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vi_estimator/sqrt_keypoint_vo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vi_estimator/vio_estimator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vi_estimator/local_mapper.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/controller.cpp
 )
 
@@ -424,6 +426,9 @@ target_link_libraries(basalt_opt_flow basalt pangolin basalt::cli11)
 
 add_executable(basalt_vio src/vio.cpp)
 target_link_libraries(basalt_vio basalt pangolin basalt::cli11)
+
+add_executable(basalt_slam src/basalt_slam.cpp)
+target_link_libraries(basalt_slam basalt basalt::cli11)
 
 add_executable(basalt_time_alignment src/time_alignment.cpp)
 target_link_libraries(basalt_time_alignment basalt pangolin basalt::cli11)
