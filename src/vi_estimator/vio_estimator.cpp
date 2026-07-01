@@ -50,7 +50,8 @@ factory_helper(const VioConfig &config, const Calibration<double> &cam,
     typename VioEstimatorBase<Scalar>::Ptr res;
 
     if (use_imu) {
-        res.reset(new SqrtKeypointVioEstimator<Scalar>(g, cam, config));
+        res.reset(new SqrtKeypointVioEstimator<Scalar>(
+            g, cam, config, useProducerConsumerArchitecture));
 
     } else {
         res.reset(new SqrtKeypointVoEstimator<Scalar>(

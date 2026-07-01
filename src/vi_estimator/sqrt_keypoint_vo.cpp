@@ -132,11 +132,6 @@ void SqrtKeypointVoEstimator<Scalar_>::initialize(const Eigen::Vector3d &bg,
                 // get next optical flow result (blocking if queue empty)
                 this->vision_data_queue.pop(curr_frame);
                 // this is VO not VIO --> just drain IMU queue and ignore
-                while (!this->imu_data_queue.empty()) {
-                    ImuData<double>::Ptr d;
-                    this->imu_data_queue.pop(d);
-                }
-
                 if (config.vio_enforce_realtime) {
                     // drop current frame if another frame is already in the
                     // queue.
@@ -144,10 +139,11 @@ void SqrtKeypointVoEstimator<Scalar_>::initialize(const Eigen::Vector3d &bg,
                         this->vision_data_queue.pop(curr_frame);
                 }
 
-                if (!curr_frame.get()) {
+                typename PoseVelBiasState<Scalar>::Ptr output_state =
+                    this->ProcessFrame(curr_frame);
+                if (output_state == nullptr) {
                     break;
                 }
-                this->ProcessFrame(curr_frame);
             }
 
             if (this->out_vis_queue)
@@ -175,8 +171,16 @@ template <class Scalar>
 typename PoseVelBiasState<Scalar>::Ptr
 SqrtKeypointVoEstimator<Scalar>::ProcessFrame(
     OpticalFlowResult::Ptr &curr_frame) {
+    if (!curr_frame.get()) {
+        return nullptr;
+    }
     // Correct camera time offset (relevant for VIO)
     // curr_frame->t_ns += calib.cam_time_offset_ns;
+    // Empty IMU buffers as they are not needed for VO
+    while (!this->imu_data_queue.empty()) {
+        ImuData<double>::Ptr d;
+        this->imu_data_queue.pop(d);
+    }
 
     if (!initialized) {
         last_state_t_ns = curr_frame->t_ns;
@@ -445,10 +449,11 @@ SqrtKeypointVoEstimator<Scalar_>::measure(
     const PoseStateWithLin<Scalar> &p = frame_poses.at(last_state_t_ns);
 
     if (this->out_state_queue) {
-        typename PoseVelBiasState<double>::Ptr data(new PoseVelBiasState<double>(
-            p.getT_ns(), p.getPose().template cast<double>(),
-            Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
-            Eigen::Vector3d::Zero()));
+        typename PoseVelBiasState<double>::Ptr data(
+            new PoseVelBiasState<double>(
+                p.getT_ns(), p.getPose().template cast<double>(),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                Eigen::Vector3d::Zero()));
         this->out_state_queue->push(data);
     }
 
@@ -479,8 +484,8 @@ SqrtKeypointVoEstimator<Scalar_>::measure(
     stats_sums_.add("measure", t_total.elapsed()).format("ms");
 
     typename PoseVelBiasState<Scalar>::Ptr d(new PoseVelBiasState<Scalar>(
-        p.getT_ns(), p.getPose(),
-        Eigen::Matrix<Scalar, 3, 1>::Zero(), Eigen::Matrix<Scalar, 3, 1>::Zero(),
+        p.getT_ns(), p.getPose(), Eigen::Matrix<Scalar, 3, 1>::Zero(),
+        Eigen::Matrix<Scalar, 3, 1>::Zero(),
         Eigen::Matrix<Scalar, 3, 1>::Zero()));
 
     return d;
