@@ -87,6 +87,7 @@ private:
     mutable std::mutex pose_mutex_;
     std::thread pose_processing_thread_;
     std::atomic<bool> terminate_processing_thread_ = false;
+    std::atomic<bool> mpStoppedSlam = false;
 
     void process_pose_queue_loop();
     bool mpUseProducerConsumerArchitecture = true;
@@ -94,7 +95,10 @@ private:
     // Visualisation taps. Both are inert unless the GUI is enabled, so they add
     // no overhead to the estimator path when running headless.
     bool mpEnableVisualisation = false;
-    tbb::concurrent_bounded_queue<basalt::GtPose>* mvpGroundTruthQueue = nullptr;
+    tbb::concurrent_bounded_queue<basalt::GtPose>* mvpGroundTruthQueue =
+        nullptr;
+
+    int64_t mpCurrentFrameTime;
 };
 
 }  // namespace basalt

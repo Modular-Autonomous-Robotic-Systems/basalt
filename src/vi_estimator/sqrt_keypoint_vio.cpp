@@ -183,10 +183,11 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
                 typename PoseVelBiasState<Scalar>::Ptr output_state =
                     this->ProcessFrame(curr_frame);
                 if (output_state == nullptr) {
+                    std::cout << "vio output state null exiting" << std::endl;
                     break;
                 }
             }
-
+            std::cout << "providing nullptr to downstream queues" << std::endl;
             if (this->out_vis_queue) this->out_vis_queue->push(nullptr);
             if (this->out_marg_queue) this->out_marg_queue->push(nullptr);
             if (this->out_state_queue) this->out_state_queue->push(nullptr);
@@ -208,7 +209,12 @@ template <class Scalar>
 typename PoseVelBiasState<Scalar>::Ptr
 SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
     OpticalFlowResult::Ptr& curr_frame) {
-    if (!curr_frame.get()) {
+    if (!curr_frame.get() || this->finished) {
+        std::cout << "received nullptr data from optical flow" << std::endl;
+        if (this->out_vis_queue) this->out_vis_queue->push(nullptr);
+        if (this->out_marg_queue) this->out_marg_queue->push(nullptr);
+        if (this->out_state_queue) this->out_state_queue->push(nullptr);
+        this->finished = true;
         return nullptr;
     }
 

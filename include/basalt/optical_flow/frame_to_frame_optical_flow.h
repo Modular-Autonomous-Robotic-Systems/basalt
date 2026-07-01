@@ -125,6 +125,9 @@ public:
 
     OpticalFlowResult::Ptr processFrame(int64_t curr_t_ns,
                                         OpticalFlowInput::Ptr& new_img_vec) {
+        if (!new_img_vec) {
+            return nullptr;
+        }
         for (const auto& v : new_img_vec->img_data) {
             if (!v.img.get()) return nullptr;
         }

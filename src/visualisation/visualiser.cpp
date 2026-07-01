@@ -8,13 +8,11 @@ Copyright (c) 2019, Vladyslav Usenko and Nikolaus Demmel.
 All rights reserved.
 */
 
+#include <basalt/utils/vis_utils.h>  // render_camera, getcolor, colour palette
 #include <basalt/visualisation/visualiser.h>
-
 #include <pangolin/display/image_view.h>
 #include <pangolin/gl/gldraw.h>
 #include <pangolin/image/image.h>
-
-#include <basalt/utils/vis_utils.h>  // render_camera, getcolor, colour palette
 
 #include <functional>
 
@@ -86,16 +84,15 @@ void SlamVisualiser::SetupLayout() {
     pangolin::View& main_display = pangolin::CreateDisplay().SetBounds(
         0.0, 1.0, pangolin::Attach::Pix(UI_WIDTH), 1.0);
 
-    pangolin::View& img_view_display =
-        pangolin::CreateDisplay()
-            .SetBounds(0.4, 1.0, 0.0, 0.4)
-            .SetLayout(pangolin::LayoutEqual);
+    pangolin::View& img_view_display = pangolin::CreateDisplay()
+                                           .SetBounds(0.4, 1.0, 0.0, 0.4)
+                                           .SetLayout(pangolin::LayoutEqual);
 
     pangolin::View& plot_display = pangolin::CreateDisplay().SetBounds(
         0.0, 0.4, pangolin::Attach::Pix(UI_WIDTH), 1.0);
 
-    mpPlotter =
-        new pangolin::Plotter(&mpVioDataLog, 0.0, 100, -10.0, 10.0, 0.01f, 0.01f);
+    mpPlotter = new pangolin::Plotter(&mpVioDataLog, 0.0, 100, -10.0, 10.0,
+                                      0.01f, 0.01f);
     plot_display.AddDisplay(*mpPlotter);
 
     pangolin::CreatePanel("ui").SetBounds(0.0, 1.0, 0.0,
@@ -112,8 +109,8 @@ void SlamVisualiser::SetupLayout() {
                                                       false, true);
     mpShowGt =
         std::make_unique<pangolin::Var<bool>>("ui.show_gt", true, false, true);
-    mpShowEstPos = std::make_unique<pangolin::Var<bool>>("ui.show_est_pos", true,
-                                                         false, true);
+    mpShowEstPos = std::make_unique<pangolin::Var<bool>>("ui.show_est_pos",
+                                                         true, false, true);
     mpShowEstVel = std::make_unique<pangolin::Var<bool>>("ui.show_est_vel",
                                                          false, false, true);
     mpShowEstBg = std::make_unique<pangolin::Var<bool>>("ui.show_est_bg", false,
@@ -215,7 +212,8 @@ void SlamVisualiser::Run() {
             mpShowEstBg->GuiChanged() || mpShowEstBa->GuiChanged())
             DrawPlots();
 
-        pangolin::FinishFrame();  // renders the view tree, fires callbacks, swaps
+        pangolin::FinishFrame();  // renders the view tree, fires callbacks,
+                                  // swaps
     }
 }
 
@@ -229,8 +227,8 @@ void SlamVisualiser::DrawScene(pangolin::View& view) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Copy each cache under its own lock; never hold two locks at once and never
-    // do GL work while copying, so the consumer threads stay unblocked.
+    // Copy each cache under its own lock; never hold two locks at once and
+    // never do GL work while copying, so the consumer threads stay unblocked.
     basalt::VioVisualizationData::Ptr vio;
     basalt::LocalMapperVisualizationData::Ptr lm;
     {
@@ -262,8 +260,8 @@ void SlamVisualiser::DrawScene(pangolin::View& view) {
     if (vio) {
         for (const auto& p : vio->states)
             for (size_t i = 0; i < mpCalib.T_i_c.size(); i++)
-                render_camera((p * mpCalib.T_i_c[i]).matrix(), 2.0f, state_color,
-                              0.1f);
+                render_camera((p * mpCalib.T_i_c[i]).matrix(), 2.0f,
+                              state_color, 0.1f);
         for (const auto& p : vio->frames)
             for (size_t i = 0; i < mpCalib.T_i_c.size(); i++)
                 render_camera((p * mpCalib.T_i_c[i]).matrix(), 2.0f, pose_color,
@@ -276,7 +274,7 @@ void SlamVisualiser::DrawScene(pangolin::View& view) {
     // ── 4. Local map: distinct marker (orange, larger) + amber KF frusta ─
     if (lm) {
         if (*mpShowLocalMapPoints) {
-            glPointSize(5);  // larger than the VIO 3px points
+            glPointSize(3);
             glColor3ubv(local_map_point_color);
             pangolin::glDrawPoints(lm->points);
         }
@@ -325,7 +323,9 @@ void SlamVisualiser::DrawImageOverlay(pangolin::View& v, size_t cam_id) {
                 pangolin::glDrawCirclePerimeter(c[0], c[1], radius);
 
                 if (*mpShowIds)
-                    pangolin::GlFont::I().Text("%d", int(c[3])).Draw(c[0], c[1]);
+                    pangolin::GlFont::I()
+                        .Text("%d", int(c[3]))
+                        .Draw(c[0], c[1]);
             }
         }
 
@@ -454,7 +454,8 @@ void SlamVisualiser::ConsumeVioStateQueue() {
         std::vector<float> vals;
         vals.push_back((data->t_ns - mpStartTns) * 1e-9);
         for (int i = 0; i < 3; i++) vals.push_back(data->vel_w_i[i]);
-        for (int i = 0; i < 3; i++) vals.push_back(data->T_w_i.translation()[i]);
+        for (int i = 0; i < 3; i++)
+            vals.push_back(data->T_w_i.translation()[i]);
         for (int i = 0; i < 3; i++) vals.push_back(data->bias_gyro[i]);
         for (int i = 0; i < 3; i++) vals.push_back(data->bias_accel[i]);
         mpVioDataLog.Log(vals);

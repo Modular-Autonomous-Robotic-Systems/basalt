@@ -50,24 +50,23 @@ Controller::Controller(const std::string& config_path,
     out_state_queue_.set_capacity(100);
 }
 
-Controller::~Controller() { Stop(); }
+Controller::~Controller() {
+    if (!mpStoppedSlam) Stop();
+}
 
 void Controller::Stop() {
     // (1) Unblock optical flow — it will propagate nullptr to VIO.
-    if (opt_flow_ptr_) opt_flow_ptr_->input_queue.push(nullptr);
+    OpticalFlowResult::Ptr res;
+    OpticalFlowInput::Ptr frame = nullptr;
+    if (opt_flow_ptr_)
+        res = opt_flow_ptr_->processFrame(mpCurrentFrameTime, frame);
+    if (vio_estimator_ && !mpUseProducerConsumerArchitecture)
+        vio_estimator_->ProcessFrame(res);
 
     // (2) VIO's processing loop, on receiving nullptr, pushes nullptr to
     //     out_marg_queue (= local_map_input_queue_) and out_state_queue.
 
-    // (3) Local mapper receives nullptr from VIO → exits its loop.
-    //     Stop() joins the mapper thread.
-    std::cout << "Stopping Local Mapping" << std::endl;
-    if (local_mapper_) {
-        local_mapper_->Stop();
-    }
-    std::cout << "Local Mapping Stopped" << std::endl;
-
-    // (4) Join VIO thread explicitly (already finished by this point
+    // (3) Join VIO thread explicitly (already finished by this point
     //     since VIO pushes nullptr before mapper can pop it).
     std::cout << "Stopping VIO thread" << std::endl;
     if (vio_estimator_) {
@@ -75,6 +74,13 @@ void Controller::Stop() {
         vio_estimator_->drain_input_queues();
     }
     std::cout << "Stopped VIO thread" << std::endl;
+    // (4) Local mapper receives nullptr from VIO → exits its loop.
+    //     Stop() joins the mapper thread.
+    std::cout << "Stopping Local Mapping" << std::endl;
+    if (local_mapper_) {
+        local_mapper_->Stop();
+    }
+    std::cout << "Local Mapping Stopped" << std::endl;
 
     // (5) Join optical flow via destructor.
     opt_flow_ptr_.reset();
@@ -87,6 +93,7 @@ void Controller::Stop() {
             pose_processing_thread_.join();
         }
     }
+    mpStoppedSlam = true;
 }
 
 void Controller::load_config() {
@@ -181,6 +188,7 @@ void Controller::TrackMonocular(OpticalFlowInput::Ptr& frame, Sophus::SE3f& tcw,
                                 std::optional<Sophus::SE3d> gtcw) {
     OpticalFlowResult::Ptr res =
         opt_flow_ptr_->processFrame(frame->t_ns, frame);
+    mpCurrentFrameTime = frame->t_ns;
     current_latest_pose_ = vio_estimator_->ProcessFrame(res);
     tcw = current_latest_pose_->T_w_i.cast<float>();
 

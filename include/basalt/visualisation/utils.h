@@ -1,11 +1,9 @@
 #pragma once
 
 #include <Eigen/Dense>
-#include <sophus/se3.hpp>
-
 #include <basalt/utils/sophus_utils.hpp>  // Eigen::aligned_vector
-
 #include <memory>
+#include <sophus/se3.hpp>
 #include <vector>
 
 namespace basalt {
@@ -41,6 +39,6 @@ struct GtPose {
 // including this header in several translation units raises no one-definition
 // rule violation.
 const uint8_t local_map_point_color[3]{255, 128, 0};  // orange
-const uint8_t local_map_kf_color[3]{255, 200, 0};     // amber
+const uint8_t local_map_kf_color[3]{255, 128, 128};   // amber
 
 }  // namespace basalt

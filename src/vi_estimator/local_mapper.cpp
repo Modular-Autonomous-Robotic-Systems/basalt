@@ -26,14 +26,15 @@ LocalMapper::LocalMapper(const Calibration<double>& calib,
 LocalMapper::~LocalMapper() { Stop(); }
 
 void LocalMapper::Stop() {
+    std::cout << "inside stop function" << std::endl;
     mpStopLocalMapping = true;
-    // Do NOT push nullptr to mpMargInputQueue here — VIO is the sole owner of
-    // the nullptr sentinel in that queue. Relying on VIO's sentinel keeps the
-    // cascade contract deterministic.
     if (mpLocalMappingThread.joinable()) {
+        std::cout << "attempting to stop" << std::endl;
         mpLocalMappingThread.join();
+        std::cout << "able to stop local mapping thread" << std::endl;
     }
     mpTrackBuilder.ResetTrackId();
+    std::cout << "track builder ID reset and mapper stopped" << std::endl;
 }
 
 void LocalMapper::Initialise() {
@@ -69,9 +70,20 @@ void LocalMapper::MapLocally() {
     }
 
     while (!mpStopLocalMapping) {
+        auto t1 = std::chrono::high_resolution_clock::now();
+
         MargData::Ptr data;
+        std::cout << "waiting for data" << std::endl;
         mpMargInputQueue->pop(data);  // blocking
-        if (!data) break;             // VIO's nullptr sentinel → shutdown
+        auto t = std::chrono::high_resolution_clock::now();
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(t - t1);
+        std::cout << "spent " << elapsed.count() * 1e-6
+                  << "seconds waiting for new frame" << std::endl;
+        if (!data) {
+            std::cout << "got null ptr data" << std::endl;
+            break;
+        };  // VIO's nullptr sentinel → shutdown
 
         IngestMargData(data);
 
@@ -108,6 +120,12 @@ void LocalMapper::MapLocally() {
         }
 
         if (mpVioPoseUpdateCallback) mpVioPoseUpdateCallback(frame_poses);
+        auto t2 = std::chrono::high_resolution_clock::now();
+
+        auto elapsed1 =
+            std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
+        std::cout << "Local Mapping Time: " << elapsed1.count() * 1e-6 << "s"
+                  << std::endl;
     }
 }
 
