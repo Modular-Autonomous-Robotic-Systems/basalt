@@ -617,14 +617,11 @@ The `Controller` encapsulates the entire VIO/VO pipeline. It manages:
     *   **`GetLatestPose()`**: Returns the most recent `PoseVelBiasState` observed by the internal consumer thread. This method is non-destructive (does not pop from the queue) and is suitable for high-frequency polling.
     *   **`TryPopPose(pose)`**: Explicitly attempts to pop the next pose from the queue. Returns `true` if successful.
 
-#### 3. Limitations (vs. `src/vio.cpp`)
-The `Controller` focuses on the core estimation loop and lacks some auxiliary features present in the offline pipeline:
-*   **Visualization**: Does not connect to the Pangolin GUI (`out_vis_queue` is unused).
-*   **Marginalization Saving**: Does not support saving marginalization data for debugging (`out_marg_queue` is unused).
+#### 3. Capabilities and Limitations (vs. `src/vio.cpp`)
+The `Controller` focuses on the core estimation loop. The auxiliary features present in the offline pipeline are now partially supported:
+*   **Visualization**: The unified real-time GUI is implemented as `class SlamVisualiser` (`include/basalt/visualisation/visualiser.h`, `src/visualisation/visualiser.cpp`) and is exercised by the `basalt_slam` integration test under the `--show-gui` flag. The visualiser owns its queues and connects them to `vio_estimator_->out_vis_queue`, `vio_estimator_->out_state_queue`, `local_mapper_->out_vis_queue`, and a ground-truth queue registered through `Controller::SetGroundTruthVisualisationQueue`. When the flag is off none of these taps is connected, so the estimator path runs at zero visualisation overhead. The `Controller` itself stays Pangolin-free; only the `basalt_slam` executable links Pangolin (see the visualisation surface-area section below and `doc/Visualisation.md` §4).
+*   **Marginalization Saving**: Does not support saving marginalization data for debugging (`out_marg_queue` is consumed by the local mapper rather than persisted).
 *   **Thread Pool Configuration**: Does not manage the global TBB thread pool (`tbb::global_control`). The embedding application is responsible for this.
-
-<!-- TODO -->
-These features need to be added in basalt SLAM system.
 
 ### Recorded Data Pipeline (`src/vio.cpp`)
 
@@ -891,3 +888,81 @@ This section details common macros and utility helpers found in the codebase, pr
 *   **`_format`**:
     *   **Usage**: `"Value: {:.3f}"_format(3.14159)`
     *   **Purpose**: String literal operator for safe, python-style string formatting (wraps `fmt::format`).
+
+## Real-Time SLAM Wiring and Visualisation Surface Area
+
+This section records facts discovered by direct inspection of `controller.h`/`controller.cpp`, `vio_estimator.h`, `local_mapper.{h,cpp}`, `ba_base.{h,cpp}`, `landmark_database.h`, and `basalt_slam.cpp`. It documents the current state of the `Controller`, the live `LocalMapper`, and the integration-test executable as they relate to building a unified real-time visualiser. It complements the `Orchestration` section above and the design discussion in `doc/Visualisation.md` §4.
+
+### Controller: current member layout and wiring
+
+`class Controller` (`include/basalt/controller.h:16-80`) owns the three estimation stages and the queues that connect them. Key members:
+
+| Member | Type | Citation | Notes |
+| :--- | :--- | :--- | :--- |
+| `opt_flow_ptr_` | `basalt::OpticalFlowBase::Ptr` | `controller.h:62` | Frontend. Fed by `GrabImage` / synchronously by `TrackMonocular`. |
+| `vio_estimator_` | `basalt::VioEstimatorBase<double>::Ptr` | `controller.h:63` | Backend. Reachable via `GetVIO()`. |
+| `local_mapper_` | `std::shared_ptr<basalt::LocalMapper>` | `controller.h:70` | Live local mapper. Reachable via `GetLocalMapper()`. |
+| `out_state_queue_` | `tbb::concurrent_bounded_queue<PoseVelBiasState<double>::Ptr>` (by value) | `controller.h:65-66` | Connected to `vio_estimator_->out_state_queue` only when `mpUseProducerConsumerArchitecture` is true (`controller.cpp:165`). |
+| `local_map_input_queue_` | `tbb::concurrent_bounded_queue<MargData::Ptr>` (by value) | `controller.h:69` | This is the realised `out_marg_queue`. Wired to `vio_estimator_->out_marg_queue` and `local_mapper_->SetMarginalisationDataInputQueue(...)` (`controller.cpp:149-154`), capacity 10. |
+| `current_latest_pose_` | `PoseVelBiasState<double>::Ptr` | `controller.h:73` | Updated by the pose consumer thread under `pose_mutex_`; also written directly (unlocked) in the synchronous `TrackMonocular` path (`controller.cpp:179`). |
+| `pose_processing_thread_` | `std::thread` | `controller.h:75` | Started only in the producer-consumer branch of `initialize()` (`controller.cpp:168-170`); runs `process_pose_queue_loop()`. |
+| `mpUseProducerConsumerArchitecture` | `bool` | `controller.h` | Selects between the event-driven (`TrackMonocular`, synchronous) and producer-consumer (`GrabImage`/`GrabIMU` + threads) execution models. |
+| `mpEnableVisualisation` | `bool` | `controller.h` | Set from the `enableVisualisation` argument of `initialize()`. Single source of truth for whether the GUI taps are armed. Read via `IsVisualisationEnabled()`. |
+| `mvpGroundTruthQueue` | `tbb::concurrent_bounded_queue<basalt::GtPose>*` | `controller.h` | Raw pointer to the visualiser-owned ground-truth queue, registered through `SetGroundTruthVisualisationQueue()`. Null and inert when the GUI is off. |
+
+Modes and lifecycle:
+*   `enum class SlamMode { VO, VIO };` (`controller.h:14`) selects `use_imu` (`controller.cpp:133`).
+*   `initialize(t_ns, T_w_i, vel_w_i, bg, ba, useProducerConsumerArchitecture=false, enableVisualisation=false)` (`controller.h`) creates the frontend/backend, wires `out_marg_queue`/local mapper unconditionally, wires `out_state_queue`/pose thread only in producer-consumer mode, and stores `enableVisualisation` in `mpEnableVisualisation`. The flag arms the visualisation taps without itself wiring any GUI queue, since the visualiser performs that wiring.
+*   The LocalMapper pose-feedback channel is established inline as a lambda, not stored as a Controller member: `local_mapper_->SetVIOPoseUpdateCallback([this](const auto& poses){ vio_estimator_->QueuePoseUpdates(poses); });` (`controller.cpp:155-156`).
+*   `Stop()` (`controller.cpp:55-87`) executes the cascade sentinel-nullptr shutdown: push `nullptr` into the optical-flow input queue, then `local_map_input_queue_.push(nullptr)` + `local_mapper_->Stop()`, then `vio_estimator_->maybe_join()` + `drain_input_queues()`, reset the optical-flow pointer, and finally terminate/join the pose thread. Safe to call repeatedly (nullptr-guarded).
+
+Visualisation wiring now present in the Controller (implemented per `doc/Visualisation.md` §4):
+*   `class Controller` stays Pangolin-free. It includes the Pangolin-free `basalt/visualisation/utils.h` for `basalt::GtPose` and `<optional>` for the ground-truth argument. It does not own a visualiser. The visualiser instead reaches the estimators through accessors and connects the VIO output hooks itself.
+*   `Controller::initialize` takes a trailing `enableVisualisation` flag that is stored in `mpEnableVisualisation`. This flag is the single source of truth for whether the GUI is required. `Controller::IsVisualisationEnabled` exposes it to the visualiser.
+*   `Controller::TrackMonocular(OpticalFlowInput::Ptr& frame, Sophus::SE3f& tcw, std::optional<Sophus::SE3d> gtcw = std::nullopt)` forwards the optional ground-truth pose to `mvpGroundTruthQueue` only when `mpEnableVisualisation` is set and a queue has been registered. Existing callers that omit `gtcw` are unaffected.
+*   `Controller::SetGroundTruthVisualisationQueue` stores the pointer to the visualiser-owned ground-truth queue. `Controller::GetOpticalFlow` exposes the frontend so the visualiser can read `patch_coord` for the optical-flow overlay.
+*   The VIO `out_vis_queue` and `out_state_queue` are connected directly by `class SlamVisualiser` (not by the Controller). This tap is valid because `basalt_slam` runs with `useProducerConsumerArchitecture == false`, where the Controller leaves `out_state_queue` unwired and starts no pose thread, so both pointers are free for the visualiser to claim.
+
+### VIO visualisation payload (reusable as-is)
+
+`struct VioVisualizationData` (`vio_estimator.h:46-62`) is the existing per-frame snapshot the offline `basalt_vio` GUI consumes:
+
+```cpp
+struct VioVisualizationData {
+    typedef std::shared_ptr<VioVisualizationData> Ptr;
+    int64_t t_ns;
+    Eigen::aligned_vector<Sophus::SE3d> states;   // sliding-window states
+    Eigen::aligned_vector<Sophus::SE3d> frames;   // active keyframes
+    Eigen::aligned_vector<Eigen::Vector3d> points; // sliding-window landmarks (world)
+    std::vector<int> point_ids;
+    OpticalFlowResult::Ptr opt_flow_res;          // carries input_images for the image grid
+    std::vector<Eigen::aligned_vector<Eigen::Vector4d>> projections; // per-cam (u,v,depth,id)
+};
+```
+
+`VioEstimatorBase<Scalar>` already exposes the output hook `tbb::concurrent_bounded_queue<VioVisualizationData::Ptr>* out_vis_queue = nullptr;` (`vio_estimator.h:86-87`). When non-null the estimator fills and pushes the payload; when null it skips assembly entirely (zero overhead). A unified visualiser can therefore drive the VIO half of the display by setting this existing pointer — no estimator change is required for the VIO path. The `opt_flow_res->input_images` field means the image grid can be sourced from the vis stream itself, decoupling the visualiser from any dataset object.
+
+### LocalMapper map-data surface (no snapshot, no locks)
+
+The local map produced by `LocalMapper` (which inherits `NfrMapper` → `ScBundleAdjustmentBase` → `BundleAdjustmentBase`) lives in:
+*   `frame_poses` : `Eigen::aligned_map<int64_t, PoseStateWithLin<double>>` (`ba_base.h:157`) — the keyframe poses; non-const accessor `getFramePoses()` (`nfr_mapper.h:182`).
+*   `lmdb` : `LandmarkDatabase<double>` (`ba_base.h:160`) — landmarks stored as inverse-depth keypoints, not world points. Each `Keypoint` holds a 2D `direction` bearing, scalar `inv_dist`, and a `host_kf_id` (`landmark_database.h:53-84`).
+
+World-frame map points are materialised by `BundleAdjustmentBase::get_current_points(points, ids)` (`ba_base.h:68-71`, defined `ba_base.cpp:228-267`): for each host keyframe it forms `T_w_c = T_w_i * T_i_c`, unprojects each landmark's bearing via `StereographicParam::unproject`, sets the homogeneous depth to `inv_dist`, transforms to world, and dehomogenises. This is exactly how the offline `src/mapper.cpp` fills its `mapper_points` vector (`mapper.cpp:635`, rendered at `mapper.cpp:509`).
+
+Concurrency facts that constrain the visualiser:
+*   There are no mutexes anywhere in `LocalMapper`/`NfrMapper`/`ScBundleAdjustmentBase`; `lmdb` and `frame_poses` are plain (non-concurrent) containers.
+*   The entire pipeline runs on the single `mpLocalMappingThread` (`local_mapper.h:71`) entered via `MapLocally()`, which mutates `lmdb`/`frame_poses` in place across `IngestMargData → ... → CullRedundantKeyframes → optimize → filterOutliers → optimize` and then fires `mpVioPoseUpdateCallback(frame_poses)` (`local_mapper.cpp:65-95`).
+*   Consequently any cross-thread read of the live structures is a data race, and `get_current_points` will `std::abort()` (`ba_base.cpp:249`) if a host keyframe pose is concurrently erased by culling. The only safe consumption is a copy produced on the mapping thread itself.
+
+Implemented publish path: `class LocalMapper` now exposes a null-gated hook `tbb::concurrent_bounded_queue<LocalMapperVisualizationData::Ptr>* out_vis_queue` that mirrors `VioEstimatorBase::out_vis_queue`. Inside `LocalMapper::MapLocally`, immediately after the final `optimize()` and beside the existing pose callback, the mapping thread assembles a `struct LocalMapperVisualizationData` snapshot. It records the latest keyframe timestamp, materialises world points through `get_current_points`, copies every `frame_poses` entry through `getPose()`, and pushes the snapshot with `try_push`. This is the only point in the cycle where `frame_poses` and `lmdb` are quiescent on the mapping thread, so the copy is race-free, and `try_push` guarantees the mapper is never blocked by a stalled GL thread. The consumer therefore never touches the live `lmdb`/`frame_poses`. The pose-feedback callback (`PoseUpdateCallback = std::function<void(const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>&)>`, `local_mapper.h:22-23`) continues to hand off poses to the VIO unchanged.
+
+### basalt_slam integration test (with optional GUI)
+
+`src/basalt_slam.cpp` is the end-to-end assertion test, now extended with an optional GUI. It parses `--cam-calib`, `--dataset-path`, `--dataset-type {euroc,bag}`, `--config-path`, `--num-threads`, `--max-frames`, and `--show-gui` (default `false`). It builds `Controller(config, calib, SlamMode::VIO)`, calls `Controller::initialize(..., useProducerConsumerArchitecture=false, enableVisualisation=show_gui)`, loads a dataset via `DatasetIoFactory`, and runs one `feed_data` worker thread that calls `GrabIMU(...)` and `TrackMonocular(frame, tcw, gtcw)` synchronously per frame. The feeder resolves the nearest ground-truth pose for each image timestamp through `get_gt_timestamps()` and `get_gt_pose_data()`, and forwards it as an `std::optional`. Whether the pose is rendered is decided entirely by the `Controller::enableVisualisation` flag, so the feeder stays agnostic of the GUI.
+
+When `--show-gui` is set, `main` constructs a `class SlamVisualiser`, calls `SlamVisualiser::Start` to create the window and wire the queues, starts the feeder, and then runs the blocking `SlamVisualiser::Run` loop on the main thread. On window close it sets the feeder `terminate` flag, joins the feeder, calls `controller->Stop()`, and finally `visualiser.Stop()`. When the flag is absent the path is byte-for-byte the original headless test, namely `t1.join()` then `controller->Stop()`. In both modes the post-run assertions on `GetLocalMapper()->frame_poses` run afterwards and verify the local map size lies in `(0, mpMaxLocalMapSize]`.
+
+### CMake / library boundary
+
+The core `basalt` shared library does not link Pangolin; only the executables do (`CMakeLists.txt:393-446`). The `basalt_slam` target now compiles `src/visualisation/visualiser.cpp` and `src/visualisation/utils.cpp` alongside `src/basalt_slam.cpp` and links `basalt pangolin basalt::cli11`. The header `include/basalt/visualisation/utils.h` is Pangolin-free, so `class LocalMapper` (in `libbasalt.so`) includes it to declare `out_vis_queue` without pulling Pangolin into the core library. Because `src/visualisation/utils.cpp` is never added to the `basalt` target, no Pangolin symbol enters the core library, and the headless build keeps zero estimator overhead (G2) and CI compatibility (G4).

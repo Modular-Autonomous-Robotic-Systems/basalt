@@ -50,28 +50,37 @@ Controller::Controller(const std::string& config_path,
     out_state_queue_.set_capacity(100);
 }
 
-Controller::~Controller() { Stop(); }
+Controller::~Controller() {
+    if (!mpStoppedSlam) Stop();
+}
 
 void Controller::Stop() {
     // (1) Unblock optical flow — it will propagate nullptr to VIO.
-    if (opt_flow_ptr_) opt_flow_ptr_->input_queue.push(nullptr);
+    OpticalFlowResult::Ptr res;
+    OpticalFlowInput::Ptr frame = nullptr;
+    if (opt_flow_ptr_)
+        res = opt_flow_ptr_->processFrame(mpCurrentFrameTime, frame);
+    if (vio_estimator_ && !mpUseProducerConsumerArchitecture)
+        vio_estimator_->ProcessFrame(res);
 
     // (2) VIO's processing loop, on receiving nullptr, pushes nullptr to
     //     out_marg_queue (= local_map_input_queue_) and out_state_queue.
 
-    // (3) Local mapper receives nullptr from VIO → exits its loop.
-    //     Stop() joins the mapper thread.
-    if (local_mapper_) {
-        local_map_input_queue_.push(nullptr);
-        local_mapper_->Stop();
-    }
-
-    // (4) Join VIO thread explicitly (already finished by this point
+    // (3) Join VIO thread explicitly (already finished by this point
     //     since VIO pushes nullptr before mapper can pop it).
+    std::cout << "Stopping VIO thread" << std::endl;
     if (vio_estimator_) {
         vio_estimator_->maybe_join();
         vio_estimator_->drain_input_queues();
     }
+    std::cout << "Stopped VIO thread" << std::endl;
+    // (4) Local mapper receives nullptr from VIO → exits its loop.
+    //     Stop() joins the mapper thread.
+    std::cout << "Stopping Local Mapping" << std::endl;
+    if (local_mapper_) {
+        local_mapper_->Stop();
+    }
+    std::cout << "Local Mapping Stopped" << std::endl;
 
     // (5) Join optical flow via destructor.
     opt_flow_ptr_.reset();
@@ -84,6 +93,7 @@ void Controller::Stop() {
             pose_processing_thread_.join();
         }
     }
+    mpStoppedSlam = true;
 }
 
 void Controller::load_config() {
@@ -120,10 +130,12 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
                             const Eigen::Vector3d& vel_w_i,
                             const Eigen::Vector3d& bg,
                             const Eigen::Vector3d& ba,
-                            bool useProducerConsumerArchitecture) {
+                            bool useProducerConsumerArchitecture,
+                            bool enableVisualisation) {
     std::cout << "Initialising SLAM with mpUseProducerConsumerArchitecture: "
               << useProducerConsumerArchitecture << std::endl;
     mpUseProducerConsumerArchitecture = useProducerConsumerArchitecture;
+    mpEnableVisualisation = enableVisualisation;
     // 1. Create Optical Flow Frontend
     std::cout << "Setting up Optical Flow and VIO" << std::endl;
     opt_flow_ptr_ = basalt::OpticalFlowFactory::getOpticalFlow(
@@ -172,12 +184,18 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
     std::cout << "SLAM initialisation done" << std::endl;
 }
 
-void Controller::TrackMonocular(OpticalFlowInput::Ptr& frame,
-                                Sophus::SE3f& tcw) {
+void Controller::TrackMonocular(OpticalFlowInput::Ptr& frame, Sophus::SE3f& tcw,
+                                std::optional<Sophus::SE3d> gtcw) {
     OpticalFlowResult::Ptr res =
         opt_flow_ptr_->processFrame(frame->t_ns, frame);
+    mpCurrentFrameTime = frame->t_ns;
     current_latest_pose_ = vio_estimator_->ProcessFrame(res);
     tcw = current_latest_pose_->T_w_i.cast<float>();
+
+    // Forward the ground-truth pose to the GUI only when asked to (G1/G4).
+    if (mpEnableVisualisation && mvpGroundTruthQueue && gtcw) {
+        mvpGroundTruthQueue->try_push(basalt::GtPose{frame->t_ns, *gtcw});
+    }
 }
 
 void Controller::GrabImage(basalt::OpticalFlowInput::Ptr data) {
@@ -229,6 +247,19 @@ basalt::VioEstimatorBase<double>::Ptr Controller::GetVIO() const {
     return vio_estimator_;
 }
 
+basalt::OpticalFlowBase::Ptr Controller::GetOpticalFlow() const {
+    return opt_flow_ptr_;
+}
+
 basalt::Calibration<double>& Controller::GetCalibration() { return calib_; }
+
+bool Controller::IsVisualisationEnabled() const {
+    return mpEnableVisualisation;
+}
+
+void Controller::SetGroundTruthVisualisationQueue(
+    tbb::concurrent_bounded_queue<basalt::GtPose>* queue) {
+    mvpGroundTruthQueue = queue;
+}
 
 }  // namespace basalt

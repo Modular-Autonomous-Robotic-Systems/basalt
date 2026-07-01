@@ -26,14 +26,15 @@ LocalMapper::LocalMapper(const Calibration<double>& calib,
 LocalMapper::~LocalMapper() { Stop(); }
 
 void LocalMapper::Stop() {
+    std::cout << "inside stop function" << std::endl;
     mpStopLocalMapping = true;
-    // Do NOT push nullptr to mpMargInputQueue here — VIO is the sole owner of
-    // the nullptr sentinel in that queue. Relying on VIO's sentinel keeps the
-    // cascade contract deterministic.
     if (mpLocalMappingThread.joinable()) {
+        std::cout << "attempting to stop" << std::endl;
         mpLocalMappingThread.join();
+        std::cout << "able to stop local mapping thread" << std::endl;
     }
     mpTrackBuilder.ResetTrackId();
+    std::cout << "track builder ID reset and mapper stopped" << std::endl;
 }
 
 void LocalMapper::Initialise() {
@@ -69,9 +70,20 @@ void LocalMapper::MapLocally() {
     }
 
     while (!mpStopLocalMapping) {
+        auto t1 = std::chrono::high_resolution_clock::now();
+
         MargData::Ptr data;
+        std::cout << "waiting for data" << std::endl;
         mpMargInputQueue->pop(data);  // blocking
-        if (!data) break;             // VIO's nullptr sentinel → shutdown
+        auto t = std::chrono::high_resolution_clock::now();
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(t - t1);
+        std::cout << "spent " << elapsed.count() * 1e-6
+                  << "seconds waiting for new frame" << std::endl;
+        if (!data) {
+            std::cout << "got null ptr data" << std::endl;
+            break;
+        };  // VIO's nullptr sentinel → shutdown
 
         IngestMargData(data);
 
@@ -92,7 +104,28 @@ void LocalMapper::MapLocally() {
         filterOutliers(mpFilterOutlierThreshold, 4);
         optimize(mpOptIterations);
 
+        // Publish an immutable local-map snapshot for the GUI. This is the only
+        // point in the cycle where frame_poses and lmdb are quiescent on the
+        // mapping thread, so the copy is internally consistent and race-free.
+        if (out_vis_queue) {
+            LocalMapperVisualizationData::Ptr vis_data =
+                std::make_shared<LocalMapperVisualizationData>();
+            vis_data->t_ns =
+                frame_poses.empty() ? 0 : frame_poses.rbegin()->first;
+            get_current_points(vis_data->points, vis_data->point_ids);
+            vis_data->keyframes.reserve(frame_poses.size());
+            for (const auto& kv : frame_poses)
+                vis_data->keyframes.emplace_back(kv.second.getPose());
+            out_vis_queue->try_push(std::move(vis_data));  // never block mapper
+        }
+
         if (mpVioPoseUpdateCallback) mpVioPoseUpdateCallback(frame_poses);
+        auto t2 = std::chrono::high_resolution_clock::now();
+
+        auto elapsed1 =
+            std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
+        std::cout << "Local Mapping Time: " << elapsed1.count() * 1e-6 << "s"
+                  << std::endl;
     }
 }
 
@@ -580,6 +613,7 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
     // Perform the swap.
     lmdb.removeLandmark(lm_id);
     lmdb.addLandmark(lm_id, new_kpt);
+    int obs_added = 0;
     for (const auto& o : obs_copy) {
         if (o.first.frame_id == culled_kf) continue;
         if (o.first == new_host_tcid) continue;
@@ -587,6 +621,16 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
         ko.kpt_id = lm_id;
         ko.pos = o.second;
         lmdb.addObservation(o.first, ko);
+        ++obs_added;
+    }
+
+    // If every observation was either from the culled frame or from the new
+    // host itself, no entry was added to the observations index for this
+    // landmark. The landmark would be dangling in kpts with an empty obs set,
+    // which would cause removeLandmarkHelper to receive observations.end()
+    // later. Remove it immediately instead.
+    if (obs_added == 0) {
+        lmdb.removeLandmark(lm_id);
     }
 }
 
