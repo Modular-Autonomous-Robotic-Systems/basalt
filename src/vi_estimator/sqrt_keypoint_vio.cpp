@@ -72,6 +72,7 @@ SqrtKeypointVioEstimator<Scalar_>::SqrtKeypointVioEstimator(
     obs_std_dev = Scalar(config.vio_obs_std_dev);
     huber_thresh = Scalar(config.vio_obs_huber_thresh);
     this->calib = calib_.cast<Scalar>();
+    std::cout << "vio debug mode: " << config.vio_debug << std::endl;
 
     // Setup marginalization
     marg_data.is_sqrt = config.vio_sqrt_marg;

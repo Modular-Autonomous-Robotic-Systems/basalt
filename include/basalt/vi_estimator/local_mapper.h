@@ -47,14 +47,15 @@ public:
 
     // ── Visualisation publish hook ──────────────────────────────────
     // A null pointer means the mapper assembles no snapshot, so the GUI tap
-    // costs nothing. This mirrors the contract of VioEstimatorBase::out_vis_queue
-    // exactly. The name is kept un-prefixed for API symmetry with the VIO hook.
+    // costs nothing. This mirrors the contract of
+    // VioEstimatorBase::out_vis_queue exactly. The name is kept un-prefixed for
+    // API symmetry with the VIO hook.
     tbb::concurrent_bounded_queue<LocalMapperVisualizationData::Ptr>*
         out_vis_queue = nullptr;
 
     // ── Config ──────────────────────────────────────────────────────
     size_t mpMaxLocalMapSize = 50;
-    double mpCullCovisibilityThresh = 0.90;
+    double mpCullCovisibilityThresh = 0.5;
     int mpOptIterations = 5;
     double mpFilterOutlierThreshold = 3.0;
 
@@ -83,7 +84,7 @@ private:
     PoseUpdateCallback mpVioPoseUpdateCallback;
 
     // Helpers
-    int64_t SelectKeyframeToCull();
+    bool SelectKeyframesToCull(std::vector<int64_t>& keyframesToCull);
     int64_t FindBestRehostKf(int64_t culled_kf, TrackId lm_id,
                              const std::set<int64_t>& candidates);
     void RehostLandmark(TrackId lm_id, int64_t culled_kf, int64_t new_host_kf);

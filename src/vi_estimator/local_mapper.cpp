@@ -72,41 +72,157 @@ void LocalMapper::MapLocally() {
     while (!mpStopLocalMapping) {
         auto t1 = std::chrono::high_resolution_clock::now();
 
+        // Block on the first item so the thread sleeps (zero CPU) when idle,
+        // then try_pop any further items that accumulated during the last
+        // cycle.
+        std::vector<MargData::Ptr> vecData;
+        bool nullReceived = false;
         MargData::Ptr data;
-        std::cout << "waiting for data" << std::endl;
-        mpMargInputQueue->pop(data);  // blocking
-        auto t = std::chrono::high_resolution_clock::now();
-        auto elapsed =
-            std::chrono::duration_cast<std::chrono::microseconds>(t - t1);
-        std::cout << "spent " << elapsed.count() * 1e-6
-                  << "seconds waiting for new frame" << std::endl;
-        if (!data) {
-            std::cout << "got null ptr data" << std::endl;
-            break;
-        };  // VIO's nullptr sentinel → shutdown
 
-        IngestMargData(data);
+        mpMargInputQueue->pop(data);  // blocking — sleeps until VIO pushes
+        if (!data) {
+            std::cout << "[Local Mapper] got shutdown sentinel" << std::endl;
+            break;
+        }
+        vecData.push_back(data);
+
+        while (mpMargInputQueue->try_pop(data)) {
+            if (!data) {
+                nullReceived = true;
+                break;
+            }
+            vecData.push_back(data);
+        }
+        auto tStep = std::chrono::high_resolution_clock::now();
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(tStep - t1);
+        std::cout << "[Local Mapper] Queue wait time taken: "
+                  << elapsed.count() * 1e-6 << "s" << std::endl;
+
+        tStep = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] Procesing " << vecData.size()
+                  << " marginalisation data packets" << std::endl;
+        while (!vecData.empty()) {
+            MargData::Ptr data = vecData.back();
+            vecData.pop_back();
+            IngestMargData(data);
+        }
+        auto tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] IngestMargData time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
 
         if (mpNewKeyframesForTracking.empty()) continue;
 
+        tStep = std::chrono::high_resolution_clock::now();
         detect_keypoints();  // inherited — only touches img_data (now filtered)
-        match_stereo();      // inherited — writes to feature_matches
-        MatchLocal();        // BoW cross-frame matching for new KFs
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] detect_keypoints time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
+
+        tStep = std::chrono::high_resolution_clock::now();
+        match_stereo();  // inherited — writes to feature_matches
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] match_stereo time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
+
+        tStep = std::chrono::high_resolution_clock::now();
+        MatchLocal();  // BoW cross-frame matching for new KFs
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] MatchLocal time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
+
+        tStep = std::chrono::high_resolution_clock::now();
         CollectNewKeyframesAfterMatching();  // promote to
                                              // mpLatestKeyframesMatches
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout
+            << "[Local Mapper] CollectNewKeyframesAfterMatching time taken: "
+            << std::chrono::duration_cast<std::chrono::microseconds>(tEnd -
+                                                                     tStep)
+                       .count() *
+                   1e-6
+            << "s" << std::endl;
 
+        tStep = std::chrono::high_resolution_clock::now();
         build_tracks();  // LocalMapper (shadowing NfrMapper)
-        setup_opt();     // LocalMapper (shadowing NfrMapper)
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] build_tracks time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
 
+        tStep = std::chrono::high_resolution_clock::now();
+        setup_opt();  // LocalMapper (shadowing NfrMapper)
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] setup_opt time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
+
+        tStep = std::chrono::high_resolution_clock::now();
         CullRedundantKeyframes();
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] CullRedundantKeyframes time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
 
+        tStep = std::chrono::high_resolution_clock::now();
         optimize(mpOptIterations);
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] optimize (1st pass) time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
+
+        tStep = std::chrono::high_resolution_clock::now();
         filterOutliers(mpFilterOutlierThreshold, 4);
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] filterOutliers time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
+
+        tStep = std::chrono::high_resolution_clock::now();
         optimize(mpOptIterations);
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] optimize (2nd pass) time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
 
         // Publish an immutable local-map snapshot for the GUI. This is the only
         // point in the cycle where frame_poses and lmdb are quiescent on the
         // mapping thread, so the copy is internally consistent and race-free.
+        tStep = std::chrono::high_resolution_clock::now();
         if (out_vis_queue) {
             LocalMapperVisualizationData::Ptr vis_data =
                 std::make_shared<LocalMapperVisualizationData>();
@@ -118,14 +234,36 @@ void LocalMapper::MapLocally() {
                 vis_data->keyframes.emplace_back(kv.second.getPose());
             out_vis_queue->try_push(std::move(vis_data));  // never block mapper
         }
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] Visualization publish time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
 
+        tStep = std::chrono::high_resolution_clock::now();
         if (mpVioPoseUpdateCallback) mpVioPoseUpdateCallback(frame_poses);
-        auto t2 = std::chrono::high_resolution_clock::now();
+        tEnd = std::chrono::high_resolution_clock::now();
+        std::cout << "[Local Mapper] VIO pose update callback time taken: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         tEnd - tStep)
+                             .count() *
+                         1e-6
+                  << "s" << std::endl;
 
         auto elapsed1 =
-            std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
-        std::cout << "Local Mapping Time: " << elapsed1.count() * 1e-6 << "s"
-                  << std::endl;
+            std::chrono::duration_cast<std::chrono::microseconds>(tEnd - t1);
+        std::cout << "[Local Mapper] Total Local Mapping Time: "
+                  << elapsed1.count() * 1e-6 << "s" << std::endl;
+        std::cout
+            << "[Local Mapper] "
+               "============================================================"
+            << std::endl;
+
+        // If the sentinel arrived mid-drain (alongside real data), we still
+        // processed all data above — now shut down cleanly.
+        if (nullReceived) break;
     }
 }
 
@@ -184,7 +322,6 @@ void LocalMapper::IngestMargData(MargData::Ptr& data) {
     // Step 4 — filter img_data to keep only new KF images.
     for (auto it = img_data.begin(); it != img_data.end();) {
         if (mpNewKeyframesForTracking.count(it->first) == 0) {
-            std::cout << "Removing keyframe: " << it->first << std::endl;
             it = img_data.erase(it);
         } else
             ++it;
@@ -454,8 +591,8 @@ size_t LocalMapper::ComputeCovisibility(int64_t tid_a, int64_t tid_b,
 // SelectKeyframeToCull
 // ═══════════════════════════════════════════════════════════════════
 
-int64_t LocalMapper::SelectKeyframeToCull() {
-    if (frame_poses.size() <= 5) return -1;  // keep minimum map
+bool LocalMapper::SelectKeyframesToCull(std::vector<int64_t>& keyframesToCull) {
+    // if (frame_poses.size() <= 5) return false;  // keep minimum map
 
     // Order KFs by timestamp; the most recent ones are untouchable.
     std::vector<int64_t> ordered;
@@ -464,9 +601,11 @@ int64_t LocalMapper::SelectKeyframeToCull() {
         ordered.push_back(kv.first);
     }
     std::sort(ordered.begin(), ordered.end());
-    const size_t keep_recent =
-        std::min<size_t>(mpNewKeyframesForTracking.size(), ordered.size());
-    const size_t eligible_end = ordered.size() - keep_recent;
+    // We want to cull the keyframes with the most redundant keyframes without
+    // any preferential treatment for the latest keyframes const size_t
+    // keep_recent =
+    //     std::min<size_t>(mpNewKeyframesForTracking.size(), ordered.size());
+    const size_t eligible_end = ordered.size();  // - keep_recent;
 
     const auto& obs = lmdb.getObservations();
 
@@ -482,27 +621,41 @@ int64_t LocalMapper::SelectKeyframeToCull() {
                     total_a += kpt_set.size();
                 }
             }
-            total_a += lmdb.getNonLandmarkObservationsCountForKeyFrame(tcid_a);
+            // total_a +=
+            // lmdb.getNonLandmarkObservationsCountForKeyFrame(tcid_a);
         }
         if (total_a == 0) continue;
 
         // Check covisibility against every other KF.
-        for (size_t j = 0; j < ordered.size(); ++j) {
+        for (size_t j = i; j < ordered.size(); ++j) {
             if (i == j) continue;
             const int64_t b = ordered[j];
             const size_t covis =
                 ComputeCovisibility(a, b, calib.intrinsics.size());
+            // std::cout << "[Local Mapper] Computed covisibility: "
+            //           << static_cast<double>(covis) /
+            //                  static_cast<double>(total_a)
+            //           << std::endl;
             if (static_cast<double>(covis) / static_cast<double>(total_a) >=
                 mpCullCovisibilityThresh)
-                return a;
+                keyframesToCull.push_back(a);
         }
     }
 
     // Criterion 2 — capacity (oldest eligible KF).
-    if (frame_poses.size() > mpMaxLocalMapSize) {
-        return ordered.front();
+    if (frame_poses.size() > mpMaxLocalMapSize && keyframesToCull.empty()) {
+        std::cout << "[Local Mapper] No Keyframe Found with Covisibility below "
+                     "threshold; Culling Last Frame"
+                  << std::endl;
+        keyframesToCull.push_back(ordered.front());
     }
-    return -1;
+    if (keyframesToCull.empty()) {
+        return false;
+    } else {
+        std::cout << "[Local Mapper] Received " << keyframesToCull.size()
+                  << " keyframes to cull" << std::endl;
+        return true;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -640,8 +793,9 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
 
 void LocalMapper::CullRedundantKeyframes() {
     std::vector<KeypointId> landmarksToRemove;
-    const int64_t culled = SelectKeyframeToCull();
-    if (culled < 0) {
+    std::vector<int64_t> keyframesToCull;
+    bool toCull = SelectKeyframesToCull(keyframesToCull);
+    if (!toCull) {
         // Still clear transient per-step data even if no culling occurred.
         img_data.clear();
         feature_tracks.clear();
@@ -650,93 +804,96 @@ void LocalMapper::CullRedundantKeyframes() {
     }
 
     // ─── Step 1 — rehost landmarks hosted by culled KF ─────────────────
-    std::set<int64_t> candidates;
-    for (const auto& kv : frame_poses) candidates.insert(kv.first);
+    for (int64_t culled : keyframesToCull) {
+        std::set<int64_t> candidates;
+        for (const auto& kv : frame_poses) candidates.insert(kv.first);
 
-    // Collect unique landmark IDs hosted by the culled KF via the
-    // observations index — avoids getLandmarksForHost (which throws on
-    // missing keys) and produces deduplicated IDs in O(N).
-    const auto& obs = lmdb.getObservations();
-    std::set<KeypointId> hosted_lm_set;
-    for (size_t cam = 0; cam < calib.intrinsics.size(); ++cam) {
-        TimeCamId tcid(culled, cam);
-        auto obs_it = obs.find(tcid);
-        if (obs_it == obs.end()) continue;
-        for (const auto& [target, kpt_set] : obs_it->second) {
-            hosted_lm_set.insert(kpt_set.begin(), kpt_set.end());
-        }
-    }
-    std::vector<TrackId> hosted_lm_ids(hosted_lm_set.begin(),
-                                       hosted_lm_set.end());
-
-    landmarksToRemove.clear();
-    for (const TrackId lm : hosted_lm_ids) {
-        const int64_t new_host = FindBestRehostKf(culled, lm, candidates);
-        if (new_host < 0) {
-            if (lmdb.landmarkExists(lm)) {
-                landmarksToRemove.push_back(lm);
-            }
-        } else {
-            RehostLandmark(lm, culled, new_host);
-        }
-    }
-    for (const KeypointId id : landmarksToRemove) {
-        lmdb.removeLandmark(id);
-    }
-
-    // ─── Step 2 — remove remaining observations of culled KF ───────────
-    lmdb.removeFrame(culled);
-
-    // ─── Step 2b — drop landmarks now below min_num_obs ─────────────────
-    const auto& landmarks = lmdb.getLandmarks();
-    landmarksToRemove.clear();
-    for (auto it = landmarks.begin(); it != landmarks.end(); ++it) {
-        if (lmdb.numObservations(it->first) < 2) {
-            if (lmdb.landmarkExists(it->first)) {
-                landmarksToRemove.push_back(it->first);
+        // Collect unique landmark IDs hosted by the culled KF via the
+        // observations index — avoids getLandmarksForHost (which throws on
+        // missing keys) and produces deduplicated IDs in O(N).
+        const auto& obs = lmdb.getObservations();
+        std::set<KeypointId> hosted_lm_set;
+        for (size_t cam = 0; cam < calib.intrinsics.size(); ++cam) {
+            TimeCamId tcid(culled, cam);
+            auto obs_it = obs.find(tcid);
+            if (obs_it == obs.end()) continue;
+            for (const auto& [target, kpt_set] : obs_it->second) {
+                hosted_lm_set.insert(kpt_set.begin(), kpt_set.end());
             }
         }
-    }
-    for (const KeypointId id : landmarksToRemove) {
-        lmdb.removeLandmark(id);
-    }
+        std::vector<TrackId> hosted_lm_ids(hosted_lm_set.begin(),
+                                           hosted_lm_set.end());
 
-    // ─── Step 3 — prune NFR factors referencing culled KF ──────────────
-    rel_pose_factors.erase(
-        std::remove_if(rel_pose_factors.begin(), rel_pose_factors.end(),
-                       [culled](const RelPoseFactor& f) {
-                           return f.t_i_ns == culled || f.t_j_ns == culled;
-                       }),
-        rel_pose_factors.end());
-    roll_pitch_factors.erase(
-        std::remove_if(
-            roll_pitch_factors.begin(), roll_pitch_factors.end(),
-            [culled](const RollPitchFactor& f) { return f.t_ns == culled; }),
-        roll_pitch_factors.end());
-
-    // ─── Step 4 — erase frame_poses and feature_corners ─────────────────
-    frame_poses.erase(culled);
-    for (size_t cam = 0; cam < calib.intrinsics.size(); ++cam)
-        feature_corners.unsafe_erase(TimeCamId(culled, cam));
-
-    // feature_matches: erase any entry involving culled.
-    for (auto kv = feature_matches.begin(); kv != feature_matches.end();) {
-        if (kv->first.first.frame_id == culled ||
-            kv->first.second.frame_id == culled) {
-            kv = feature_matches.unsafe_erase(kv);
-        } else {
-            ++kv;
+        landmarksToRemove.clear();
+        for (const TrackId lm : hosted_lm_ids) {
+            const int64_t new_host = FindBestRehostKf(culled, lm, candidates);
+            if (new_host < 0) {
+                if (lmdb.landmarkExists(lm)) {
+                    landmarksToRemove.push_back(lm);
+                }
+            } else {
+                RehostLandmark(lm, culled, new_host);
+            }
         }
+        for (const KeypointId id : landmarksToRemove) {
+            lmdb.removeLandmark(id);
+        }
+
+        // ─── Step 2 — remove remaining observations of culled KF ───────────
+        lmdb.removeFrame(culled);
+
+        // ─── Step 2b — drop landmarks now below min_num_obs ─────────────────
+        const auto& landmarks = lmdb.getLandmarks();
+        landmarksToRemove.clear();
+        for (auto it = landmarks.begin(); it != landmarks.end(); ++it) {
+            if (lmdb.numObservations(it->first) < 2) {
+                if (lmdb.landmarkExists(it->first)) {
+                    landmarksToRemove.push_back(it->first);
+                }
+            }
+        }
+        for (const KeypointId id : landmarksToRemove) {
+            lmdb.removeLandmark(id);
+        }
+
+        // ─── Step 3 — prune NFR factors referencing culled KF ──────────────
+        rel_pose_factors.erase(
+            std::remove_if(rel_pose_factors.begin(), rel_pose_factors.end(),
+                           [culled](const RelPoseFactor& f) {
+                               return f.t_i_ns == culled || f.t_j_ns == culled;
+                           }),
+            rel_pose_factors.end());
+        roll_pitch_factors.erase(
+            std::remove_if(roll_pitch_factors.begin(), roll_pitch_factors.end(),
+                           [culled](const RollPitchFactor& f) {
+                               return f.t_ns == culled;
+                           }),
+            roll_pitch_factors.end());
+
+        // ─── Step 4 — erase frame_poses and feature_corners ─────────────────
+        frame_poses.erase(culled);
+        for (size_t cam = 0; cam < calib.intrinsics.size(); ++cam)
+            feature_corners.unsafe_erase(TimeCamId(culled, cam));
+
+        // feature_matches: erase any entry involving culled.
+        for (auto kv = feature_matches.begin(); kv != feature_matches.end();) {
+            if (kv->first.first.frame_id == culled ||
+                kv->first.second.frame_id == culled) {
+                kv = feature_matches.unsafe_erase(kv);
+            } else {
+                ++kv;
+            }
+        }
+
+        // ─── Step 5 — BoW database ──────────────────────────────────────────
+        std::vector<TimeCamId> bow_to_drop;
+        for (size_t cam = 0; cam < calib.intrinsics.size(); ++cam)
+            bow_to_drop.emplace_back(TimeCamId(culled, cam));
+        hash_bow_database->RemoveKeyframes(bow_to_drop);
+
+        // ─── Step 6 — TrackBuilder cleanup ──────────────────────────────────
+        mpTrackBuilder.DeleteTracksAfterCulling({culled});
     }
-
-    // ─── Step 5 — BoW database ──────────────────────────────────────────
-    std::vector<TimeCamId> bow_to_drop;
-    for (size_t cam = 0; cam < calib.intrinsics.size(); ++cam)
-        bow_to_drop.emplace_back(TimeCamId(culled, cam));
-    hash_bow_database->RemoveKeyframes(bow_to_drop);
-
-    // ─── Step 6 — TrackBuilder cleanup ──────────────────────────────────
-    mpTrackBuilder.DeleteTracksAfterCulling({culled});
 
     // ─── Step 7 — clear transient per-step data ─────────────────────────
     std::cout << "clearing transient per-step data" << std::endl;

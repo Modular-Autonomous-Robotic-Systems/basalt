@@ -40,6 +40,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <CLI/CLI.hpp>
 #include <algorithm>
+#include <chrono>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <thread>
@@ -48,30 +50,45 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 size_t max_frames = 0;
 std::atomic<bool> terminate = false;
 
+int64_t get_sequence_frame_duration(std::vector<int64_t> timestamps) {
+    if (timestamps.size() < 2) return 0;
+    int64_t total_duration = 0;
+    for (size_t i = 1; i < timestamps.size(); i++) {
+        total_duration += timestamps[i] - timestamps[i - 1];
+    }
+    return total_duration / static_cast<int64_t>(timestamps.size() - 1);
+}
+
 void feed_data(std::shared_ptr<basalt::Controller> controller,
                basalt::VioDatasetPtr vio_dataset) {
     std::cout << "Started feed_data thread" << std::endl;
 
     basalt::VioEstimatorBase<double>::Ptr vio = controller->GetVIO();
 
-    const auto& gyro_data = vio_dataset->get_gyro_data();
-    const auto& accel_data = vio_dataset->get_accel_data();
-    const auto& image_timestamps = vio_dataset->get_image_timestamps();
+    const Eigen::aligned_vector<basalt::GyroData>& gyro_data =
+        vio_dataset->get_gyro_data();
+    const Eigen::aligned_vector<basalt::AccelData>& accel_data =
+        vio_dataset->get_accel_data();
+    std::vector<int64_t>& image_timestamps =
+        vio_dataset->get_image_timestamps();
+    int64_t duration = get_sequence_frame_duration(image_timestamps);
 
     // Ground-truth poses are sampled at the mocap rate, which rarely coincides
     // with an image timestamp, so resolve the nearest GT sample per frame.
-    const auto& gt_timestamps = vio_dataset->get_gt_timestamps();
-    const auto& gt_poses = vio_dataset->get_gt_pose_data();
-    auto gt_pose_for =
+    const std::vector<int64_t>& gt_timestamps =
+        vio_dataset->get_gt_timestamps();
+    const Eigen::aligned_vector<Sophus::SE3d>& gt_poses =
+        vio_dataset->get_gt_pose_data();
+    std::function<std::optional<Sophus::SE3d>(int64_t)> gt_pose_for =
         [&](int64_t t_ns) -> std::optional<Sophus::SE3d> {
         if (gt_timestamps.empty()) return std::nullopt;
-        auto it =
+        std::vector<int64_t>::const_iterator it =
             std::lower_bound(gt_timestamps.begin(), gt_timestamps.end(), t_ns);
         size_t idx = static_cast<size_t>(it - gt_timestamps.begin());
         if (idx == gt_timestamps.size()) idx = gt_timestamps.size() - 1;
         // Prefer the closer of the two neighbouring samples.
-        else if (idx > 0 && (t_ns - gt_timestamps[idx - 1]) <
-                                (gt_timestamps[idx] - t_ns))
+        else if (idx > 0 &&
+                 (t_ns - gt_timestamps[idx - 1]) < (gt_timestamps[idx] - t_ns))
             idx = idx - 1;
         return gt_poses[idx];
     };
@@ -85,6 +102,8 @@ void feed_data(std::shared_ptr<basalt::Controller> controller,
             break;
         }
 
+        std::chrono::high_resolution_clock::time_point t1 =
+            std::chrono::high_resolution_clock::now();
         basalt::OpticalFlowInput::Ptr data(new basalt::OpticalFlowInput);
         data->t_ns = image_timestamps[i];
         data->img_data = vio_dataset->get_image_data(data->t_ns);
@@ -118,6 +137,18 @@ void feed_data(std::shared_ptr<basalt::Controller> controller,
         Sophus::SE3f tcw;
         std::optional<Sophus::SE3d> gtcw = gt_pose_for(image_timestamps[i]);
         controller->TrackMonocular(data, tcw, gtcw);
+        std::chrono::high_resolution_clock::time_point t2 =
+            std::chrono::high_resolution_clock::now();
+        std::chrono::microseconds elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
+        // sleep here
+        int64_t remaining_us = duration / 1000 - elapsed.count();
+        if (remaining_us > 0) {
+            // std::cout << "remaining micro seconds: " << remaining_us
+            //           << std::endl;
+            std::this_thread::sleep_for(
+                std::chrono::microseconds(remaining_us));
+        }
     }
 
     std::cout << "Finished feed_data thread" << std::endl;
@@ -209,8 +240,8 @@ int main(int argc, char** argv) {
 
         terminate = true;  // stop the feeder early if the user quit first
         t1.join();
-        controller->Stop();   // drains VIO + local mapper via their sentinels
-        visualiser.Stop();    // releases the visualiser's consumer threads
+        controller->Stop();  // drains VIO + local mapper via their sentinels
+        visualiser.Stop();   // releases the visualiser's consumer threads
     } else {
         std::thread t1(feed_data, controller, vio_dataset);
         t1.join();
