@@ -166,9 +166,23 @@ void SlamVisualiser::Run() {
 
         // Drain ground truth on the GL thread, so this buffer has a single
         // writer and needs no lock.
+        // Snapshot under lock: ConsumeVioStateQueue writes mpSlamFirstPose from
+        // another thread.
+        std::optional<Sophus::SE3d> slam_first;
+        {
+            std::lock_guard<std::mutex> lock(mpMtxVioState);
+            slam_first = mpSlamFirstPose;
+        }
+
         basalt::GtPose gt;
-        while (mvpGroundTruthQueue.try_pop(gt))
-            mvpGroundTruthTrajectory.emplace_back(gt.T_w_i.translation());
+        while (mvpGroundTruthQueue.try_pop(gt)) {
+            // IO-normalised GT is in the initial IMU body frame. The SLAM
+            // gravity-aligns its world frame so its first T_w_i != Identity.
+            // Multiplying by slam_first maps GT into the SLAM world frame.
+            Sophus::SE3d T_gt_vis =
+                slam_first ? *slam_first * gt.T_w_i : gt.T_w_i;
+            mvpGroundTruthTrajectory.emplace_back(T_gt_vis.translation());
+        }
 
         basalt::VioVisualizationData::Ptr latest;
         {
@@ -446,6 +460,7 @@ void SlamVisualiser::ConsumeVioStateQueue() {
 
         {
             std::lock_guard<std::mutex> lock(mpMtxVioState);
+            if (!mpSlamFirstPose) mpSlamFirstPose = data->T_w_i;
             mvpVioTrajectory.emplace_back(data->T_w_i.translation());
         }
 

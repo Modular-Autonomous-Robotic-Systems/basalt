@@ -159,7 +159,7 @@ bool NfrMapper::extractNonlinearFactors(MargData& m) {
     Eigen::MatrixXd cov_old = qr.solve(Eigen::MatrixXd::Identity(asize, asize));
 
     // Assuming that we only have one marginalised keyframe for every MargData
-    // object We need to test this assmption
+    // object We need to test this assumption
     // TODO check if we need to add a loop here to add more than one keyframe
     // here
     int64_t kf_id = *m.kfs_to_marg.cbegin();
@@ -293,14 +293,16 @@ void NfrMapper::optimize(int num_iterations) {
 
         double error_total = rld_error + lopt.rel_error + lopt.roll_pitch_error;
 
-        std::cout << "[LINEARIZE] iter " << iter
-                  << " before_update_error: vision: " << rld_error
-                  << " rel_error: " << lopt.rel_error
-                  << " roll_pitch_error: " << lopt.roll_pitch_error
-                  << " total: " << error_total << std::endl;
+        if (config.vio_debug) {
+            std::cout << "[LINEARIZE] iter " << iter
+                      << " before_update_error: vision: " << rld_error
+                      << " rel_error: " << lopt.rel_error
+                      << " roll_pitch_error: " << lopt.roll_pitch_error
+                      << " total: " << error_total << std::endl;
+        }
 
         lopt.accum.iterative_solver = true;
-        lopt.accum.print_info = true;
+        lopt.accum.print_info = false;
 
         lopt.accum.setup_solver();
         const Eigen::VectorXd Hdiag = lopt.accum.Hdiagonal();
@@ -357,25 +359,29 @@ void NfrMapper::optimize(int num_iterations) {
                 double f_diff = (error_total - after_error_total);
 
                 if (f_diff < 0) {
-                    std::cout << "\t[REJECTED] lambda:" << lambda
-                              << " f_diff: " << f_diff
-                              << " max_inc: " << max_inc
-                              << " vision_error: " << after_update_vision_error
-                              << " rel_error: " << after_rel_error
-                              << " roll_pitch_error: " << after_roll_pitch_error
-                              << " total: " << after_error_total << std::endl;
+                    if (config.vio_debug) {
+                        std::cout
+                            << "\t[REJECTED] lambda:" << lambda
+                            << " f_diff: " << f_diff << " max_inc: " << max_inc
+                            << " vision_error: " << after_update_vision_error
+                            << " rel_error: " << after_rel_error
+                            << " roll_pitch_error: " << after_roll_pitch_error
+                            << " total: " << after_error_total << std::endl;
+                    }
                     lambda = std::min(max_lambda, lambda_vee * lambda);
                     lambda_vee *= 2;
 
                     restore();
                 } else {
-                    std::cout << "\t[ACCEPTED] lambda:" << lambda
-                              << " f_diff: " << f_diff
-                              << " max_inc: " << max_inc
-                              << " vision_error: " << after_update_vision_error
-                              << " rel_error: " << after_rel_error
-                              << " roll_pitch_error: " << after_roll_pitch_error
-                              << " total: " << after_error_total << std::endl;
+                    if (config.vio_debug) {
+                        std::cout
+                            << "\t[ACCEPTED] lambda:" << lambda
+                            << " f_diff: " << f_diff << " max_inc: " << max_inc
+                            << " vision_error: " << after_update_vision_error
+                            << " rel_error: " << after_rel_error
+                            << " roll_pitch_error: " << after_roll_pitch_error
+                            << " total: " << after_error_total << std::endl;
+                    }
 
                     lambda = std::max(min_lambda, lambda / 3);
                     lambda_vee = 2;
@@ -420,9 +426,11 @@ void NfrMapper::optimize(int num_iterations) {
         auto elapsed =
             std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
 
-        std::cout << "iter " << iter << " time : " << elapsed.count()
-                  << "(us),  num_states " << frame_states.size()
-                  << " num_poses " << frame_poses.size() << std::endl;
+        if (config.vio_debug) {
+            std::cout << "iter " << iter << " time : " << elapsed.count()
+                      << "(us),  num_states " << frame_states.size()
+                      << " num_poses " << frame_poses.size() << std::endl;
+        }
 
         if (converged) break;
 

@@ -8,15 +8,15 @@ The **mapping pipeline** in `basalt`  performs this role of globally consistent 
 
 The mapping pipeline is tightly coupled to the VIO marginalisation output. The dense information matrix passed through `MargData` is the direct product of the Schur-complement operations described in (`doc/Marginalisation.md`)[doc/Marginalisation.md]. The quality of the recovered non-linear factors — and therefore the global map — is contingent on the VIO sliding-window optimisation having converged to a good local minimum before marginalisation. Readers unfamiliar with the VIO linearisation and marginalisation process are advised to read (`doc/Marginalisation.md`)[doc/Marginalisation.md] before proceeding.
 Each `MargData` packet fed to the mapping pipeline contains:
-- The dense marginal information matrix `abs_H` and vector `abs_b` over the Markov blanket of the marginalised keyframe.
-- Keyframe pose estimates (`frame_poses`, `frame_states`).
-- Keyframe bookkeeping sets (`kfs_all`, `kfs_to_marg`).
-- The optical flow results (`opt_flow_res`) carrying the raw image data for re-detection.
-- A flag `use_imu` indicating whether IMU constraints are present in the marginal.
+1. The dense marginal information matrix `abs_H` and vector `abs_b` over the Markov blanket of the marginalised keyframe.
+2. Keyframe pose estimates (`frame_poses`, `frame_states`).
+3. Keyframe bookkeeping sets (`kfs_all`, `kfs_to_marg`).
+4. The optical flow results (`opt_flow_res`) carrying the raw image data for re-detection.
+4. A flag `use_imu` indicating whether IMU constraints are present in the marginal.
 
 The mapping pipeline will process the input sequence of `MargData::Ptr` to output:
-- A globally refined map of keyframe poses: `Eigen::aligned_map<int64_t, PoseStateWithLin<double>> frame_poses`.
-- A 3D landmark database: `LandmarkDatabase<double> lmdb` (inherited from `BundleAdjustmentBase`).
+1. A globally refined map of keyframe poses: `Eigen::aligned_map<int64_t, PoseStateWithLin<double>> frame_poses`.
+2. A 3D landmark database: `LandmarkDatabase<double> lmdb` (inherited from `BundleAdjustmentBase`).
 
 The mapping pipeline is implemented in the `NfrMapper` class (`include/basalt/vi_estimator/nfr_mapper.h` and `src/vi_estimator/nfr_mapper.cpp`). It inherits the full Bundle Adjustment implementation from `ScBundleAdjustmentBase<double>`, which in turn inherits from `BundleAdjustmentBase<double>`. In the current implementation the pipeline is **offline**: a sample driver (`src/mapper.cpp`) loads serialised `MargData` from disk using `MargDataLoader`, feeds all packets to the mapper, then executes the detection, matching, optimisation, and filtering stages sequentially.
 Section 2 in the document derives the mathematics of Non-Linear Factor Recovery: how a dense marginal covariance is converted into sparse relative-pose and roll-pitch factors. Section 3 formulates the global Bundle Adjustment problem and describes the feature pipeline (detection, matching, triangulation) that supplements the recovered factors. Section 4 documents all classes, data structures, and the end-to-end execution flow in code. Section 5 concludes with a discussion of the current limitations and the path to real-time integration.
@@ -27,23 +27,21 @@ Section 2 in the document derives the mathematics of Non-Linear Factor Recovery:
 
 ### 2.1 Motivation
 
-As detailed in `doc/Marginalisation.md §4`, marginalising a keyframe produces a dense marginal information matrix $\mathbf{H}^*$ over its Markov blanket — the set of all remaining active keyframes that shared visual landmarks with the marginalised frame. This dense prior captures the full joint uncertainty of those keyframes as inferred from all visual-inertial measurements processed up to that point.
+As detailed in `doc/Marginalisation.md §4`, marginalising a keyframe produces a dense marginal information matrix $\mathbf{H}^{\ast}$ over its Markov blanket — the set of all remaining active keyframes that shared visual landmarks with the marginalised frame. This dense prior captures the full joint uncertainty of those keyframes as inferred from all visual-inertial measurements processed up to that point.
 
-If one were to use $\mathbf{H}^*$ directly in a global factor graph, two problems arise:
+If one were to use $\mathbf{H}^{\ast}$ directly in a global factor graph, two problems arise:
+1. Computational intractability. Each marginalised keyframe introduces a dense block coupling every frame in its Markov blanket to every other. As the trajectory grows, the global information matrix becomes increasingly dense, destroying the sparsity that makes graph optimisation efficient.
+2. Linearisation point fixation. The prior $\mathbf{H}^\ast$ is computed at a fixed linearisation point. Reusing it across large pose changes degrades accuracy.
 
-1. **Computational intractability.** Each marginalised keyframe introduces a dense block coupling every frame in its Markov blanket to every other. As the trajectory grows, the global information matrix becomes increasingly dense, destroying the sparsity that makes graph optimisation efficient.
-2. **Linearisation point fixation.** The prior $\mathbf{H}^*$ is computed at a fixed linearisation point. Reusing it across large pose changes degrades accuracy.
-
-**Non-Linear Factor Recovery (NFR)**, introduced in Mazuran et al. [2] and applied to visual-inertial mapping in Usenko et al. [1], resolves both issues. The dense Gaussian distribution $p(\mathbf{x}) \sim \mathcal{N}(\boldsymbol{\mu}, (\mathbf{H}^*)^{-1})$ is approximated by a sparse product of non-linear factors $q(\mathbf{x})$. The optimal approximation is found by minimising the Kullback–Leibler divergence:
+Non-Linear Factor Recovery (NFR), introduced in Mazuran et al. [2] and applied to visual-inertial mapping in Usenko et al. [1], resolves both issues. The dense Gaussian distribution $p(\mathbf{x}) \sim \mathcal{N}(\boldsymbol{\mu}, (\mathbf{H}^{\ast})^{-1})$ is approximated by a sparse product of non-linear factors $q(\mathbf{x})$. The optimal approximation is found by minimising the Kullback–Leibler divergence:
 
 $$D_{\text{KL}}(p | q) = \int p(\mathbf{x}) \log (\frac{p(\mathbf{x})}{q(\mathbf{x})}) d\mathbf{x}$$
 
 The recovered factors are standard non-linear factors and can be linearised freshly at each global optimisation iteration, eliminating the fixed-point issue. Their sparse structure preserves graph sparsity.
 
 In the `basalt` implementation, two types of factors are recovered from each `MargData` packet:
-
-- **`RelPoseFactor`**: A 6-DOF relative pose constraint between the marginalised keyframe and each other keyframe in its Markov blanket.
-- **`RollPitchFactor`**: A 2-DOF absolute orientation constraint on the marginalised keyframe's roll and pitch, derived from the IMU gravity alignment.
+1. `RelPoseFactor`: A 6-DOF relative pose constraint between the marginalised keyframe and each other keyframe in its Markov blanket.
+2. `RollPitchFactor`: A 2-DOF absolute orientation constraint on the marginalised keyframe's roll and pitch, derived from the IMU gravity alignment.
 
 ### 2.2 Covariance Recovery and Propagation
 
@@ -962,7 +960,7 @@ The following changes are required to upgrade the mapper for real-time use:
 
 ---
 
-## References
+## 6. References
 
 1. Usenko, V., Demmel, N., Schubert, D., Stückler, J., & Cremers, D. (2020). *Visual-Inertial Mapping with Non-Linear Factor Recovery*. arXiv preprint arXiv:1904.06504v3.
 2. Mazuran, M., Burgard, W., & Tipaldi, G. D. (2015). *Nonlinear Factor Recovery for Long-Term SLAM*. The International Journal of Robotics Research (IJRR).
