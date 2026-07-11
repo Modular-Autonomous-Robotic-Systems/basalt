@@ -12,6 +12,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -79,6 +80,10 @@ private:
     Eigen::aligned_vector<Eigen::Vector3d> mvpVioTrajectory;  // consumer-written
     Eigen::aligned_vector<Eigen::Vector3d>
         mvpGroundTruthTrajectory;  // main-thread only
+
+    // First SLAM pose (gravity-aligned T_w_i from VIO init). Applied to every
+    // IO-normalised GT pose so both trajectories share the same world frame.
+    std::optional<Sophus::SE3d> mpSlamFirstPose;
 
     // ── Pangolin objects ──────────────────────────────────────────────
     pangolin::OpenGlRenderState mpCamera;
