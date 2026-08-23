@@ -164,14 +164,6 @@ void SqrtKeypointVioEstimator<Scalar_>::initialize(const Eigen::Vector3d& bg_,
         auto proc_func = [&] {
             OpticalFlowResult::Ptr curr_frame;
 
-            this->imuData = popFromImuDataQueue();
-            BASALT_ASSERT_MSG(imuData, "first IMU measurment is nullptr");
-
-            imuData->accel =
-                this->calib.calib_accel_bias.getCalibrated(imuData->accel);
-            imuData->gyro =
-                this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
-
             while (true) {
                 this->vision_data_queue.pop(curr_frame);
 
@@ -210,6 +202,8 @@ template <class Scalar>
 typename PoseVelBiasState<Scalar>::Ptr
 SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
     OpticalFlowResult::Ptr& curr_frame) {
+    if (config.vio_debug)
+        std::cout << "[VIO] processing new frame" << std::endl;
     if (!curr_frame.get() || this->finished) {
         std::cout << "received nullptr data from optical flow" << std::endl;
         if (this->out_vis_queue) this->out_vis_queue->push(nullptr);
@@ -221,6 +215,7 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
 
     if (this->imuData == nullptr) {
         this->imuData = popFromImuDataQueue();
+        if (!this->imuData) return nullptr;
         this->imuData->accel =
             this->calib.calib_accel_bias.getCalibrated(imuData->accel);
         this->imuData->gyro =
@@ -241,6 +236,8 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
                 this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
             // std::cout << "Skipping IMU data.." << std::endl;
         }
+
+        if (!imuData) return nullptr;
 
         Vec3 vel_w_i_init;
         vel_w_i_init.setZero();
@@ -283,23 +280,27 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
                           "duplicate frame timestamps?! zero time delta leads "
                           "to invalid IMU integration.");
 
-        while (imuData->t_ns <= this->prev_frame->t_ns) {
-            imuData = popFromImuDataQueue();
+        bool imuAhead = imuData->t_ns > this->prev_frame->t_ns;
+        while (!imuAhead) {
+            if (!popFromImuDataQueueNonBlocking(imuData)) break;
             if (!imuData) return nullptr;
             imuData->accel =
                 this->calib.calib_accel_bias.getCalibrated(imuData->accel);
             imuData->gyro =
                 this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
+            imuAhead = imuData->t_ns > this->prev_frame->t_ns;
         }
 
-        while (imuData->t_ns <= curr_frame->t_ns) {
-            meas->integrate(*imuData, this->mpAccelCov, this->mpGyroCov);
-            imuData = popFromImuDataQueue();
-            if (!imuData) return nullptr;
-            imuData->accel =
-                this->calib.calib_accel_bias.getCalibrated(imuData->accel);
-            imuData->gyro =
-                this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
+        if (imuAhead) {
+            while (imuData->t_ns <= curr_frame->t_ns) {
+                meas->integrate(*imuData, this->mpAccelCov, this->mpGyroCov);
+                if (!popFromImuDataQueueNonBlocking(imuData)) break;
+                if (!imuData) return nullptr;
+                imuData->accel =
+                    this->calib.calib_accel_bias.getCalibrated(imuData->accel);
+                imuData->gyro =
+                    this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
+            }
         }
 
         if (meas->get_start_t_ns() + meas->get_dt_ns() < curr_frame->t_ns) {
@@ -321,30 +322,49 @@ template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::addIMUToQueue(
     const ImuData<double>::Ptr& data) {
     this->imu_data_queue.emplace(data);
+    std::cout << "[VIO] IMU Data Queue Size: " << this->imu_data_queue.size()
+              << std::endl;
 }
 
 template <class Scalar_>
 void SqrtKeypointVioEstimator<Scalar_>::addVisionToQueue(
     const OpticalFlowResult::Ptr& data) {
     this->vision_data_queue.push(data);
+    std::cout << "[VIO] Frame Data Queue Size "
+              << this->vision_data_queue.size() << std::endl;
+}
+
+template <class Scalar_>
+bool SqrtKeypointVioEstimator<Scalar_>::popFromImuDataQueueNonBlocking(
+    typename ImuData<Scalar>::Ptr& data) {
+    ImuData<double>::Ptr raw;
+    if (!this->imu_data_queue.try_pop(raw)) return false;
+
+    if constexpr (std::is_same_v<Scalar, double>) {
+        data = raw;
+    } else {
+        typename ImuData<Scalar>::Ptr converted;
+        if (raw) {
+            converted.reset(new ImuData<Scalar>);
+            *converted = raw->cast<Scalar>();
+        }
+        data = converted;
+    }
+    return true;
 }
 
 template <class Scalar_>
 typename ImuData<Scalar_>::Ptr
 SqrtKeypointVioEstimator<Scalar_>::popFromImuDataQueue() {
-    ImuData<double>::Ptr data;
-    this->imu_data_queue.pop(data);
+    typename ImuData<Scalar>::Ptr data;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(mpImuPopTimeoutMs);
 
-    if constexpr (std::is_same_v<Scalar, double>) {
-        return data;
-    } else {
-        typename ImuData<Scalar>::Ptr data2;
-        if (data) {
-            data2.reset(new ImuData<Scalar>);
-            *data2 = data->cast<Scalar>();
-        }
-        return data2;
+    while (!popFromImuDataQueueNonBlocking(data)) {
+        if (std::chrono::steady_clock::now() >= deadline) return nullptr;
+        std::this_thread::sleep_for(std::chrono::milliseconds(mpImuPopRetryMs));
     }
+    return data;
 }
 
 template <class Scalar_>
@@ -380,8 +400,10 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
                         // Large correction — skip to preserve FEJ
                         // consistency. The entry stays so the mapper
                         // can send a refined (smaller) update next time.
-                        std::cout << "too large update in pose, not updating"
-                                  << std::endl;
+                        if (config.vio_debug)
+                            std::cout
+                                << "too large update in pose, not updating"
+                                << std::endl;
                     } else {
                         // Small correction — apply and preserve the
                         // linearised flag to avoid tripping the
@@ -583,7 +605,7 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
         typename PoseVelBiasState<double>::Ptr data(
             new PoseVelBiasState<double>(p.getState().template cast<double>()));
 
-        this->out_state_queue->push(data);
+        this->out_state_queue->try_push(data);
     }
 
     if (this->out_vis_queue && !frame_states.empty()) {
@@ -610,7 +632,7 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
 
         data->opt_flow_res = prev_opt_flow_res[last_state_t_ns];
 
-        this->out_vis_queue->push(data);
+        this->out_vis_queue->try_push(data);
     }
 
     this->last_processed_t_ns = last_state_t_ns;
