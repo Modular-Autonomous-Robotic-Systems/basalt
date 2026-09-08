@@ -4,11 +4,11 @@
 
 ### 1.1 Motivation
 
-The Basalt SLAM system currently provides two decoupled subsystems: a real-time Visual-Inertial Odometry (VIO) thread operating on a fixed-lag sliding window, and an offline Non-linear Factor Recovery (NFR) Mapper that consumes serialized marginalization data from disk. The production integration in `basalt::Controller` wires only the VIO subsystem; no live mapping layer currently exists. This document specifies the design and implementation details of a **real-time incremental local mapping thread** (`basalt::LocalMapper`) that bridges the gap between VIO and future global mapping. The local mapper consumes `MargData` packets emitted by the VIO thread as keyframes (KFs) are marginalised, and maintains a bounded-size, optimised sub-map of the most recent covisible KFs. `basalt::Controller` can run SLAM either as a producer consumer system or an event driven system. The type of architecture implemented is determined at invocation of `Controller::initialize`. If `useProducerConsumerArchitecture` is passed as false, we use an event driven architecture, otherwise a producer consumer architecture is implemented.
+The Basalt SLAM system currently provides two decoupled subsystems: a real-time Visual-Inertial Odometry (VIO) thread operating on a fixed-lag sliding window, and an offline Non-linear Factor Recovery (NFR) Mapper that consumes serialized marginalization data from disk. The production integration in `basalt::Controller` wires the VIO and local mapping; no tightly coupling between the mapping and vio exists yet. This document specifies the design and implementation details of a **real-time incremental local mapping thread** (`basalt::LocalMapper`) that bridges the gap between VIO and future global mapping. The local mapper is driven by keyframe selection. Every keyframe the VIO selects is pushed, with its optimised pose and its images, onto a dedicated queue that the mapping thread blocks on, and the mapper maintains a bounded-size, optimised sub-map of the most recent covisible KFs from those keyframes. `MargData` packets remain a secondary input, drained without blocking once per cycle to refine poses the mapper already holds and to recover the nonlinear factors. Correction, 2026-09-06. This paragraph previously said the mapper consumed `MargData` packets emitted as keyframes are marginalised, which was the original design. Marginalisation produces no packet until the VIO keyframe window overflows, so the map did not exist for the first `vio_max_kfs` keyframes and its cadence was set by an estimator memory policy rather than by keyframe creation. See [`../plans/kf_selection_driven_local_mapping.md`](../plans/kf_selection_driven_local_mapping.md). `basalt::Controller` can run SLAM either as a producer consumer system or an event driven system. The type of architecture implemented is determined at invocation of `Controller::initialize`. If `useProducerConsumerArchitecture` is passed as false, we use an event driven architecture, otherwise a producer consumer architecture is implemented.
 
 The resulting system implements the first two tiers of a three-layered SLAM architecture:
 - **Layer 1 — VIO** (`SqrtKeypointVioEstimator`): ~20 Hz fixed-lag smoother over the last ~10 frames + keyframes.
-- **Layer 2 — Local Mapper** (`LocalMapper`): runs at the KF-marginalisation rate (~1–5 Hz) on a bounded covisibility window of ~50 keyframes; emits refined poses back to the VIO thread.
+- **Layer 2 — Local Mapper** (`LocalMapper`): runs at the keyframe-selection rate (~1–5 Hz) on a bounded covisibility window of ~50 keyframes; emits refined poses back to the VIO thread. Correction, 2026-09-06. This previously read "KF-marginalisation rate".
 - **Layer 3 — Global Mapper / Loop Closure** (future): not dicussed yet.
 
 ### 1.2 Scope
@@ -68,7 +68,7 @@ Section 2 gives the high-level architecture. Sections 3–5 describe infrastruct
 |---|---|---|---|
 | T1 Optical flow | `OpticalFlowBase::processing_thread` | Started on construction; joined in `OpticalFlowBase` subclass destructor | Pops `input_queue`; pushes to `output_queue` (= VIO's `vision_data_queue`) |
 | T2 VIO | `SqrtKeypointVioEstimator::processing_thread` | Started by `initialize()`; joined by `maybe_join()` | Pops `vision_data_queue`/`imu_data_queue`; pushes to `out_state_queue`/`out_marg_queue` |
-| T3 Local mapper | `LocalMapper::mpLocalMappingThread` | Started by `LocalMapper::Initialise()`; joined by `LocalMapper::Stop()` | Pops `local_map_input_queue_`; calls `mpVioPoseUpdateCallback` |
+| T3 Local mapper | `LocalMapper::mpLocalMappingThread` | Started by `LocalMapper::Initialise()`; joined by `LocalMapper::Stop()` | Blocks on `local_map_kf_queue_`, then drains `local_map_input_queue_` without blocking; calls `mpVioPoseUpdateCallback`. Correction, 2026-09-06, this row previously named only `local_map_input_queue_` and the blocking pop was on it |
 | T4 Pose consumer | `Controller::pose_processing_thread_` | Started by `initialize()`; joined by `Controller::Stop()`. This is only created and used when `useProducerConsumerArchitecture` is set to true at invocation of `Controller::initialize` | Pops `out_state_queue_`; updates `current_latest_pose_` |
 
 
@@ -98,10 +98,11 @@ HashBowBase<N>
 
 ### 2.4 Pipeline Stages
 
-A single iteration of `LocalMapper::MapLocally` processes one `MargData` packet through the following ten stages (aligned with the requirements specification):
+A single iteration of `LocalMapper::MapLocally` processes a batch of keyframes, followed by whatever `MargData` packets have accumulated, through the following stages.
 
 ```
- 1. IngestMargData           ← new-KF detection by polling on `LocalMapper::local_map_input_queue_`, NFR factor extraction
+ 0. IngestKeyframe           ← blocking pop on `local_map_kf_queue_`, admits KF pose and images
+ 1. IngestMargData           ← non-blocking drain of `local_map_input_queue_`, pose refresh, NFR factor extraction and pruning
  2. detect_keypoints         ← inherited from NfrMapper
  3. match_stereo             ← inherited; results promoted to mpLatestKeyframesMatches
  4. MatchLocal               ← BoW query restricted to new KFs
@@ -717,6 +718,8 @@ The mutex does NOT cover the subsequent optimisation or marginalisation — `fra
 ### 6.1 Full Header
 
 **File:** `include/basalt/vi_estimator/local_mapper.h`
+
+The listing below is the original design and no longer matches the file. Since 2026-09-06 the class also declares `SetKFInputQueue`, `IngestKeyframe`, `PruneFactorsWithUnknownKeyframes`, `mpKFInputQueue` and `mpIsKFInputQueueSet`, and the mapping thread blocks on the keyframe queue rather than the marginalisation queue. Read the header itself for the current interface, and [`../plans/kf_selection_driven_local_mapping.md`](../plans/kf_selection_driven_local_mapping.md) for why each member exists. The same caveat applies to the implementation listings in the sections that follow.
 
 ```cpp
 #pragma once

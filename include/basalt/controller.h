@@ -78,8 +78,10 @@ private:
     tbb::concurrent_bounded_queue<basalt::PoseVelBiasState<double>::Ptr>
         out_state_queue_;
 
-    // Local mapper input queue and instance
+    // Local mapper input queues. The keyframe selection queue drives the
+    // mapper, the marginalisation queue refines what it already holds.
     tbb::concurrent_bounded_queue<basalt::MargData::Ptr> local_map_input_queue_;
+    tbb::concurrent_bounded_queue<basalt::Keyframe::Ptr> local_map_kf_queue_;
     std::shared_ptr<basalt::LocalMapper> local_mapper_;
 
     // Member for latest pose, updated by an internal thread

@@ -45,7 +45,7 @@ void LocalMapper::Initialise() {
     mpLatestKeyframesMatches.clear();
 
     // Spawn the mapping thread. It busy-waits in MapLocally until the queue
-    // is wired (mpIsMargDataInputQueueSet == true).
+    // that drives it is wired (mpIsKFInputQueueSet == true).
     mpLocalMappingThread = std::thread(&LocalMapper::MapLocally, this);
 }
 
@@ -53,6 +53,12 @@ void LocalMapper::SetMarginalisationDataInputQueue(
     tbb::concurrent_bounded_queue<MargData::Ptr>* queue) {
     mpMargInputQueue = queue;
     mpIsMargDataInputQueueSet = true;
+}
+
+void LocalMapper::SetKFInputQueue(
+    tbb::concurrent_bounded_queue<Keyframe::Ptr>* queue) {
+    mpKFInputQueue = queue;
+    mpIsKFInputQueueSet = true;
 }
 
 void LocalMapper::SetVIOPoseUpdateCallback(PoseUpdateCallback cb) {
@@ -64,34 +70,34 @@ void LocalMapper::SetVIOPoseUpdateCallback(PoseUpdateCallback cb) {
 // ═══════════════════════════════════════════════════════════════════
 
 void LocalMapper::MapLocally() {
-    // Wait until the queue is wired.
-    while (!mpStopLocalMapping && !mpIsMargDataInputQueueSet) {
+    // Wait until the driving queue is wired.
+    while (!mpStopLocalMapping && !mpIsKFInputQueueSet) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     while (!mpStopLocalMapping) {
         auto t1 = std::chrono::high_resolution_clock::now();
 
-        // Block on the first item so the thread sleeps (zero CPU) when idle,
-        // then try_pop any further items that accumulated during the last
-        // cycle.
-        std::vector<MargData::Ptr> vecData;
+        // Block on the first keyframe so the thread sleeps (zero CPU) when
+        // idle, then try_pop any further keyframes that accumulated during the
+        // last cycle.
+        std::vector<Keyframe::Ptr> vKeyframes;
         bool nullReceived = false;
-        MargData::Ptr data;
+        Keyframe::Ptr kf;
 
-        mpMargInputQueue->pop(data);  // blocking — sleeps until VIO pushes
-        if (!data) {
+        mpKFInputQueue->pop(kf);  // blocking — sleeps until VIO selects a KF
+        if (!kf) {
             std::cout << "[Local Mapper] got shutdown sentinel" << std::endl;
             break;
         }
-        vecData.push_back(data);
+        vKeyframes.push_back(kf);
 
-        while (mpMargInputQueue->try_pop(data)) {
-            if (!data) {
+        while (mpKFInputQueue->try_pop(kf)) {
+            if (!kf) {
                 nullReceived = true;
                 break;
             }
-            vecData.push_back(data);
+            vKeyframes.push_back(kf);
         }
         auto tStep = std::chrono::high_resolution_clock::now();
         auto elapsed =
@@ -102,10 +108,28 @@ void LocalMapper::MapLocally() {
 
         tStep = std::chrono::high_resolution_clock::now();
         if (mpVioDebugMode)
-            std::cout << "[Local Mapper] Procesing " << vecData.size()
-                      << " marginalisation data packets" << std::endl;
+            std::cout << "[Local Mapper] Procesing " << vKeyframes.size()
+                      << " keyframes" << std::endl;
         mpNewKeyframesForTracking.clear();
         mpLatestKeyframesMatches.clear();
+
+        for (Keyframe::Ptr& k : vKeyframes) {
+            IngestKeyframe(k);
+        }
+        vKeyframes.clear();
+
+        std::vector<MargData::Ptr> vecData;
+        MargData::Ptr data;
+        while (mpMargInputQueue && mpMargInputQueue->try_pop(data)) {
+            if (!data) {
+                nullReceived = true;
+                break;
+            }
+            vecData.push_back(data);
+        }
+        if (mpVioDebugMode)
+            std::cout << "[Local Mapper] Procesing " << vecData.size()
+                      << " marginalisation data packets" << std::endl;
         for (MargData::Ptr& packet : vecData) {
             IngestMargData(packet);
         }
@@ -126,7 +150,10 @@ void LocalMapper::MapLocally() {
                              1e-6
                       << "s" << std::endl;
 
-        if (mpNewKeyframesForTracking.empty()) continue;
+        if (mpNewKeyframesForTracking.empty()) {
+            if (nullReceived) break;
+            continue;
+        }
 
         tStep = std::chrono::high_resolution_clock::now();
         detect_keypoints();  // inherited — only touches img_data (now filtered)
@@ -296,53 +323,79 @@ void LocalMapper::MapLocally() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// IngestKeyframe
+// ═══════════════════════════════════════════════════════════════════
+
+void LocalMapper::IngestKeyframe(Keyframe::Ptr& kf) {
+    if (!kf->opt_flow_res || !kf->opt_flow_res->input_images) return;
+
+    const int64_t t_ns = kf->timestamp;
+    if (frame_poses.count(t_ns) > 0) return;
+
+    // Rebuilt rather than copied so linearized stays false, which
+    // NfrMapper::optimize asserts before applying an increment.
+    frame_poses[t_ns] = PoseStateWithLin<double>(t_ns, kf->pose.getPose());
+    img_data[t_ns] = kf->opt_flow_res->input_images;
+    mpNewKeyframesForTracking.emplace(t_ns);
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // IngestMargData
 // ═══════════════════════════════════════════════════════════════════
 
 void LocalMapper::IngestMargData(MargData::Ptr& data) {
-    // Step 1 — detect new KFs (those in kfs_all but not yet in frame_poses).
-    for (const int64_t id : data->kfs_all) {
-        if (frame_poses.count(id) == 0) {
-            mpNewKeyframesForTracking.emplace(id);
-        }
-    }
+    // Images arrive with the keyframe. Dropping the packet's copy makes
+    // processMargData's img_data write inert without altering NfrMapper,
+    // which the offline mapper still depends on.
+    data->opt_flow_res.clear();
 
-    // Step 2 — inherited factor extraction (mutates data).
+    const size_t relBegin = rel_pose_factors.size();
+    const size_t rpBegin = roll_pitch_factors.size();
+
+    // Inherited factor extraction (mutates data).
     processMargData(*data);
-    bool valid = extractNonlinearFactors(*data);
+    const bool valid = extractNonlinearFactors(*data);
+    if (!valid) return;
 
-    // Step 3 — update frame_poses.
-    // New KFs are added unconditionally; existing KFs updated only if valid.
-    // After processMargData, POSE_VEL_BIAS entries have been moved from
-    // data->frame_states into data->frame_poses.
+    // Refresh only keyframes the mapper already holds. Insertion is
+    // deliberately absent, so a keyframe removed by CullRedundantKeyframes is
+    // never resurrected by a later marginalisation packet.
     for (const auto& kv : data->frame_poses) {
-        if (mpNewKeyframesForTracking.count(kv.first)) {
-            frame_poses[kv.first] = PoseStateWithLin<double>(
-                kv.second.getT_ns(), kv.second.getPose());
-        }
+        if (data->kfs_all.count(kv.first) == 0) continue;
+        auto it = frame_poses.find(kv.first);
+        if (it == frame_poses.end()) continue;
+        it->second =
+            PoseStateWithLin<double>(kv.second.getT_ns(), kv.second.getPose());
     }
+    PruneFactorsWithUnknownKeyframes(relBegin, rpBegin);
+}
 
-    if (valid) {
-        // Update existing KF poses from the latest VIO marginalisation.
-        for (const auto& kv : data->frame_poses) {
-            if (mpNewKeyframesForTracking.count(kv.first) == 0) {
-                PoseStateWithLin<double> p(kv.second.getT_ns(),
-                                           kv.second.getPose());
-                frame_poses[kv.first] = p;
-            }
-        }
+// ═══════════════════════════════════════════════════════════════════
+// PruneFactorsWithUnknownKeyframes
+// ═══════════════════════════════════════════════════════════════════
 
-        for (const auto& kv : data->frame_states) {
-            if (mpNewKeyframesForTracking.count(kv.first) == 0) {
-                if (data->kfs_all.count(kv.first) > 0) {
-                    auto state = kv.second;
-                    PoseStateWithLin<double> p(state.getState().t_ns,
-                                               state.getState().T_w_i);
-                    frame_poses[kv.first] = p;
-                }
-            }
-        }
-    }
+// extractNonlinearFactors draws its endpoints from the packet, so it can name
+// keyframes the mapper has culled. Both the BA reduce and computeRelPose /
+// computeRollPitch read those endpoints with frame_poses.at, which throws.
+void LocalMapper::PruneFactorsWithUnknownKeyframes(size_t relBegin,
+                                                   size_t rpBegin) {
+    auto known = [this](int64_t t) { return frame_poses.count(t) > 0; };
+
+    rel_pose_factors.erase(
+        std::remove_if(
+            rel_pose_factors.begin() + static_cast<std::ptrdiff_t>(relBegin),
+            rel_pose_factors.end(),
+            [&](const RelPoseFactor& f) {
+                return !known(f.t_i_ns) || !known(f.t_j_ns);
+            }),
+        rel_pose_factors.end());
+
+    roll_pitch_factors.erase(
+        std::remove_if(
+            roll_pitch_factors.begin() + static_cast<std::ptrdiff_t>(rpBegin),
+            roll_pitch_factors.end(),
+            [&](const RollPitchFactor& f) { return !known(f.t_ns); }),
+        roll_pitch_factors.end());
 }
 
 // ═══════════════════════════════════════════════════════════════════

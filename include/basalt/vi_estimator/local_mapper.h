@@ -31,10 +31,12 @@ public:
     void Stop();
     void SetMarginalisationDataInputQueue(
         tbb::concurrent_bounded_queue<MargData::Ptr>* queue);
+    void SetKFInputQueue(tbb::concurrent_bounded_queue<Keyframe::Ptr>* queue);
     void SetVIOPoseUpdateCallback(PoseUpdateCallback cb);
 
     // ── Pipeline (public for testability) ───────────────────────────
     void MapLocally();  // thread entry point
+    void IngestKeyframe(Keyframe::Ptr& kf);
     void IngestMargData(MargData::Ptr& data);
     void MatchLocal();
     void build_tracks();  // shadows NfrMapper
@@ -77,13 +79,16 @@ public:
 
     std::atomic<bool> mpStopLocalMapping{false};
     std::atomic<bool> mpIsMargDataInputQueueSet{false};
+    std::atomic<bool> mpIsKFInputQueueSet{false};
     std::thread mpLocalMappingThread;
 
 private:
     tbb::concurrent_bounded_queue<MargData::Ptr>* mpMargInputQueue = nullptr;
+    tbb::concurrent_bounded_queue<Keyframe::Ptr>* mpKFInputQueue = nullptr;
     PoseUpdateCallback mpVioPoseUpdateCallback;
 
     // Helpers
+    void PruneFactorsWithUnknownKeyframes(size_t relBegin, size_t rpBegin);
     bool SelectKeyframesToCull(std::vector<int64_t>& keyframesToCull);
     int64_t FindBestRehostKf(int64_t culled_kf, TrackId lm_id,
                              const std::set<int64_t>& candidates);

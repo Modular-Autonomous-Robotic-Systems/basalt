@@ -118,6 +118,8 @@ class SqrtKeypointVoEstimator : public VioEstimatorBase<Scalar_>,
     // int64_t propagate();
     // void addNewState(int64_t data_t_ns);
 
+    void PublishKeyframe();
+
     void optimize_and_marg(const std::map<int64_t, int> &num_points_connected,
                            const std::unordered_set<KeypointId> &lost_landmaks);
 
@@ -214,6 +216,8 @@ class SqrtKeypointVoEstimator : public VioEstimatorBase<Scalar_>,
 
   private:
     bool take_kf;             // true if next frame should become kf
+    // Raised where the keyframe is committed, cleared by PublishKeyframe.
+    bool mpIsCurrentFrameKF = false;
     int frames_after_kf;      // number of frames since last kf
     std::set<int64_t> kf_ids; // sliding window frame ids
 

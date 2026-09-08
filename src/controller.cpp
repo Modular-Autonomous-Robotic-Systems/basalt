@@ -74,7 +74,9 @@ void Controller::Stop() {
         vio_estimator_->ProcessFrame(res);
 
     // (2) VIO's processing loop, on receiving nullptr, pushes nullptr to
-    //     out_marg_queue (= local_map_input_queue_) and out_state_queue.
+    //     out_marg_queue (= local_map_input_queue_), mpKFOutputQueue
+    //     (= local_map_kf_queue_) and out_state_queue. The keyframe sentinel
+    //     is the one that releases the mapper, which now blocks on that queue.
 
     // (3) Join VIO thread explicitly (already finished by this point
     //     since VIO pushes nullptr before mapper can pop it).
@@ -168,13 +170,18 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
         vio_estimator_->initialize(t_ns, T_w_i, vel_w_i, bg, ba);
     }
 
-    // 4. Wire marginalisation output to local mapper input queue.
+    // 4. Wire VIO outputs to the local mapper input queues. The keyframe queue
+    //    drives the mapper, the marginalisation queue refines what it holds.
     local_map_input_queue_.set_capacity(10);
     vio_estimator_->out_marg_queue = &local_map_input_queue_;
+
+    local_map_kf_queue_.set_capacity(100);
+    vio_estimator_->mpKFOutputQueue = &local_map_kf_queue_;
 
     // 5. Create and wire the local mapper.
     local_mapper_ = std::make_shared<basalt::LocalMapper>(calib_, vio_config_);
     local_mapper_->SetMarginalisationDataInputQueue(&local_map_input_queue_);
+    local_mapper_->SetKFInputQueue(&local_map_kf_queue_);
     local_mapper_->SetVIOPoseUpdateCallback(
         [this](const auto& poses) { vio_estimator_->QueuePoseUpdates(poses); });
     local_mapper_->Initialise();

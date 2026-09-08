@@ -34,12 +34,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #pragma once
 
-#include "basalt/imu/imu_types.h"
+#include <basalt/optical_flow/optical_flow.h>
+#include <basalt/utils/imu_types.h>
+
 #include <atomic>
 #include <type_traits>
 
-#include <basalt/optical_flow/optical_flow.h>
-#include <basalt/utils/imu_types.h>
+#include "basalt/imu/imu_types.h"
 
 namespace basalt {
 
@@ -61,12 +62,14 @@ struct VioVisualizationData {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
-template <class Scalar> class VioEstimatorBase {
-  public:
+template <class Scalar>
+class VioEstimatorBase {
+public:
     typedef std::shared_ptr<VioEstimatorBase> Ptr;
 
     VioEstimatorBase()
-        : out_state_queue(nullptr), out_marg_queue(nullptr),
+        : out_state_queue(nullptr),
+          out_marg_queue(nullptr),
           out_vis_queue(nullptr) {
         this->vision_data_queue.set_capacity(10);
         this->imu_data_queue.set_capacity(300);
@@ -80,19 +83,20 @@ template <class Scalar> class VioEstimatorBase {
     tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr> vision_data_queue;
     tbb::concurrent_bounded_queue<ImuData<double>::Ptr> imu_data_queue;
 
-    tbb::concurrent_bounded_queue<PoseVelBiasState<double>::Ptr>
-        *out_state_queue = nullptr;
-    tbb::concurrent_bounded_queue<MargData::Ptr> *out_marg_queue = nullptr;
-    tbb::concurrent_bounded_queue<VioVisualizationData::Ptr> *out_vis_queue =
+    tbb::concurrent_bounded_queue<PoseVelBiasState<double>::Ptr>*
+        out_state_queue = nullptr;
+    tbb::concurrent_bounded_queue<MargData::Ptr>* out_marg_queue = nullptr;
+    tbb::concurrent_bounded_queue<Keyframe::Ptr>* mpKFOutputQueue = nullptr;
+    tbb::concurrent_bounded_queue<VioVisualizationData::Ptr>* out_vis_queue =
         nullptr;
 
-    virtual void initialize(int64_t t_ns, const Sophus::SE3d &T_w_i,
-                            const Eigen::Vector3d &vel_w_i,
-                            const Eigen::Vector3d &bg,
-                            const Eigen::Vector3d &ba) = 0;
+    virtual void initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
+                            const Eigen::Vector3d& vel_w_i,
+                            const Eigen::Vector3d& bg,
+                            const Eigen::Vector3d& ba) = 0;
 
-    virtual void initialize(const Eigen::Vector3d &bg,
-                            const Eigen::Vector3d &ba) = 0;
+    virtual void initialize(const Eigen::Vector3d& bg,
+                            const Eigen::Vector3d& ba) = 0;
 
     virtual void maybe_join() = 0;
 
@@ -117,7 +121,7 @@ template <class Scalar> class VioEstimatorBase {
     // does not participate in the mapper feedback loop.
     virtual void QueuePoseUpdates(
         const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>& updates) {
-      (void)updates;
+        (void)updates;
     }
 
     virtual Sophus::SE3d getT_w_i_init() = 0;
@@ -126,28 +130,28 @@ template <class Scalar> class VioEstimatorBase {
     virtual void setMaxStates(size_t val) = 0;
     virtual void setMaxKfs(size_t val) = 0;
 
-    virtual void addIMUToQueue(const ImuData<double>::Ptr &data) = 0;
-    virtual void addVisionToQueue(const OpticalFlowResult::Ptr &data) = 0;
+    virtual void addIMUToQueue(const ImuData<double>::Ptr& data) = 0;
+    virtual void addVisionToQueue(const OpticalFlowResult::Ptr& data) = 0;
 
-    virtual typename PoseVelBiasState<Scalar>::Ptr
-    ProcessFrame(OpticalFlowResult::Ptr &curr_frame) = 0;
+    virtual typename PoseVelBiasState<Scalar>::Ptr ProcessFrame(
+        OpticalFlowResult::Ptr& curr_frame) = 0;
 
-  protected:
+protected:
     OpticalFlowResult::Ptr prev_frame = nullptr;
     bool add_pose;
 };
 
 class VioEstimatorFactory {
-  public:
+public:
     template <class Scalar>
-    static typename VioEstimatorBase<Scalar>::Ptr
-    getVioEstimator(const VioConfig &config, const Calibration<Scalar> &cam,
-                    const Eigen::Vector3d &g, bool use_imu,
-                    bool useProducerConsumerArchitecture = false);
+    static typename VioEstimatorBase<Scalar>::Ptr getVioEstimator(
+        const VioConfig& config, const Calibration<Scalar>& cam,
+        const Eigen::Vector3d& g, bool use_imu,
+        bool useProducerConsumerArchitecture = false);
 };
 
-double alignSVD(const std::vector<int64_t> &filter_t_ns,
-                const Eigen::aligned_vector<Eigen::Vector3d> &filter_t_w_i,
-                const std::vector<int64_t> &gt_t_ns,
-                Eigen::aligned_vector<Eigen::Vector3d> &gt_t_w_i);
-} // namespace basalt
+double alignSVD(const std::vector<int64_t>& filter_t_ns,
+                const Eigen::aligned_vector<Eigen::Vector3d>& filter_t_w_i,
+                const std::vector<int64_t>& gt_t_ns,
+                Eigen::aligned_vector<Eigen::Vector3d>& gt_t_w_i);
+}  // namespace basalt

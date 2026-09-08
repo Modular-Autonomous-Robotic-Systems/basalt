@@ -127,6 +127,8 @@ public:
     void optimize_and_marg(const std::map<int64_t, int>& num_points_connected,
                            const std::unordered_set<KeypointId>& lost_landmaks);
 
+    void PublishKeyframe();
+
     void marginalize(const std::map<int64_t, int>& num_points_connected,
                      const std::unordered_set<KeypointId>& lost_landmaks);
     void optimize();
@@ -229,6 +231,8 @@ private:
 
 private:
     bool take_kf;
+    // Raised where the keyframe is committed, cleared by PublishKeyframe.
+    bool mpIsCurrentFrameKF = false;
     int frames_after_kf;
     std::set<int64_t> kf_ids;
 
