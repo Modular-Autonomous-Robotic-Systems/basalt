@@ -22,10 +22,20 @@ When a recorded fact turns out to be wrong, rewrite it in place so that the docu
 | `ap_dds_imu_stream.md` | Live `/ap/imu/experimental/data` capture; NED frame confirmation; Basalt gravity auto-alignment path; the two ArduPilot stamp sources and why duplicate stamps are impossible at 167 Hz; the node's de-duplication filter; the inertial/visual epoch mismatch; outstanding measurements | — |
 | `vio_residuals_and_priors.md` | Basalt's actual IMU residual and its Jacobians read from `preintegration.h`, the non-Forster rotation convention, the left/right SO(3) Jacobian split, the initial marginalisation prior's nullspace-only anchoring and the `vio_init_ba_weight`/`vio_init_bg_weight` index swap, plus the `doc/VIO.md` and `doc/Marginalisation.md` split and renumbering | 2026-08-31 |
 | `linearisation.md` | The `LinearizationBase` family read from source. Default `ABS_QR` selection, the confirmed `vio_init_ba_weight`/`vio_init_bg_weight` transposition with its authoritative index proof, why the prior needs no index remapping and where that is asserted, `MargLinData::H` being a square root factor and not a Hessian, where the square root property is kept versus spent, the landmark block storage layout and the `numQ2rows` accounting subtlety, whitening as the precondition for QR, the dead and latent code inventory, the threading split, and the proof that local mapping does not use this framework | 2026-09-02 |
+| `visualiser_pipeline.md` | `class SlamVisualiser` internals. The two palettes and why `vis_utils.h` must not be edited, the `cam_color`/`state_color` collision that hides a current-frame highlight, `states.back()` being the live edge, the Pangolin `Plotter` default `$0..$9` series and the `GuiChanged` consume-on-read trap, the panel widget dispatch and `META_FLAG_READONLY`, latest-only cache semantics and why a vanished layer is always an empty payload rather than a drop, and the frame-classification method used on the SITL recording | 2026-09-08 |
 | `imu_static_calibration.md` | calib_accel_bias (9-param) and calib_gyro_bias (12-param) model; code usage; EuRoC vs SITL values; how to calibrate a real IMU | 2026-07-13 |
 | `keyframe_driven_local_mapping.md` | The two local-mapper input queues after the 2026-09-06 driver change, `struct Keyframe` and its alignment requirement, where a keyframe is published and why the commit block rather than the threshold test, the proof that the marginalisation queue cannot deadlock the estimator, the culled-keyframe and factor-pruning invariants, the proof that estimator `frame_poses` is a subset of `kf_ids`, the dead `MargData::frame_states` loop, and the four shutdown sentinel sites | 2026-09-06 |
 
 ## Quick Reference
+
+### Live Visualiser Traps (`visualiser_pipeline.md`)
+- `cam_color` and `state_color` in `include/basalt/utils/vis_utils.h` are the **same triple** `{250, 0, 26}`. A current-frame highlight drawn in one over states drawn in the other is invisible. Stock `src/vio.cpp:812-821` double-draws one frustum because of this
+- `vis_utils.h` is shared with **six offline viewers**. Live-viewer colours belong in `include/basalt/visualisation/utils.h` instead
+- `pangolin::Plotter`'s constructor installs ten default `$0..$9` series whenever handed a non-null log (`plotter.cpp:283-288`). Something must clear them before the first frame
+- `pangolin::Var<T>::GuiChanged()` is a **consume-on-read edge detector**, not a state query. It can never establish an initial state
+- A `Var<std::string>` renders as a live `TextInput` readout; `META_FLAG_READONLY` makes it display-only
+- The latest-only caches are never reset, so a **vanished layer means an empty payload, never a dropped one**
+- `states.back()` is the newest state, because `Eigen::aligned_map` is an ordered `std::map`
 
 ### GT-SLAM Mismatch Fix (applies to both EuRoC and TUM-VI)
 - **Root cause**: World frame origin/orientation mismatch (NOT camera-IMU extrinsics)
