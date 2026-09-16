@@ -893,3 +893,576 @@ The neighbour selection was transcribed onto stub types and compiled with `g++ -
 `[match]` says whether the neighbour pairs now being fed to the matcher survive. A `descriptor_matches` count below `mapper_min_matches` points at the matcher, while a healthy match count collapsing to zero `ransac_inliers` points at `mapper_ransac_threshold`, which at 5e-5 corresponds to roughly half a degree of bearing error.
 
 `[tracks]` should show `exported` non-zero on every cycle rather than three, and `live_in_builder` climbing rather than frozen at 142. Only once that holds do the landmark counts, the observer histogram and therefore `mpMinRedundantObservers` and `mpCullRedundancyThresh` become measurable at all.
+
+## 7. Incremental Covisibility Maintenance in `LandmarkDatabase`
+
+### 7.1 Motivation, a full rebuild is paid on every keyframe
+
+Sections 4.1 and 4.2 replaced a wrong covisibility measure with a correct one, and correctness was the only concern at the time. The correct measure is however rebuilt from nothing on every entry to `SelectKeyframesToCull`, which runs once per mapping cycle, and the cost of that rebuild grows quadratically in the size of the local map.
+
+The repository already carries the measurement. `culling_time.log` holds 1995 timed calls to `CullRedundantKeyframes` from a SITL run.
+
+```
+  n=1995   min 1e-06s   median 0.00818s   p90 0.0199s   p99 0.0289s   max 0.035s
+
+  chronological decile means, seconds
+    0.00065  0.0147  0.0152  0.0148  0.0057  0.0067  0.0082  0.0100  0.0168  0.0051
+```
+
+The first decile runs in well under a millisecond because the map is still small, and the cost settles into the ten to fifteen millisecond band as the map fills. Most passes in the 2026-09-10 run culled nothing at all, so in a no-cull pass essentially the whole of that time is `BuildObservedSets`, `BuildCovisibilityMatrix` and the `RedundancyScore` loop, with no rehosting work to attribute it to. Eight milliseconds per keyframe is not fatal, but it is a quadratic term sitting in the path of a thread that must keep pace with keyframe insertion, and it is entirely avoidable.
+
+The deeper objection is structural rather than numerical. Covisibility is a property of the observation set, the observation set is mutated one observation at a time through three methods of `LandmarkDatabase`, and every one of those mutations already performs index bookkeeping. Recomputing a derived quantity from scratch when the primitive that derives it is edited in place is the classic signature of a missing incremental invariant.
+
+### 7.2 The key insight, `Keypoint::obs` is the sole mutation surface
+
+The design rests on one verified fact. `Keypoint::obs` is never written outside `landmark_database.cpp`. A sweep of every reference to `.obs` across `src/` and `include/` returns three sites beyond the database itself, namely `local_mapper.cpp:1005`, `sqrt_keypoint_vo.cpp:686` and `landmark_block_abs_dynamic.hpp:66`, and all three bind it by const reference and only read.
+
+Inside the database every mutation funnels through four methods, and the two removal helpers are shared by every public removal entry point.
+
+```
+   addLandmark ─────────────▶ creates kpts entry, NEVER touches obs
+                              (so it needs no bookkeeping at all, see 7.7)
+
+   addObservation ──────────▶ obs[t] = pos                    ── ADD hook
+
+   removeFrame ─────────┐
+   removeKeyframes ─────┤
+   removeObservations ──┼───▶ removeLandmarkObservationHelper  ── DROP-ONE hook
+   removeLandmark ──────┤          obs.erase(it2)
+   (all of the above) ──┴───▶ removeLandmarkHelper             ── DROP-ALL hook
+                                   kpts.erase(it)
+```
+
+Three hooks therefore cover every path by which the observation set can change, in the VIO estimator, the VO estimator, the offline `NfrMapper` and the local mapper alike. This is what makes the change small. No caller is touched, no public method changes signature, and no existing control flow is rerouted.
+
+### 7.3 What must be counted, and the two ways to miscount it
+
+The batch implementation defines the quantity precisely, and the incremental one must reproduce it exactly rather than approximately.
+
+```cpp
+seen[target.frame_id].insert(lms.begin(), lms.end());   // BuildObservedSets
+m[a][b] = |seen(a) ∩ seen(b)|;                          // BuildCovisibilityMatrix
+```
+
+`seen` is keyed by `frame_id`, not by `TimeCamId`, and it is a set. Two consequences follow, and each is a distinct way for a naive incremental counter to be wrong.
+
+The first is stereo multiplicity. A landmark observed by both cameras of the same keyframe appears once in `seen[f]`, because the set absorbs the duplicate. A counter that incremented on every `addObservation` would count that keyframe twice and inflate every covisibility cell it participates in. The incremental structure must therefore track, per landmark and per frame, how many cameras of that frame observe it, and move the covisibility counters only on the transitions between zero cameras and one.
+
+The second is idempotent re-addition. `LocalMapper::setup_opt` re-adds every observation of every live feature track on every cycle, and the comment at the call site says so explicitly. The current `addObservation` absorbs this because `obs[tcid_target] = o.pos` is an assignment and `std::set::insert` is a no-op on a present element. A counter placed beside them without a novelty test would increment on every cycle and diverge without bound within seconds. The hook must fire only when the observation was genuinely absent.
+
+Handle both and the incremental matrix is identical to the batch one, element for element, including the absence of zero-valued cells.
+
+### 7.4 The maintained state
+
+Five type aliases first, declared at namespace scope in `include/basalt/vi_estimator/landmark_database.h` rather than inside the class. None of them depends on `Scalar_`, so nesting them in the class template would give each instantiation its own spelling, `LandmarkDatabase<double>::CovisMatrix` and `LandmarkDatabase<float>::CovisMatrix`, for what is one type. The decisive reason is the interface. These types are the contract between `LandmarkDatabase` and `LocalMapper`, appearing in the signatures of `BuildObservedSets`, `BuildCovisibilityMatrix` and `RedundancyScore`, and at namespace scope `basalt::CovisMatrix` is exactly the type `LocalMapper::CovisMatrix` already names, so the substitution described below needs no edit at any use site. Nested, every one of those signatures would have to name a scalar parameter that the type does not depend on.
+
+Note, 2026-09-12. This paragraph previously justified namespace scope by claiming that a class-scope alias would force `typename` on `ObserverFrameMap::const_iterator` throughout `landmark_database.cpp`. That is false and was checked rather than left standing. An alias declared inside the class template is a member of the current instantiation, and both GCC 12.2 and clang accept `ObserverFrameMap::const_iterator it = m.begin();` inside an out-of-line member definition with no qualifier, under `-Wpedantic` at C++14 and C++17 alike. Only a member of an unknown specialization requires `typename`, which is why the `typename Keypoint<Scalar>::MapIter` in section 7.6 is genuinely required, `Keypoint<Scalar>` being a dependent type distinct from the current instantiation.
+
+```cpp
+// Covisibility index types. Declared ahead of the class template and outside
+// it, because none depends on the landmark scalar and a non-dependent alias
+// needs no `typename` at its use sites.
+using ObserverFrameMap = std::map<FrameId, uint32_t>;
+using ObserverIndex = std::map<KeypointId, ObserverFrameMap>;
+using ObservedByFrameMap = std::map<FrameId, std::set<KeypointId>>;
+using CovisRow = std::map<FrameId, size_t>;
+using CovisMatrix = std::map<FrameId, CovisRow>;
+```
+
+`FrameId` is `int64_t` at `include/basalt/utils/common_types.h:55` and `KeypointId` is `size_t` at `include/basalt/optical_flow/optical_flow.h:49`, so `basalt::CovisMatrix` is the identical type to the existing `LocalMapper::CovisMatrix`, declared `std::map<int64_t, std::map<int64_t, size_t>>` at `include/basalt/vi_estimator/local_mapper.h:60`, and `ObservedByFrameMap` is the identical type to the return of `LocalMapper::BuildObservedSets`. The class-scope alias in `LocalMapper` is therefore commented out as superseded and every unqualified use of `CovisMatrix` in that class resolves to the namespace-scope one without further edit, since `LocalMapper` is itself in namespace `basalt`.
+
+The header gains `#include <cstdint>`, `<map>` and `<set>`, none of which it includes directly today.
+
+Then three members, all private, all inert unless tracking is enabled.
+
+```cpp
+    // Landmarks observed by each frame, regardless of who hosts them. The
+    // incremental equivalent of LocalMapper::BuildObservedSets.
+    ObservedByFrameMap mpObservedByFrame;
+
+    // Per landmark, the frames observing it and how many cameras of each frame
+    // do so. The camera count is what makes a stereo observation contribute one
+    // observer rather than two, and the key set is the landmark's observer
+    // frame set, which RedundancyScore needs directly.
+    ObserverIndex mpObserverFrames;
+
+    // Symmetric |seen(a) ∩ seen(b)|, with zero-valued cells erased rather than
+    // stored, matching BuildCovisibilityMatrix exactly.
+    CovisMatrix mpCovisibility;
+
+    bool mpCovisEnabled = false;
+```
+
+The multiplicity counter is `uint32_t` rather than `size_t` because it counts cameras of one keyframe, which is one or two in every supported configuration, and naming a 32-bit type documents that it is not an observation count.
+
+The declarations these members and the section 7.5 helpers require, added to `class LandmarkDatabase`.
+
+```cpp
+ public:
+  // Incremental covisibility, opt-in and off by default. Enabling it on one
+  // instance affects no other, since lmdb is a value member of
+  // BundleAdjustmentBase and each estimator owns its own.
+  void EnableCovisibilityTracking(bool enable);
+
+  const CovisMatrix& GetCovisibility() const;
+  const ObservedByFrameMap& GetObservedByFrame() const;
+  const ObserverFrameMap& GetObserverFrames(KeypointId lm_id) const;
+
+ private:
+  void CovisAddObserver(KeypointId lm_id, const TimeCamId& tcid);
+  void CovisRemoveObserver(KeypointId lm_id, const TimeCamId& tcid);
+  void CovisRemoveLandmark(KeypointId lm_id);
+  void CovisDecrementPair(FrameId a, FrameId b);
+  void CovisDecrementDirected(FrameId from, FrameId to);
+```
+
+`GetCovisibility` and `GetObservedByFrame` return the member directly and need no definition beyond that. `EnableCovisibilityTracking` assigns `mpCovisEnabled` and is deliberately not able to backfill an index for a database that already holds landmarks, since the only caller enables it in a constructor on an empty database. A later caller wanting to enable it mid-run would need a rebuild step, which is not written because nothing needs it.
+
+Every type in the new code is spelled explicitly. Eight `auto` uses remain in the listings below, and none of them is a line this change writes. Four are pre-existing upstream lines quoted verbatim as context, namely the `kpts.find` lookup in `addObservation`, the `observations.find` lookup in each of the two removal helpers, and the `kpts[lm_id]` reference in `addLandmark`. Rewriting those would widen the diff into code this change does not otherwise touch. The other four are superseded lines retained as commented-out code under the rule in `CLAUDE.md` section 2, where the whole point is that they reproduce what the file used to say.
+
+`mpObserverFrames` is the load-bearing one. It is simultaneously the inverse index that makes covisibility updates local, the multiplicity record that solves the stereo problem of section 7.3, and the observer count that section 7.8 uses to collapse the dominant cost of `RedundancyScore`. `mpObservedByFrame` and `mpCovisibility` are both derivable from it, and are materialised only because their consumers iterate them.
+
+The relationship between the three, and the invariant that binds them.
+
+```
+  mpObserverFrames[L] = { f : some camera of frame f observes L }  with counts
+
+        L₇ ──▶ { 100:1, 200:2, 300:1 }      frame 200 sees L₇ in both cameras
+
+  mpObservedByFrame[f] = { L : f ∈ keys(mpObserverFrames[L]) }      the transpose
+
+        100 ──▶ {L₇, L₉}     200 ──▶ {L₇}     300 ──▶ {L₇, L₉}
+
+  mpCovisibility[a][b] = |{ L : a ∈ keys(mpObserverFrames[L])
+                              ∧ b ∈ keys(mpObserverFrames[L]) }|
+
+        INVARIANT, for every pair (a,b) with a ≠ b
+        mpCovisibility[a][b] == |mpObservedByFrame[a] ∩ mpObservedByFrame[b]|
+        and the cell is absent rather than zero when the intersection is empty
+```
+
+Section 7.10 turns that invariant into a runtime assertion.
+
+### 7.5 The update rules
+
+Adding an observer frame to a landmark raises the covisibility of that frame against every frame already observing it, by exactly one. Removing an observer frame lowers the same cells by one. Removing a landmark lowers every pair among its observer frames by one. That is the entire algorithm, and its correctness is the elementary identity that a set intersection is the sum over elements of the product of two membership indicators.
+
+```
+   landmark L already observed by frames {A, B, C}.  Frame D now observes it.
+
+        before                          after
+          A───B                           A───B
+          │ ╲ │                           │╲ ╱│╲
+          │  ╳│         add D             │ ╳ │ D        three cells raised,
+          │ ╱ │        ─────────▶         │╱ ╲│╱         namely (D,A) (D,B)
+          C───┘                           C───┘          and (D,C), each by 1
+
+   the cost is O(|observers of L|), not O(|frames in the map|), and the total
+   work to build L's contribution one observation at a time is k(k-1)/2, which
+   is precisely what one batch intersection pass would have spent on L anyway
+```
+
+The three private helpers that implement it, new to `landmark_database.cpp`.
+
+```cpp
+// Lower one directed covisibility cell, erasing it and its row at zero so the
+// structure never holds a cell BuildCovisibilityMatrix would omit. Split out of
+// CovisDecrementPair as a named member rather than a lambda, because a lambda's
+// closure type cannot be written explicitly.
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisDecrementDirected(FrameId from,
+                                                       FrameId to) {
+    const CovisMatrix::iterator row = mpCovisibility.find(from);
+    if (row == mpCovisibility.end()) return;
+    const CovisRow::iterator cell = row->second.find(to);
+    if (cell == row->second.end()) return;
+    BASALT_ASSERT(cell->second > 0);
+    if (--cell->second == 0) row->second.erase(cell);
+    if (row->second.empty()) mpCovisibility.erase(row);
+}
+
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisDecrementPair(FrameId a, FrameId b) {
+    CovisDecrementDirected(a, b);
+    CovisDecrementDirected(b, a);
+}
+
+// One camera of `tcid.frame_id` has begun observing lm_id. Only the zero to one
+// transition of the camera count is a new observer frame.
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisAddObserver(KeypointId lm_id,
+                                                 const TimeCamId& tcid) {
+    if (!mpCovisEnabled) return;
+    ObserverFrameMap& frames = mpObserverFrames[lm_id];
+    if (++frames[tcid.frame_id] > 1) return;
+
+    // The size guard is not an optimisation. operator[] materialises the row,
+    // so on a landmark's first observation, where the loop below has no other
+    // frame to pair with, an unguarded `mpCovisibility[tcid.frame_id]` leaves
+    // an empty row that BuildCovisibilityMatrix never creates, and the parity
+    // check of section 7.10 then fails. The fuzz test caught exactly this.
+    if (frames.size() > 1) {
+        // std::map does not invalidate references to existing elements on
+        // insert, so holding `row` across the loop is safe even as the loop
+        // creates other rows.
+        CovisRow& row = mpCovisibility[tcid.frame_id];
+        for (ObserverFrameMap::const_iterator f = frames.begin();
+             f != frames.end(); ++f) {
+            if (f->first == tcid.frame_id) continue;
+            ++row[f->first];
+            ++mpCovisibility[f->first][tcid.frame_id];
+        }
+    }
+    mpObservedByFrame[tcid.frame_id].insert(lm_id);
+}
+
+// One camera of `tcid.frame_id` has stopped observing lm_id. The frame ceases
+// to be an observer only when its last camera goes.
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisRemoveObserver(KeypointId lm_id,
+                                                    const TimeCamId& tcid) {
+    if (!mpCovisEnabled) return;
+    const ObserverIndex::iterator lm_it = mpObserverFrames.find(lm_id);
+    if (lm_it == mpObserverFrames.end()) return;
+    ObserverFrameMap& frames = lm_it->second;
+    const ObserverFrameMap::iterator f_it = frames.find(tcid.frame_id);
+    if (f_it == frames.end()) return;
+    BASALT_ASSERT(f_it->second > 0);
+    if (--f_it->second > 0) return;
+    frames.erase(f_it);
+
+    for (ObserverFrameMap::const_iterator f = frames.begin();
+         f != frames.end(); ++f)
+        CovisDecrementPair(tcid.frame_id, f->first);
+
+    const ObservedByFrameMap::iterator obf =
+        mpObservedByFrame.find(tcid.frame_id);
+    if (obf != mpObservedByFrame.end()) {
+        obf->second.erase(lm_id);
+        if (obf->second.empty()) mpObservedByFrame.erase(obf);
+    }
+    if (frames.empty()) mpObserverFrames.erase(lm_it);
+}
+
+// The landmark is going away entirely. Driven off mpObserverFrames rather than
+// off Keypoint::obs, so it is correct even where the host-keyed observations
+// index has gone stale, which is the case RehostLandmark can produce.
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisRemoveLandmark(KeypointId lm_id) {
+    if (!mpCovisEnabled) return;
+    const ObserverIndex::iterator lm_it = mpObserverFrames.find(lm_id);
+    if (lm_it == mpObserverFrames.end()) return;
+
+    const ObserverFrameMap& frames = lm_it->second;
+    for (ObserverFrameMap::const_iterator it = frames.begin();
+         it != frames.end(); ++it) {
+        for (ObserverFrameMap::const_iterator jt = std::next(it);
+             jt != frames.end(); ++jt)
+            CovisDecrementPair(it->first, jt->first);
+        const ObservedByFrameMap::iterator obf =
+            mpObservedByFrame.find(it->first);
+        if (obf != mpObservedByFrame.end()) {
+            obf->second.erase(lm_id);
+            if (obf->second.empty()) mpObservedByFrame.erase(obf);
+        }
+    }
+    mpObserverFrames.erase(lm_it);
+}
+
+// Observer frames of one landmark, empty when the landmark is unknown. The
+// static empty map is what keeps a miss from materialising an entry, which an
+// operator[] accessor would do and which would corrupt the index on read.
+template <class Scalar_>
+const ObserverFrameMap& LandmarkDatabase<Scalar_>::GetObserverFrames(
+    KeypointId lm_id) const {
+    static const ObserverFrameMap kEmpty;
+    const ObserverIndex::const_iterator it = mpObserverFrames.find(lm_id);
+    return it == mpObserverFrames.end() ? kEmpty : it->second;
+}
+```
+
+Every one of these returns immediately when tracking is disabled, so a consumer that never enables it pays one predictable branch per mutation and nothing else.
+
+### 7.6 The three hook sites
+
+`addObservation` is the only site that needs its existing logic touched, and only to learn whether the observation was new. The assignment on the else branch preserves the original overwrite semantics exactly, so a caller re-adding an observation with a different pixel position still updates it.
+
+```cpp
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::addObservation(
+    const TimeCamId& tcid_target, const KeypointObservation<Scalar>& o) {
+    auto it = kpts.find(o.kpt_id);
+    BASALT_ASSERT(it != kpts.end());
+
+    // Superseded 2026-09-12. Covisibility bookkeeping must fire only on a
+    // genuinely new observation, and LocalMapper::setup_opt re-adds every
+    // observation of every live track on every cycle. emplace reports novelty,
+    // and the else branch reproduces the assignment this line performed.
+    // it->second.obs[tcid_target] = o.pos;
+    const std::pair<typename Keypoint<Scalar>::MapIter, bool> ins =
+        it->second.obs.emplace(tcid_target, o.pos);
+    if (ins.second)
+        CovisAddObserver(it->first, tcid_target);
+    else
+        ins.first->second = o.pos;
+
+    observations[it->second.host_kf_id][tcid_target].insert(it->first);
+}
+```
+
+The two removal helpers each take a single added line, placed first so it runs before the index surgery and, in the second case, before the early return.
+
+```cpp
+template <class Scalar_>
+typename Keypoint<Scalar_>::MapIter
+LandmarkDatabase<Scalar_>::removeLandmarkObservationHelper(
+    LandmarkDatabase<Scalar>::MapIter it,
+    typename Keypoint<Scalar>::MapIter it2) {
+    CovisRemoveObserver(it->first, it2->first);
+
+    auto host_it = observations.find(it->second.host_kf_id);
+    ...
+}
+
+template <class Scalar_>
+typename LandmarkDatabase<Scalar_>::MapIter
+LandmarkDatabase<Scalar_>::removeLandmarkHelper(
+    LandmarkDatabase<Scalar>::MapIter it) {
+    // Ahead of the observations.end() early return below, which exists for
+    // landmarks whose host bucket is already gone. The covisibility state is
+    // keyed on frames rather than on hosts, so it must be torn down on that
+    // path too.
+    CovisRemoveLandmark(it->first);
+
+    auto host_it = observations.find(it->second.host_kf_id);
+    ...
+}
+```
+
+Placing the teardown ahead of the early return is not cosmetic. That branch is reached when `removeLandmarkObservationHelper` has already drained the host bucket, and also when `addLandmark` produced a keypoint that never received an observation, and in the first of those the landmark may still hold observer frames. Driving the teardown from `mpObserverFrames` rather than from `Keypoint::obs` makes the helper correct on both branches without inspecting which one it is on.
+
+No double counting arises from the interaction of the two helpers. `removeFrame`, `removeKeyframes` and `removeObservations` all erase individual observations through the first helper before deciding whether to invoke the second, and the first helper removes the corresponding entry from `mpObserverFrames` as it goes, so by the time the second runs it sees only what genuinely remains.
+
+### 7.7 Why `addLandmark` needs no hook, and why that is the load-bearing property
+
+```cpp
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::addLandmark(KeypointId lm_id,
+                                            const Keypoint<Scalar>& pos) {
+    auto& kpt = kpts[lm_id];
+    kpt.direction = pos.direction;
+    kpt.inv_dist = pos.inv_dist;
+    kpt.host_kf_id = pos.host_kf_id;
+}
+```
+
+The method writes geometry and host, and leaves `obs` alone. On an existing landmark it therefore changes the host without moving the entries the old host owns in the `observations` index, which is a genuine latent inconsistency in the host-keyed index. It is not reached today, because `LocalMapper::setup_opt` guards on `!landmarkExists` and `RehostLandmark` performs a full `removeLandmark` before its `addLandmark`, but it is a trap for a future caller.
+
+The incremental covisibility state is immune to it by construction, because none of the three structures in section 7.4 is keyed by host. A host change is invisible to them, which is correct, since covisibility does not depend on who hosts a landmark. This is also why the incremental index is strictly more robust than `BuildObservedSets`, which reads through the host index and would silently lose a landmark whose host bucket had been orphaned.
+
+### 7.8 The `LocalMapper` side
+
+The constructor is the opt-in site, and it is the only place in the codebase where tracking is enabled.
+
+```cpp
+LocalMapper::LocalMapper(const Calibration<double>& calib,
+                         const VioConfig& config)
+    : NfrMapper(calib, config) {
+    hash_bow_database =
+        std::make_shared<HashBowStl<256>>(config.mapper_bow_num_bits);
+    // Only this estimator reads covisibility. Every other LandmarkDatabase
+    // instance, in SqrtKeypointVioEstimator, SqrtKeypointVoEstimator and the
+    // offline NfrMapper, leaves it off and is bit-for-bit unaffected.
+    lmdb.EnableCovisibilityTracking(true);
+}
+```
+
+`SelectKeyframesToCull` stops building and starts reading.
+
+```cpp
+    // Superseded 2026-09-12 by the incremental index maintained inside
+    // LandmarkDatabase. Both were rebuilt from nothing on every mapping cycle,
+    // at a measured median of 8.2ms for the enclosing pass.
+    // const auto seen = BuildObservedSets();
+    // mpCovisMatrix = BuildCovisibilityMatrix(seen);
+    // Bound by reference. Nothing in this function mutates lmdb, so the
+    // reference stays valid for the whole selection loop.
+    const ObservedByFrameMap& seen = lmdb.GetObservedByFrame();
+```
+
+The larger gain is in `RedundancyScore`, which is not what the brief asked about but falls out of the same index and dominates the pass. It currently answers "how many keyframes observe this landmark" by scanning every live keyframe and testing set membership, which is a linear search for a fact the inverse index holds directly.
+
+```cpp
+double LocalMapper::RedundancyScore(int64_t kf, const ObservedByFrameMap& seen,
+                                    const std::set<int64_t>& alive,
+                                    size_t& nObservedOut) const {
+    const ObservedByFrameMap::const_iterator it = seen.find(kf);
+    if (it == seen.end() || it->second.empty()) {
+        nObservedOut = 0;
+        return 0.0;
+    }
+    size_t redundant = 0;
+    for (const KeypointId lm : it->second) {
+        size_t others = 0;
+        // Superseded 2026-09-12. This scanned every live keyframe to count the
+        // observers of one landmark. mpObserverFrames holds exactly that set,
+        // so the scan becomes an iteration over ~6 entries instead of ~150.
+        // for (const int64_t k : alive) {
+        //     if (k == kf) continue;
+        //     const auto jt = seen.find(k);
+        //     if (jt != seen.end() && jt->second.count(lm)) ++others;
+        //     if (others >= mpMinRedundantObservers) break;
+        // }
+        const ObserverFrameMap& observers = lmdb.GetObserverFrames(lm);
+        for (ObserverFrameMap::const_iterator f = observers.begin();
+             f != observers.end(); ++f) {
+            if (f->first == kf || alive.count(f->first) == 0) continue;
+            if (++others >= mpMinRedundantObservers) break;
+        }
+        if (others >= mpMinRedundantObservers) ++redundant;
+    }
+    nObservedOut = it->second.size();
+    return static_cast<double>(redundant) / static_cast<double>(nObservedOut);
+}
+```
+
+The observer histogram in the debug block of `SelectKeyframesToCull`, which today rebuilds the inverse index inside an immediately-invoked lambda purely to print it, reads `mpObserverFrames` directly instead.
+
+`FindBestRehostKf` swaps `mpCovisMatrix` for `lmdb.GetCovisibility()`, and `mpCovisMatrix` is deleted as a member.
+
+```cpp
+        size_t covis = 0;
+        // Superseded 2026-09-12. mpCovisMatrix was a snapshot rebuilt once per
+        // pass in SelectKeyframesToCull. The database now maintains the same
+        // matrix incrementally, so the member is deleted and this reads it.
+        // const auto row = mpCovisMatrix.find(c);
+        // if (row != mpCovisMatrix.end())
+        //     for (const auto& [other, count] : row->second)
+        //         if (candidates.count(other)) covis += count;
+        const CovisMatrix& covis_matrix = lmdb.GetCovisibility();
+        const CovisMatrix::const_iterator row = covis_matrix.find(c);
+        if (row != covis_matrix.end())
+            for (CovisRow::const_iterator cell = row->second.begin();
+                 cell != row->second.end(); ++cell)
+                if (candidates.count(cell->first)) covis += cell->second;
+```
+
+That last substitution carries the one genuine semantic change in this section, and it must not be mistaken for a pure refactor. `FindBestRehostKf` is called from inside the cull loop, interleaved with `removeLandmark` and `addObservation`, so where it previously read a snapshot frozen before the first victim was processed, it now reads state that moves as the pass proceeds. The new behaviour is the better one and is the same argument section 4.3 made for re-scoring against `alive`, namely that ORB-SLAM3 is safe from compounding errors because `SetBadFlag` takes effect immediately and every subsequent query sees it. A rehost target whose connectivity has just been reduced by an earlier rehost in the same pass should be ranked on its reduced connectivity. It is nonetheless a behaviour change, and runs either side of it are not comparable.
+
+### 7.9 Backwards compatibility
+
+The blast radius is every translation unit holding a `LandmarkDatabase`, because the three hooks live in methods all of them call.
+
+| Consumer | Enables tracking | Effect |
+|---|---|---|
+| `SqrtKeypointVioEstimator` (`sqrt_keypoint_vio.cpp:468,571,580,1070,1073`) | no | one predicated branch per observation add or remove |
+| `SqrtKeypointVoEstimator` (`sqrt_keypoint_vo.cpp:310,422,431,550,733,927,931`) | no | as above |
+| `NfrMapper` offline (`nfr_mapper.cpp:785,793`) | no | as above |
+| `BundleAdjustmentBase::filterOutliers` (`ba_base.cpp:302,306`) | inherits the owner's setting | active only under `LocalMapper` |
+| `LocalMapper` (`local_mapper.cpp`) | yes, in the constructor | full maintenance |
+| `src/mapper.cpp`, `src/mapper_sim.cpp` display paths | no | read `getObservations()` only, untouched |
+
+The default of `false` is what makes this safe. It follows the rule in `CLAUDE.md` section 7 that new behaviour should ride on a default that reproduces the old behaviour exactly, set explicitly only in the calling configuration. No public method changes signature, no existing method changes its observable result, and the one edited body, `addObservation`, is edited to an equivalent formulation of the same two operations.
+
+The threading question the brief raised resolves cleanly and deserves stating, because it is easy to assume otherwise. `lmdb` is a value member of `BundleAdjustmentBase` at `ba_base.h:160`, so the VIO estimator and the local mapper each own a distinct instance. What they share is the class, not the object. No lock is therefore required for the new state, and enabling tracking on one instance cannot affect the other.
+
+Four additions to the public surface, namely `EnableCovisibilityTracking`, `GetCovisibility`, `GetObservedByFrame` and `GetObserverFrames`, plus five private helpers and three members. Nothing is removed from `LandmarkDatabase`. The five namespace-scope aliases of section 7.4 are new names in namespace `basalt` and collide with nothing, which was checked by grepping the tree for each.
+
+One alias is superseded rather than added. `LocalMapper::CovisMatrix` at `include/basalt/vi_estimator/local_mapper.h:60` names the identical type to the new `basalt::CovisMatrix`, so it is commented out in place with a note, and the unqualified uses of `CovisMatrix` in that class then resolve to the namespace-scope alias with no further edit. `BuildCovisibilityMatrix` keeps its signature and its meaning, since it is retained as the section 7.10 oracle. `getObservationsCountForPair` and `getNonLandmarkObservationsCountForKeyFrame` were already unreferenced once `ComputeCovisibility` was commented out in section 4, and they remain defined and unused.
+
+One defect is left standing and recorded rather than fixed, since it is unrelated to covisibility and touching it would widen the diff. `landmarkExists(int lm_id)` takes an `int` while `KeypointId` is `size_t` and `TrackId` is `int64_t`, so every call from `LocalMapper` narrows. It is harmless at current track counts and wrong in principle.
+
+### 7.10 Validation
+
+The invariant of section 7.4 is checkable at runtime against the very functions this section replaces, which is why `BuildObservedSets` and `BuildCovisibilityMatrix` are retained rather than deleted. They become the oracle, and a future reader must not remove them as dead code.
+
+```cpp
+    if (mpVioDebugMode) {
+        const ObservedByFrameMap ref_seen = BuildObservedSets();
+        const CovisMatrix ref_covis = BuildCovisibilityMatrix(ref_seen);
+        const bool ok = ref_seen == lmdb.GetObservedByFrame() &&
+                        ref_covis == lmdb.GetCovisibility();
+        std::cout << "[Local Mapper][covis] parity=" << (ok ? "OK" : "MISMATCH")
+                  << " frames=" << lmdb.GetObservedByFrame().size()
+                  << " ref_frames=" << ref_seen.size()
+                  << " cells=" << lmdb.GetCovisibility().size()
+                  << " ref_cells=" << ref_covis.size() << std::endl;
+    }
+```
+
+A mismatch must be diagnosed before it is attributed. The two are not equal by definition, because the oracle reads through the host-keyed `observations` index while the incremental structure is driven off `Keypoint::obs`, and section 7.7 showed the host index can be left stale by an `addLandmark` on a live landmark. Where they diverge the incremental value is the one to trust, and the divergence is then evidence of a host-index defect rather than of a bookkeeping defect.
+
+Offline, a randomised differential test is the strongest available check and is cheap to write, since the structures under test depend on nothing but `TimeCamId` and integers and transcribe onto stub types the way the section 4 and section 6 checks did.
+
+```
+  T1  one landmark, two frames                 covis(a,b) == 1
+  T2  re-add the identical observation         covis(a,b) == 1 still
+  T3  same frame, cam0 then cam1               covis unchanged, observers == 1
+  T4  drop cam0, cam1 remains                  covis unchanged
+  T5  drop the last camera of a frame          cell erased, not left at zero
+  T6  removeLandmark with 4 observer frames    all 6 pairs decremented
+  T7  rehost cycle, remove then add then
+      re-add all observations but one frame    equals a from-scratch rebuild
+  T8  fuzz, 10^4 random add and remove ops     equals a brute-force oracle
+      against a brute-force recomputation      after EVERY operation
+```
+
+T8 subsumes the rest and is the one that matters. The oracle is four lines, namely rebuild the frame-to-landmark map from the stub observation sets and intersect every pair, and comparing after every single operation localises a divergence to the operation that caused it rather than to the end of the run.
+
+Two further cases cover the accessors this change introduces.
+
+```
+  T9  GetObserverFrames on an unknown landmark   returns empty, creates no entry
+  T10 tracking disabled, 200 adds and 7 removes  all three structures stay empty
+```
+
+T9 guards the one read path that could corrupt the index. An accessor written with `operator[]` would materialise an entry for every landmark queried, and `RedundancyScore` queries every landmark in the map on every pass, so the static empty map in section 7.5 is load-bearing rather than defensive. T10 is the backwards-compatibility claim of section 7.9 stated as a test.
+
+All ten have been run. The update rules of section 7.5 were transcribed onto stub types, with every alias at namespace scope and the database itself a class template so that the `typename` question above is actually exercised, and compiled clean with `g++ -std=c++17 -Wall -Wextra -Wpedantic -O2`. T8 executed 6032 observation additions, 2930 observation removals and 1038 landmark removals over 40 landmarks and 20 frames in stereo, with both halves of the section 7.4 invariant asserted after every one of the 10000 operations. All ten pass and T8 reports no divergence.
+
+T8 earned its place immediately by failing on its second operation against the first draft of `CovisAddObserver`, which materialised a covisibility row through `operator[]` before establishing that the landmark had a second observer frame. The empty row is invisible to every consumer, since `FindBestRehostKf` sums a row and an empty one sums to zero, so it would have survived every functional test and shown up only as a slow leak of rows for frames that are covisible with nothing. The guard in section 7.5 is the fix. The lesson generalises to the implementation, namely that a structure defined by an equality against a reference implementation should be tested by that equality and not by its consumers' tolerance of error.
+
+In-run, the existing `CullRedundantKeyframes` timing instrumentation that produced `culling_time.log` gives a direct before and after on the same recording, with no new measurement apparatus needed.
+
+### 7.11 Complexity
+
+Let `N` be keyframes in the local map, `L` landmarks, `k` the mean observer frames per landmark and `m = Lk/N` the mean landmarks per frame. The 2026-09-08 observer histogram in section 5.3 fixes these empirically at `L = 744` and `k = 4476/744 = 6.0`, which at `N = 150` gives `m = 30`.
+
+| Work | Batch, per cull pass | Incremental |
+|---|---|---|
+| Observed sets | `O(Lk log m)`, 4476 set inserts | maintained, `O(1)` to read |
+| Covisibility matrix | `O(N²m)`, 11175 pairs × 60 ≈ 6.7e5 | `O(k)` per new observation |
+| Redundancy scoring, per round | `O(N²m log m)` ≈ 6.8e5 lookups | `O(Nmk log N)` ≈ 2.7e4 |
+| Per-cycle total | ≈ 2e6 operations | ≈ 3e4 operations |
+
+The quadratic term in `N` disappears from both the matrix build and the scoring loop, which is the substantive result. The per-observation cost of `O(k)` is not additional work in any real sense, since building one landmark's contribution incrementally costs `k(k-1)/2` in total, exactly what a single batch intersection pass would have spent on that landmark, and the incremental version spends it once over the landmark's lifetime instead of once per cycle for as long as the landmark lives.
+
+Memory is bounded by the observation count. `mpObservedByFrame` and `mpObserverFrames` are transposes of the same 4476 entries, and `mpCovisibility` holds one cell per ordered pair of frames that share a landmark, bounded by `N(N-1)` and in practice far below it. At the measured scale this is on the order of a few hundred kilobytes.
+
+### 7.12 Not done, and why
+
+The row-wise maximum form the brief originally proposed, `std::map<int64_t, std::pair<int64_t, int>>` mapping each keyframe to its best partner, is not maintained. It is a projection of `mpCovisibility` and would need its own invalidation logic on every decrement, since lowering the current maximum requires rescanning the row to find the new one. `FindBestRehostKf` sums a whole row rather than reading its maximum, so nothing in the current code would consume it. It is derivable on demand in `O(N)` from a row if a future consumer wants it.
+
+Covisibility is not keyed by `TimeCamId`. The consumers all reason about keyframes, `BuildObservedSets` already collapses cameras, and keying by `TimeCamId` would produce a different and less useful number, as section 7.3 set out.
+
+`getObservationsCountForPair` and `getNonLandmarkObservationsCountForKeyFrame` are not removed, although nothing calls them once `ComputeCovisibility` is gone. They are part of the class's public surface and their removal is a separate decision.
+
+The stale host index that `addLandmark` can produce, described in section 7.7, is not fixed here. The incremental structure is immune to it, so fixing it is neither a prerequisite for nor a consequence of this change, and it belongs with the section 6.5 observation about merged tracks keeping stale geometry.
+
+### 7.13 Applied, 2026-09-12
+
+All of section 7 is in the tree across four files. `include/basalt/vi_estimator/landmark_database.h` gains the five namespace-scope aliases, the four accessors, the five private helpers and the three members. `src/vi_estimator/landmark_database.cpp` gains the helper definitions and the three hooks. `include/basalt/vi_estimator/local_mapper.h` has `LocalMapper::CovisMatrix` and `mpCovisMatrix` commented out as superseded and the three signatures repointed at the aliases. `src/vi_estimator/local_mapper.cpp` enables tracking in the constructor, reads the live index in `SelectKeyframesToCull` and `FindBestRehostKf`, and takes the observer count from `GetObserverFrames` in `RedundancyScore`.
+
+Five deviations from the plan as written, all minor.
+
+`src/vi_estimator/landmark_database.cpp` gains `#include <iterator>` for the `std::next` in `CovisRemoveLandmark`. The file previously included only `<algorithm>` and `<set>` and was relying on a transitive include.
+
+The observer histogram in the `SelectKeyframesToCull` debug block, which section 7.8 described in prose only, now collects the landmark set from `seen` and reads each count from `GetObserverFrames` rather than rebuilding an inverse index inside an immediately-invoked lambda.
+
+`FindBestRehostKf` accumulates into `cv` rather than `covis`, matching the name already in the file.
+
+Comments are cut to what `CLAUDE.md` section 7 permits, so the rationale that section 7 of this document carries at length appears in the source only where reading the code cannot supply it, namely the stereo transition rule, the empty-row guard, the ordering requirement ahead of the early return in `removeLandmarkHelper`, and the mandated superseded blocks.
+
+The parity check of section 7.10 is live under `mpVioDebugMode`, and it calls `BuildObservedSets` and `BuildCovisibilityMatrix` on every cull pass to do its comparison. It therefore reinstates in full the cost that this change removes. A debug run measures correctness and will not show the speedup, and the two must be measured in separate runs. Once the parity line has read `OK` across a full flight the block should be deleted, along with `BuildObservedSets` and `BuildCovisibilityMatrix` if nothing else has come to depend on them.
+
+Nothing has been compiled. The container has neither TBB headers nor cmake, so verification remains the section 7.10 differential test on stub types, brace and paren balance on all four files, a check that no live reference to `mpCovisMatrix` survives, and a check that no code path assigns a whole `LandmarkDatabase`, which would have copied `mpCovisEnabled` across instances. Build and flight on a proper host are outstanding.

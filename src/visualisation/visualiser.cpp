@@ -203,8 +203,11 @@ void SlamVisualiser::Run() {
             // IO-normalised GT is in the initial IMU body frame. The SLAM
             // gravity-aligns its world frame so its first T_w_i != Identity.
             // Multiplying by slam_first maps GT into the SLAM world frame.
+            // An aligned SLAM world is already the GT world.
             Sophus::SE3d T_gt_vis =
-                slam_first ? *slam_first * gt.T_w_i : gt.T_w_i;
+                slam_first && !mpController.IsGroundTruthAligned()
+                    ? *slam_first * gt.T_w_i
+                    : gt.T_w_i;
             mvpGroundTruthTrajectory.emplace_back(T_gt_vis.translation());
         }
 

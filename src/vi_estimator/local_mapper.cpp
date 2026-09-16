@@ -15,8 +15,8 @@ namespace basalt {
 // ═══════════════════════════════════════════════════════════════════
 
 LocalMapper::LocalMapper(const Calibration<double>& calib,
-                         const VioConfig& config)
-    : NfrMapper(calib, config) {
+                         const VioConfig& config, const Logger::Ptr& logger)
+    : NfrMapper(calib, config, logger) {
     // Replace NfrMapper's TBB-backed HashBow with the STL-backed variant that
     // supports RemoveKeyframes (needed for keyframe culling).
     hash_bow_database =
@@ -111,16 +111,10 @@ void LocalMapper::MapLocally() {
             vKeyframes.push_back(kf);
         }
         auto tStep = std::chrono::high_resolution_clock::now();
-        auto elapsed =
-            std::chrono::duration_cast<std::chrono::microseconds>(tStep - t1);
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] Queue wait time taken: "
-                      << elapsed.count() * 1e-6 << "s" << std::endl;
+        const double queueWaitSeconds =
+            std::chrono::duration<double>(tStep - t1).count();
 
-        tStep = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] Procesing " << vKeyframes.size()
-                      << " keyframes" << std::endl;
+        const int numKeyframes = int(vKeyframes.size());
         mpNewKeyframesForTracking.clear();
         mpLatestKeyframesMatches.clear();
 
@@ -138,9 +132,7 @@ void LocalMapper::MapLocally() {
             }
             vecData.push_back(data);
         }
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] Procesing " << vecData.size()
-                      << " marginalisation data packets" << std::endl;
+        const int numMargPackets = int(vecData.size());
         for (MargData::Ptr& packet : vecData) {
             IngestMargData(packet);
         }
@@ -153,13 +145,8 @@ void LocalMapper::MapLocally() {
                 ++it;
         }
         auto tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] IngestMargData time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double ingestSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         if (mpNewKeyframesForTracking.empty()) {
             if (nullReceived) break;
@@ -169,95 +156,54 @@ void LocalMapper::MapLocally() {
         tStep = std::chrono::high_resolution_clock::now();
         detect_keypoints();  // inherited — only touches img_data (now filtered)
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] detect_keypoints time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double detectKeypointsSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
+        double matchStereoSeconds = 0.0;
         if (calib.T_i_c.size() > 1) {
             tStep = std::chrono::high_resolution_clock::now();
             match_stereo();  // inherited — writes to feature_matches
             tEnd = std::chrono::high_resolution_clock::now();
-            if (mpVioDebugMode)
-                std::cout
-                    << "[Local Mapper] match_stereo time taken: "
-                    << std::chrono::duration_cast<std::chrono::microseconds>(
-                           tEnd - tStep)
-                               .count() *
-                           1e-6
-                    << "s" << std::endl;
-
-            tStep = std::chrono::high_resolution_clock::now();
+            matchStereoSeconds =
+                std::chrono::duration<double>(tEnd - tStep).count();
         }
+
+        tStep = std::chrono::high_resolution_clock::now();
         MatchLocal();  // BoW cross-frame matching for new KFs
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] MatchLocal time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double matchLocalSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
         CollectNewKeyframesAfterMatching();  // promote to
                                              // mpLatestKeyframesMatches
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] CollectNewKeyframesAfterMatching time "
-                         "taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double collectNewKfsSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
         build_tracks();  // LocalMapper (shadowing NfrMapper)
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] build_tracks time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double buildTracksSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
         setup_opt();  // LocalMapper (shadowing NfrMapper)
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] setup_opt time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double setupOptSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
         CullRedundantKeyframes();
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] CullRedundantKeyframes time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double cullSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
         optimize(mpOptIterations);
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] optimize (1st pass) time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double optimize1Seconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
         // The hard-coded 4 deleted every landmark left
@@ -268,25 +214,19 @@ void LocalMapper::MapLocally() {
         filterOutliers(mpFilterOutlierThreshold, mpFilterMinObs);
         const int64_t cycleTNs =
             frame_poses.empty() ? 0 : frame_poses.rbegin()->first;
+        mpLogger->AddMapFilter(cycleTNs, int(nLmBeforeFilter),
+                               int(lmdb.numLandmarks()), mpFilterMinObs,
+                               mpFilterOutlierThreshold);
+        mpLogger->PrintMapFilter();
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] filterOutliers time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double filterOutliersSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
         optimize(mpOptIterations);
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] optimize (2nd pass) time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double optimize2Seconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         // Publish an immutable local-map snapshot for the GUI. This is the only
         // point in the cycle where frame_poses and lmdb are quiescent on the
@@ -301,38 +241,34 @@ void LocalMapper::MapLocally() {
             vis_data->keyframes.reserve(frame_poses.size());
             for (const auto& kv : frame_poses)
                 vis_data->keyframes.emplace_back(kv.second.getPose());
+            mpLogger->AddMapPublish(
+                vis_data->t_ns, int(vis_data->points.size()),
+                int(vis_data->keyframes.size()), int(lmdb.numLandmarks()),
+                int(lmdb.getHostKfs().size()));
+            mpLogger->PrintMapPublish();
             out_vis_queue->try_push(std::move(vis_data));  // never block mapper
         }
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] Visualization publish time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double publishVisSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
         if (mpVioPoseUpdateCallback) mpVioPoseUpdateCallback(frame_poses);
         tEnd = std::chrono::high_resolution_clock::now();
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] VIO pose update callback time taken: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(
-                             tEnd - tStep)
-                                 .count() *
-                             1e-6
-                      << "s" << std::endl;
+        const double poseUpdateCbSeconds =
+            std::chrono::duration<double>(tEnd - tStep).count();
 
-        auto elapsed1 =
-            std::chrono::duration_cast<std::chrono::microseconds>(tEnd - t1);
-        if (mpVioDebugMode) {
-            std::cout << "[Local Mapper] Total Local Mapping Time: "
-                      << elapsed1.count() * 1e-6 << "s" << std::endl;
-            std::cout << "[Local Mapper] "
-                         "====================================================="
-                         "======="
-                      << std::endl;
-        }
+        const double totalSeconds =
+            std::chrono::duration<double>(tEnd - t1).count();
+
+        mpLogger->AddMapCycleTiming(
+            cycleTNs, numKeyframes, numMargPackets, queueWaitSeconds,
+            ingestSeconds, detectKeypointsSeconds, matchStereoSeconds,
+            matchLocalSeconds, collectNewKfsSeconds, buildTracksSeconds,
+            setupOptSeconds, cullSeconds, optimize1Seconds,
+            filterOutliersSeconds, optimize2Seconds, publishVisSeconds,
+            poseUpdateCbSeconds, totalSeconds);
+        mpLogger->PrintMapCycleTiming();
 
         // If the sentinel arrived mid-drain (alongside real data), we still
         // processed all data above — now shut down cleanly.
@@ -486,6 +422,13 @@ void LocalMapper::MatchLocal() {
                     m.score = otcid_score.second;
                     ids_to_match.emplace_back(m);
                 }
+
+                mpLogger->AddMapBowQuery(
+                    tcid.frame_id, tcid.frame_id, int(kd.corners.size()),
+                    int(kd.corner_descriptors.size()),
+                    int(kd.bow_vector.size()), int(results.size()), int(above),
+                    best_score, config.mapper_frames_to_match_threshold);
+                mpLogger->PrintMapBowQuery();
             }
         }
     };
@@ -533,9 +476,7 @@ void LocalMapper::MatchLocal() {
         neighbourPairs = int(nNeighbourPairs);
     }
 
-    if (mpVioDebugMode)
-        std::cout << "[Local Mapper] Matching " << ids_to_match.size()
-                  << " image pairs..." << std::endl;
+    auto t2 = std::chrono::high_resolution_clock::now();
 
     std::atomic<int> total_matched{0};
 
@@ -563,6 +504,12 @@ void LocalMapper::MatchLocal() {
                                   config.mapper_min_matches, md);
             }
 
+            mpLogger->AddMapPairMatch(
+                id1.frame_id, id2.frame_id, int(md.matches.size()),
+                config.mapper_min_matches, int(md.inliers.size()),
+                !md.inliers.empty());
+            mpLogger->PrintMapPairMatch();
+
             if (!md.inliers.empty()) {
                 feature_matches[std::make_pair(id1, id2)] =
                     std::allocate_shared<MatchData>(
@@ -588,16 +535,14 @@ void LocalMapper::MatchLocal() {
         num_inliers += kv.second->inliers.size();
     }
 
-    if (mpVioDebugMode) {
-        std::cout << "[Local Mapper] Matched " << ids_to_match.size()
-                  << " image pairs with " << num_inliers << " inlier matches ("
-                  << num_matches << " total)." << std::endl;
-
-        std::cout << "DB query " << elapsed1.count() * 1e-6 << "s. matching "
-                  << elapsed2.count() * 1e-6
-                  << "s. Geometric verification attempts: " << total_matched
-                  << "." << std::endl;
-    }
+    const int64_t matchTNs = mpNewKeyframesForTracking.empty()
+                                 ? 0
+                                 : *mpNewKeyframesForTracking.rbegin();
+    mpLogger->AddMapMatchSummary(
+        matchTNs, int(ids_to_match.size()), neighbourPairs,
+        int(mpLocalMatchNeighbours), total_matched, num_inliers, num_matches,
+        elapsed1.count() * 1e-6, elapsed2.count() * 1e-6);
+    mpLogger->PrintMapMatchSummary();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -622,6 +567,26 @@ void LocalMapper::build_tracks() {
         mpTrackBuilder.AddNewMatches(tbb_matches, lmdb, feature_tracks,
                                      mpRetiredTrackIds);
     }
+
+    std::map<size_t, size_t> hist;
+    for (const auto& kv : feature_tracks) hist[kv.second.size()]++;
+    // Index i holds length i + 2 (the shortest track Filter(2) admits), and
+    // index 9 accumulates every length at or above 11.
+    Eigen::VectorXd lenHist = Eigen::VectorXd::Zero(10);
+    for (const auto& [len, count] : hist) {
+        if (len < 2) continue;
+        lenHist[std::min(len, size_t(11)) - 2] += double(count);
+    }
+
+    const int64_t tracksTNs = mpNewKeyframesForTracking.empty()
+                                  ? 0
+                                  : *mpNewKeyframesForTracking.rbegin();
+    mpLogger->AddMapTracks(tracksTNs, int(feature_tracks.size()),
+                           int(mpTrackBuilder.TrackCount()),
+                           int(mpLatestKeyframesMatches.size()),
+                           int(mpNewKeyframesForTracking.size()),
+                           int(feature_corners.size()), lenHist);
+    mpLogger->PrintMapTracks();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -775,6 +740,18 @@ void LocalMapper::setup_opt() {
             ++nObsAdded;
         }
     }
+
+    const int64_t setupOptTNs =
+        frame_poses.empty() ? 0 : frame_poses.rbegin()->first;
+    mpLogger->AddMapSetupOpt(
+        setupOptTNs, int(nTracks), int(nShortTrack), int(nAlreadyKnown),
+        int(nRetired), int(nNewOk), int(nNoTriangulation), int(nNoCorners),
+        int(nNoHostPose), int(nNoObsPose), int(nShortBaseline),
+        int(nLowParallax), int(nBadDepth), int(nBehind), int(nTooClose),
+        int(nNonFinite), int(nObsAdded), int(nLandmarksBefore),
+        int(lmdb.numLandmarks()), config.mapper_min_triangulation_dist,
+        mpMaxCosParallax, mpMaxInvDist);
+    mpLogger->PrintMapSetupOpt();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -921,14 +898,27 @@ bool LocalMapper::SelectKeyframesToCull(std::vector<int64_t>& keyframesToCull) {
         keyframesToCull.push_back(ordered.front());
         capacityRuleFired = true;
     }
-    if (keyframesToCull.empty()) {
-        return false;
-    } else {
-        if (mpVioDebugMode)
-            std::cout << "[Local Mapper] Received " << keyframesToCull.size()
-                      << " keyframes to cull" << std::endl;
-        return true;
+
+    // Observer-count histogram over the whole map. Index i holds landmarks
+    // with i observers, and index 9 accumulates 9 or more.
+    Eigen::VectorXd observersHist = Eigen::VectorXd::Zero(10);
+    {
+        std::set<KeypointId> all_lms;
+        for (const auto& [kf, lms] : seen)
+            all_lms.insert(lms.begin(), lms.end());
+        for (const KeypointId lm : all_lms)
+            observersHist[std::min(lmdb.GetObserverFrames(lm).size(),
+                                   size_t(9))]++;
     }
+
+    const int64_t cullSelectTNs =
+        frame_poses.empty() ? 0 : frame_poses.rbegin()->first;
+    mpLogger->AddMapCullSelect(cullSelectTNs, int(frame_poses.size()),
+                               int(eligible_end), int(keep_recent),
+                               int(max_cull), int(mpMinRedundantObservers),
+                               int(keyframesToCull.size()), capacityRuleFired,
+                               mpCullRedundancyThresh, observersHist);
+    mpLogger->PrintMapCullSelect();
 
     if (mpVioDebugMode) {
         std::cout << "[Local Mapper][cull-select] selected [";
@@ -1010,9 +1000,15 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
             }
         }
         if (!found_obs) {
+            mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
+                                   int(obs_copy.size()), 0, 3, 1);
+            mpLogger->PrintMapRehost();
             return;
         }
     } else if (obs_copy.count(new_host_tcid) == 0) {
+        mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
+                               int(obs_copy.size()), 0, 3, 1);
+        mpLogger->PrintMapRehost();
         return;
     }
 
@@ -1021,6 +1017,9 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
     Eigen::Vector4d pos_3d_new_hom;
     if (!calib.intrinsics[new_host_tcid.cam_id].unproject(pos_2d_new,
                                                           pos_3d_new_hom)) {
+        mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
+                               int(obs_copy.size()), 0, 3, 2);
+        mpLogger->PrintMapRehost();
         return;
     }
 
@@ -1054,6 +1053,9 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
         triangulated = true;
         break;
     }
+    // Fallback. A landmark with only the culled host and the new host as
+    // observers has no third view, so the loop above cannot run at all and the
+    // landmark was destroyed unconditionally.
     if (!triangulated) {
         const Sophus::SE3d T_w_oldh = frame_poses.at(culled_kf).getPose() *
                                       calib.T_i_c[old_host_tcid.cam_id];
@@ -1080,6 +1082,9 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
     }
 
     if (!triangulated) {
+        mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
+                               int(obs_copy.size()), 0, 4, 3);
+        mpLogger->PrintMapRehost();
         lmdb.removeLandmark(lm_id);
         return;
     }
@@ -1102,6 +1107,12 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
     // landmark. The landmark would be dangling in kpts with an empty obs set,
     // which would cause removeLandmarkHelper to receive observations.end()
     // later. Remove it immediately instead.
+    const int outcome = obs_added == 0 ? 4 : (obs_added < 2 ? 1 : 0);
+    mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
+                           int(obs_copy.size()), obs_added, outcome,
+                           obs_added == 0 ? 4 : 0);
+    mpLogger->PrintMapRehost();
+
     if (obs_added == 0) {
         lmdb.removeLandmark(lm_id);
     }
@@ -1159,11 +1170,22 @@ void LocalMapper::CullRedundantKeyframes() {
             const int64_t new_host = FindBestRehostKf(culled, lm, candidates);
             if (new_host < 0) {
                 ++nNoHost;
+                mpLogger->AddMapRehost(culled, lm, culled, -1,
+                                       int(candidates.size()), 0, 4, 5);
+                mpLogger->PrintMapRehost();
                 if (lmdb.landmarkExists(lm)) {
                     landmarksToRemove.push_back(lm);
                 }
             } else {
                 ++nRehosted;
+                // A candidate that is itself queued for culling is currently
+                // accepted here. That is the defect under investigation.
+                if (std::find(keyframesToCull.begin(), keyframesToCull.end(),
+                              new_host) != keyframesToCull.end()) {
+                    mpLogger->AddMapRehost(culled, lm, culled, new_host, 0, 0,
+                                           5, 0);
+                    mpLogger->PrintMapRehost();
+                }
                 RehostLandmark(lm, culled, new_host);
             }
         }
@@ -1173,7 +1195,6 @@ void LocalMapper::CullRedundantKeyframes() {
 
         // ─── Step 2 — remove remaining observations of culled KF ───────────
         lmdb.removeFrame(culled);
-
 
         // ─── Step 3 — prune NFR factors referencing culled KF ──────────────
         rel_pose_factors.erase(
@@ -1212,12 +1233,16 @@ void LocalMapper::CullRedundantKeyframes() {
 
         // ─── Step 6 — TrackBuilder cleanup ──────────────────────────────────
         mpTrackBuilder.DeleteTracksAfterCulling({culled});
+
+        mpLogger->AddMapCull(culled, culled, int(keyframesToCull.size()),
+                             int(hosted_lm_ids.size()), int(nRehosted),
+                             int(nNoHost), int(nLmBeforeKf),
+                             int(lmdb.numLandmarks()), mapBefore,
+                             int(frame_poses.size()));
+        mpLogger->PrintMapCull();
     }
 
     // ─── Step 7 — clear transient per-step data ─────────────────────────
-    if (mpVioDebugMode)
-        std::cout << "[Local Mapper] clearing transient per-step data"
-                  << std::endl;
     img_data.clear();
     feature_tracks.clear();
     mpLatestKeyframesMatches.clear();

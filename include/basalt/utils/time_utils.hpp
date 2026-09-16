@@ -35,107 +35,124 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
 
+#include <Eigen/Dense>
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <variant>
 #include <vector>
 
-#include <Eigen/Dense>
-
 namespace basalt {
 
 template <class Clock = std::chrono::high_resolution_clock>
 class Timer {
- public:
-  /// start timer
-  Timer() : start_(Clock::now()) {}
+public:
+    /// start timer
+    Timer() : start_(Clock::now()) {}
 
-  /// return elapsed time in seconds
-  double elapsed() const {
-    return std::chrono::duration<double>(Clock::now() - start_).count();
-  }
+    /// return elapsed time in seconds
+    double elapsed() const {
+        return std::chrono::duration<double>(Clock::now() - start_).count();
+    }
 
-  /// return elapsed time in seconds and reset timer
-  double reset() {
-    const auto now = Clock::now();
-    const double elapsed = std::chrono::duration<double>(now - start_).count();
-    start_ = now;
-    return elapsed;
-  }
+    /// return elapsed time in seconds and reset timer
+    double reset() {
+        const auto now = Clock::now();
+        const double elapsed =
+            std::chrono::duration<double>(now - start_).count();
+        start_ = now;
+        return elapsed;
+    }
 
- private:
-  std::chrono::time_point<Clock> start_;
+private:
+    std::chrono::time_point<Clock> start_;
 };
 
 template <class Scalar = double>
 struct assign_op {
-  void operator()(Scalar& lhs, const Scalar& rhs) { lhs = rhs; }
+    void operator()(Scalar& lhs, const Scalar& rhs) { lhs = rhs; }
 };
 
 template <class Scalar = double>
 struct plus_assign_op {
-  void operator()(Scalar& lhs, const Scalar& rhs) { lhs += rhs; }
+    void operator()(Scalar& lhs, const Scalar& rhs) { lhs += rhs; }
 };
 
 template <class T = Timer<>, class Assign = assign_op<>>
 class ScopedTimer {
- public:
-  explicit ScopedTimer(double& dest) : dest_(dest) {}
-  ~ScopedTimer() { Assign()(dest_, timer_.elapsed()); }
+public:
+    explicit ScopedTimer(double& dest) : dest_(dest) {}
+    ~ScopedTimer() { Assign()(dest_, timer_.elapsed()); }
 
- private:
-  double& dest_;
-  T timer_;
+private:
+    double& dest_;
+    T timer_;
 };
 
 using ScopedTimerAdd = ScopedTimer<Timer<>, plus_assign_op<>>;
 
 template <class F>
 void log_timing(double& time, F fun) {
-  Timer timer;
-  fun();
-  time = timer.elapsed();
+    Timer timer;
+    fun();
+    time = timer.elapsed();
 }
 
 template <class F>
 void log_timing_add(double& time, F fun) {
-  Timer timer;
-  fun();
-  time += timer.elapsed();
+    Timer timer;
+    fun();
+    time += timer.elapsed();
 }
 
+// ////////////////////////////////////////////////////////////////////////////
+// overloads for generic lambdas
+// See also: https://stackoverflow.com/q/55087826/1813258
+template <class... Ts>
+struct overload : Ts... {
+    using Ts::operator()...;
+};
+template <class... Ts>
+overload(Ts...) -> overload<Ts...>;
+
 class ExecutionStats {
- public:
-  struct Meta {
-    inline Meta& format(const std::string& s) {
-      format_ = s;
-      return *this;
-    }
+public:
+    virtual ~ExecutionStats() = default;
 
-    // overwrite the meta data from another object
-    void set_meta(const Meta& other) { format_ = other.format_; }
+    struct Meta {
+        inline Meta& format(const std::string& s) {
+            format_ = s;
+            return *this;
+        }
 
-    std::variant<std::vector<double>, std::vector<Eigen::VectorXd>> data_;
+        // overwrite the meta data from another object
+        void set_meta(const Meta& other) { format_ = other.format_; }
 
-    std::string format_;
-  };
+        std::variant<std::vector<double>, std::vector<Eigen::VectorXd>,
+                     std::vector<int64_t>>
+            data_;
 
-  Meta& add(const std::string& name, double value);
-  Meta& add(const std::string& name, const Eigen::VectorXd& value);
-  Meta& add(const std::string& name, const Eigen::VectorXf& value);
+        std::string format_;
+    };
 
-  void merge_all(const ExecutionStats& other);
+    virtual Meta& add(const std::string& name, double value);
+    virtual Meta& add(const std::string& name, const Eigen::VectorXd& value);
+    virtual Meta& add(const std::string& name, const Eigen::VectorXf& value);
 
-  void merge_sums(const ExecutionStats& other);
+    virtual Meta& add_int(const std::string& name, int64_t value);
 
-  void print() const;
+    void merge_all(const ExecutionStats& other);
 
-  bool save_json(const std::string& path) const;
+    void merge_sums(const ExecutionStats& other);
 
- private:
-  std::unordered_map<std::string, Meta> stats_;
-  std::vector<std::string> order_;
+    void print() const;
+
+    bool save_json(const std::string& path) const;
+
+protected:
+    std::unordered_map<std::string, Meta> stats_;
+    std::vector<std::string> order_;
 };
 
 }  // namespace basalt

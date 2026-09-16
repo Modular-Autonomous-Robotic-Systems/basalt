@@ -60,31 +60,33 @@ ExecutionStats::Meta& ExecutionStats::add(const std::string& name,
   return add(name, x);
 }
 
+ExecutionStats::Meta& ExecutionStats::add_int(const std::string& name,
+                                              int64_t value) {
+  auto [it, new_item] = stats_.try_emplace(name);
+  if (new_item) {
+    order_.push_back(name);
+    it->second.data_ = std::vector<int64_t>();
+  }
+  std::get<std::vector<int64_t>>(it->second.data_).push_back(value);
+  return it->second;
+}
+
 void ExecutionStats::merge_all(const ExecutionStats& other) {
   for (const auto& name : other.order_) {
     const auto& meta = other.stats_.at(name);
-    std::visit(
-        [&](auto& data) {
-          for (auto v : data) {
-            add(name, v);
-          }
-        },
-        meta.data_);
+    std::visit(overload{[&](const std::vector<double>& data) {
+                          for (double v : data) add(name, v);
+                        },
+                        [&](const std::vector<Eigen::VectorXd>& data) {
+                          for (const auto& v : data) add(name, v);
+                        },
+                        [&](const std::vector<int64_t>& data) {
+                          for (int64_t v : data) add_int(name, v);
+                        }},
+               meta.data_);
     stats_.at(name).set_meta(meta);
   }
 }
-
-namespace {  // helper
-// ////////////////////////////////////////////////////////////////////////////
-// overloads for generic lambdas
-// See also: https://stackoverflow.com/q/55087826/1813258
-template <class... Ts>
-struct overload : Ts... {
-  using Ts::operator()...;
-};
-template <class... Ts>
-overload(Ts...) -> overload<Ts...>;
-}  // namespace
 
 void ExecutionStats::merge_sums(const ExecutionStats& other) {
   for (const auto& name : other.order_) {
@@ -97,9 +99,17 @@ void ExecutionStats::merge_sums(const ExecutionStats& other) {
                         [&](const std::vector<Eigen::VectorXd>& data) {
                           UNUSED(data);
                           // TODO: for now no-op
+                        },
+                        [&](const std::vector<int64_t>& data) {
+                          int64_t sum = 0;
+                          for (int64_t v : data) sum += v;
+                          add_int(name, sum);
                         }},
                meta.data_);
-    stats_.at(name).set_meta(meta);
+    // VectorXd is a no-op above, so name never lands in stats_ for that
+    // case; stats_.at(name) would throw std::out_of_range.
+    auto it = stats_.find(name);
+    if (it != stats_.end()) it->second.set_meta(meta);
   }
 }
 
@@ -141,6 +151,10 @@ void ExecutionStats::print() const {
             [&](const std::vector<Eigen::VectorXd>& data) {
               int count = data.size();
               std::cout << "{:20} ({:>4})\n"_format(name, count);
+            },
+            [&](const std::vector<int64_t>& data) {
+              int count = data.size();
+              std::cout << "{:20} ({:>4})\n"_format(name, count);
             }},
         meta.data_);
   }
@@ -166,7 +180,8 @@ bool ExecutionStats::save_json(const std::string& path) const {
                    std::string name_indices = std::string(name) + "__index";
                    result[name_indices] = indices;
                    result[name_values] = values;
-                 }},
+                 },
+                 [&](const std::vector<int64_t>& data) { result[name] = data; }},
         meta.data_);
   }
 

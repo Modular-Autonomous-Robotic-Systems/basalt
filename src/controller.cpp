@@ -94,6 +94,8 @@ void Controller::Stop() {
     }
     std::cout << "Local Mapping Stopped" << std::endl;
 
+    if (mpLogger) mpLogger->SaveAll();
+
     // (5) Join optical flow via destructor.
     opt_flow_ptr_.reset();
 
@@ -143,16 +145,24 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
                             const Eigen::Vector3d& bg,
                             const Eigen::Vector3d& ba,
                             bool useProducerConsumerArchitecture,
-                            bool enableVisualisation) {
+                            bool enableVisualisation,
+                            const std::string& logDirectory,
+                            bool alignToGroundTruth) {
     std::cout << "Initialising SLAM with mpUseProducerConsumerArchitecture: "
               << useProducerConsumerArchitecture << std::endl;
     mpUseProducerConsumerArchitecture = useProducerConsumerArchitecture;
     std::cout << "enable visualisation: " << enableVisualisation << std::endl;
     mpEnableVisualisation = enableVisualisation;
+    mpAlignToGroundTruth = alignToGroundTruth;
+    mpGroundTruthSeeded = false;
+
+    mpLogger =
+        std::make_shared<basalt::Logger>(logDirectory, vio_config_.vio_debug);
+
     // 1. Create Optical Flow Frontend
     std::cout << "Setting up Optical Flow and VIO" << std::endl;
     opt_flow_ptr_ = basalt::OpticalFlowFactory::getOpticalFlow(
-        vio_config_, calib_, mpUseProducerConsumerArchitecture);
+        vio_config_, calib_, mpUseProducerConsumerArchitecture, mpLogger);
 
     // 2. Create VIO/VO Backend
     bool use_imu = (mode_ == SlamMode::VIO);
@@ -160,7 +170,7 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
     // parameterized if needed
     vio_estimator_ = basalt::VioEstimatorFactory::getVioEstimator<double>(
         vio_config_, calib_, basalt::constants::g, use_imu,
-        mpUseProducerConsumerArchitecture);  // true for use_double
+        mpUseProducerConsumerArchitecture, mpLogger);  // true for use_double
 
     // 3. Initialize the backend
     std::cout << "Initializing VIO" << std::endl;
@@ -179,7 +189,8 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
     vio_estimator_->mpKFOutputQueue = &local_map_kf_queue_;
 
     // 5. Create and wire the local mapper.
-    local_mapper_ = std::make_shared<basalt::LocalMapper>(calib_, vio_config_);
+    local_mapper_ =
+        std::make_shared<basalt::LocalMapper>(calib_, vio_config_, mpLogger);
     local_mapper_->SetMarginalisationDataInputQueue(&local_map_input_queue_);
     local_mapper_->SetKFInputQueue(&local_map_kf_queue_);
     local_mapper_->SetVIOPoseUpdateCallback(
@@ -204,14 +215,34 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
 
 bool Controller::TrackMonocular(OpticalFlowInput::Ptr& frame, Sophus::SE3f& tcw,
                                 std::optional<Sophus::SE3d> gtcw) {
+    // Hold initialisation until a frame carries ground truth, so the world is
+    // always seeded from it. Initialisation skips inertial samples older than
+    // its frame, and a full queue would block GrabIMU.
+    if (mpAlignToGroundTruth && !mpGroundTruthSeeded && !gtcw) {
+        vio_estimator_->drain_input_queues();
+        return false;
+    }
     OpticalFlowResult::Ptr res =
         opt_flow_ptr_->processFrame(frame->t_ns, frame);
     mpCurrentFrameTime = frame->t_ns;
-    current_latest_pose_ = vio_estimator_->ProcessFrame(res);
+    current_latest_pose_ = vio_estimator_->ProcessFrame(
+        res, mpAlignToGroundTruth ? gtcw : std::optional<Sophus::SE3d>());
+    if (mpAlignToGroundTruth && gtcw && current_latest_pose_)
+        mpGroundTruthSeeded = true;
     // Forward the ground-truth pose to the GUI only when asked to (G1/G4).
     if (mpEnableVisualisation && mvpGroundTruthQueue && gtcw) {
         mvpGroundTruthQueue->try_push(basalt::GtPose{frame->t_ns, *gtcw});
     }
+    Eigen::VectorXd pWI, qWI, pGt, qGt;  // empty marks an absent pose
+    if (current_latest_pose_) {
+        pWI = current_latest_pose_->T_w_i.translation();
+        qWI = current_latest_pose_->T_w_i.unit_quaternion().coeffs();
+    }
+    if (gtcw) {
+        pGt = gtcw->translation();
+        qGt = gtcw->unit_quaternion().coeffs();
+    }
+    mpLogger->AddGtEval(frame->t_ns, pWI, qWI, pGt, qGt);
     if (current_latest_pose_) {
         tcw = current_latest_pose_->T_w_i.cast<float>();
     } else {
@@ -228,6 +259,38 @@ void Controller::GrabImage(basalt::OpticalFlowInput::Ptr data) {
 
 void Controller::GrabIMU(basalt::ImuData<double>::Ptr data) {
     if (vio_estimator_) {
+        if (data) {
+            if (mpImuLastTNs >= 0) {
+                const int64_t gap = data->t_ns - mpImuLastTNs;
+                if (gap <= 0) mpImuNonMonotonic++;
+                if (gap > mpImuWindowMaxGapNs) mpImuWindowMaxGapNs = gap;
+            }
+            if (mpImuWindowFirstTNs < 0) {
+                mpImuWindowFirstTNs = data->t_ns;
+                mpImuWindowWallStart = std::chrono::steady_clock::now();
+            }
+            mpImuLastTNs = data->t_ns;
+            mpImuSampleCount++;
+
+            if (mpImuSampleCount % kImuLogPeriod == 0) {
+                const double spanS =
+                    double(data->t_ns - mpImuWindowFirstTNs) * 1e-9;
+                const double wallS =
+                    std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - mpImuWindowWallStart)
+                        .count();
+                mpLogger->AddVioImuIngest(
+                    data->t_ns, mpImuSampleCount,
+                    spanS > 0 ? double(kImuLogPeriod) / spanS : 0.0,
+                    wallS > 0 ? double(kImuLogPeriod) / wallS : 0.0,
+                    double(mpImuWindowMaxGapNs) * 1e-9, mpImuNonMonotonic,
+                    int(vio_estimator_->imu_data_queue.size()), data->accel,
+                    data->gyro);
+                mpLogger->PrintVioImuIngest();
+                mpImuWindowFirstTNs = -1;
+                mpImuWindowMaxGapNs = 0;
+            }
+        }
         vio_estimator_->imu_data_queue.push(data);
     }
 }
@@ -278,6 +341,8 @@ basalt::Calibration<double>& Controller::GetCalibration() { return calib_; }
 bool Controller::IsVisualisationEnabled() const {
     return mpEnableVisualisation;
 }
+
+bool Controller::IsGroundTruthAligned() const { return mpAlignToGroundTruth; }
 
 void Controller::SetGroundTruthVisualisationQueue(
     tbb::concurrent_bounded_queue<basalt::GtPose>* queue) {

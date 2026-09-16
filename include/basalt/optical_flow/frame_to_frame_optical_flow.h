@@ -39,10 +39,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <basalt/optical_flow/optical_flow.h>
 #include <basalt/optical_flow/patch.h>
 #include <basalt/utils/keypoints.h>
+#include <basalt/utils/logger.h>
 #include <tbb/blocked_range.h>
 #include <tbb/concurrent_unordered_map.h>
 #include <tbb/parallel_for.h>
 
+#include <atomic>
+#include <iostream>
 #include <sophus/se2.hpp>
 #include <thread>
 
@@ -72,12 +75,14 @@ public:
 
     FrameToFrameOpticalFlow(const VioConfig& config,
                             const basalt::Calibration<double>& calib,
-                            bool useProducerConsumerArchitecture = false)
+                            bool useProducerConsumerArchitecture = false,
+                            const Logger::Ptr& logger = nullptr)
         : t_ns(-1),
           frame_counter(0),
           last_keypoint_id(0),
           config(config),
-          mpUseProducerConsumerArchitecture(useProducerConsumerArchitecture) {
+          mpUseProducerConsumerArchitecture(useProducerConsumerArchitecture),
+          mpLogger(logger ? logger : Logger::Disabled()) {
         input_queue.set_capacity(10);
 
         this->calib = calib.cast<Scalar>();
@@ -132,6 +137,12 @@ public:
             if (!v.img.get()) return nullptr;
         }
 
+        Timer tTotal;
+        const int64_t prevFrameTNs = t_ns;
+        OpticalFlowTrackStats trackStats;
+        int numDetected = 0;
+        int numEpipolarRejected = 0;
+
         if (t_ns < 0) {
             t_ns = curr_t_ns;
 
@@ -154,11 +165,17 @@ public:
 
             transforms->input_images = new_img_vec;
 
-            addPoints();
-            filterPoints();
+            trackStats.mPyramidSeconds = tTotal.elapsed();
+
+            Timer tDetect;
+            numDetected = addPoints();
+            numEpipolarRejected = filterPoints();
+            trackStats.mDetectSeconds = tDetect.elapsed();
 
         } else {
             t_ns = curr_t_ns;
+            trackStats.mPointsBefore =
+                int(transforms->observations.at(0).size());
 
             old_pyramid = pyramid;
 
@@ -174,23 +191,66 @@ public:
                     }
                 });
 
+            trackStats.mPyramidSeconds = tTotal.elapsed();
+
             OpticalFlowResult::Ptr new_transforms;
             new_transforms.reset(new OpticalFlowResult);
             new_transforms->observations.resize(calib.intrinsics.size());
             new_transforms->t_ns = t_ns;
 
+            Timer tTrack;
             for (size_t i = 0; i < calib.intrinsics.size(); i++) {
                 trackPoints(old_pyramid->at(i), pyramid->at(i),
                             transforms->observations[i],
-                            new_transforms->observations[i]);
+                            new_transforms->observations[i], &trackStats);
+            }
+            trackStats.mTrackSeconds = tTrack.elapsed();
+
+            // Flow magnitude over the surviving tracks, measured before
+            // `transforms` is advanced to the new frame.
+            for (const auto& kv : new_transforms->observations.at(0)) {
+                auto itOld = transforms->observations.at(0).find(kv.first);
+                if (itOld == transforms->observations.at(0).end()) continue;
+                const double d = (kv.second.translation() -
+                                  itOld->second.translation())
+                                     .norm();
+                trackStats.mFlowSum += d;
+                if (d > trackStats.mFlowMax) trackStats.mFlowMax = d;
             }
 
             transforms = new_transforms;
             transforms->input_images = new_img_vec;
 
-            addPoints();
-            filterPoints();
+            Timer tDetect;
+            numDetected = addPoints();
+            numEpipolarRejected = filterPoints();
+            trackStats.mDetectSeconds = tDetect.elapsed();
         }
+
+        trackStats.mDetected = numDetected;
+        trackStats.mEpipolarRejected = numEpipolarRejected;
+        trackStats.mOut = int(transforms->observations.at(0).size());
+        trackStats.mDtSeconds =
+            prevFrameTNs < 0 ? 0.0 : double(curr_t_ns - prevFrameTNs) * 1e-9;
+        trackStats.mTotalSeconds = tTotal.elapsed();
+
+        const int tracked = trackStats.mTracked.load();
+        mpLogger->AddOpticalFlowFrame(
+            curr_t_ns, int64_t(frame_counter), trackStats.mDtSeconds,
+            trackStats.mPointsBefore, trackStats.mAttempted.load(), tracked,
+            trackStats.mForwardFailed.load(),
+            trackStats.mBackwardFailed.load(),
+            trackStats.mRecoveryRejected.load(), trackStats.mDetected,
+            trackStats.mEpipolarRejected, trackStats.mOut,
+            tracked ? trackStats.mFlowSum / double(tracked) : 0.0,
+            trackStats.mFlowMax);
+        mpLogger->PrintOpticalFlowFrame();
+
+        mpLogger->AddOpticalFlowTiming(
+            curr_t_ns, trackStats.mPyramidSeconds, trackStats.mTrackSeconds,
+            trackStats.mDetectSeconds, trackStats.mTotalSeconds,
+            int(input_queue.size()));
+        mpLogger->PrintOpticalFlowTiming();
 
         frame_counter++;
         return transforms;
@@ -201,9 +261,10 @@ public:
         const basalt::ManagedImagePyr<uint16_t>& pyr_2,
         const Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>&
             transform_map_1,
-        Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>& transform_map_2)
-        const {
+        Eigen::aligned_map<KeypointId, Eigen::AffineCompact2f>& transform_map_2,
+        OpticalFlowTrackStats* stats = nullptr) const {
         size_t num_points = transform_map_1.size();
+        if (stats) stats->mAttempted += int(num_points);
 
         std::vector<KeypointId> ids;
         Eigen::aligned_vector<Eigen::AffineCompact2f> init_vec;
@@ -242,8 +303,15 @@ public:
 
                         if (dist2 < config.optical_flow_max_recovered_dist2) {
                             result[id] = transform_2;
+                            if (stats) stats->mTracked++;
+                        } else if (stats) {
+                            stats->mRecoveryRejected++;
                         }
+                    } else if (stats) {
+                        stats->mBackwardFailed++;
                     }
+                } else if (stats) {
+                    stats->mForwardFailed++;
                 }
             }
         };
@@ -326,7 +394,7 @@ public:
         return patch_valid;
     }
 
-    void addPoints() {
+    int addPoints() {
         Eigen::aligned_vector<Eigen::Vector2d> pts0;
 
         for (const auto& kv : transforms->observations.at(0)) {
@@ -359,10 +427,12 @@ public:
                 transforms->observations.at(1).emplace(kv);
             }
         }
+
+        return int(kd.corners.size());
     }
 
-    void filterPoints() {
-        if (calib.intrinsics.size() < 2) return;
+    int filterPoints() {
+        if (calib.intrinsics.size() < 2) return 0;
 
         std::set<KeypointId> lm_to_remove;
 
@@ -401,6 +471,8 @@ public:
         for (int id : lm_to_remove) {
             transforms->observations.at(1).erase(id);
         }
+
+        return int(lm_to_remove.size());
     }
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -423,6 +495,7 @@ private:
     std::shared_ptr<std::thread> processing_thread;
 
     bool mpUseProducerConsumerArchitecture;
+    Logger::Ptr mpLogger;
 };
 
 }  // namespace basalt

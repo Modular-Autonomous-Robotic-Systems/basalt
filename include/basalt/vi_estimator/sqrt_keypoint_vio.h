@@ -38,7 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <basalt/vi_estimator/sqrt_ba_base.h>
 #include <basalt/vi_estimator/vio_estimator.h>
 
-#include <basalt/utils/time_utils.hpp>
+#include <basalt/utils/logger.h>
 #include <mutex>
 #include <thread>
 
@@ -90,7 +90,8 @@ public:
     SqrtKeypointVioEstimator(const Eigen::Vector3d& g,
                              const basalt::Calibration<double>& calib_,
                              const VioConfig& config,
-                             bool useProducerConsumerArchitecure);
+                             bool useProducerConsumerArchitecure,
+                             const Logger::Ptr& logger = nullptr);
 
     void initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
                     const Eigen::Vector3d& vel_w_i, const Eigen::Vector3d& bg,
@@ -116,10 +117,12 @@ public:
 
     typename PoseVelBiasState<Scalar>::Ptr measure(
         const OpticalFlowResult::Ptr& opt_flow_meas,
-        const typename IntegratedImuMeasurement<Scalar>::Ptr& meas);
+        const typename IntegratedImuMeasurement<Scalar>::Ptr& meas,
+        double imuDrainSeconds, double processFrameSoFar);
 
     typename PoseVelBiasState<Scalar>::Ptr ProcessFrame(
-        OpticalFlowResult::Ptr& curr_frame);
+        OpticalFlowResult::Ptr& curr_frame,
+        std::optional<Sophus::SE3d> gtcw = std::nullopt);
 
     // int64_t propagate();
     // void addNewState(int64_t data_t_ns);
@@ -259,6 +262,7 @@ private:
     size_t max_kfs;
 
     SE3 T_w_i_init;
+    std::optional<Sophus::SE3d> mpCurrentGTPose;
 
     bool initialized;
     bool opt_started;
@@ -271,9 +275,7 @@ private:
 
     std::shared_ptr<std::thread> processing_thread;
 
-    // timing and stats
-    ExecutionStats stats_all_;
-    ExecutionStats stats_sums_;
+    Logger::Ptr mpLogger;
     bool mpUseProducerConsumerArchitecture = false;
     typename ImuData<Scalar>::Ptr imuData;
     // Deadline for the blocking pop, so a stack brought up without an inertial

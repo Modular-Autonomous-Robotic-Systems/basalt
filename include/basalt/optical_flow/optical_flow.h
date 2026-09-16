@@ -35,6 +35,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
 #include <basalt/io/dataset_io.h>
+#include <basalt/utils/logger.h>
 #include <basalt/utils/vio_config.h>
 #include <tbb/concurrent_queue.h>
 
@@ -87,6 +88,7 @@ class OpticalFlowFactory {
 public:
     static OpticalFlowBase::Ptr getOpticalFlow(
         const VioConfig& config, const Calibration<double>& cam,
-        bool useProducerConsumerArchitecture = false);
+        bool useProducerConsumerArchitecture = false,
+        const Logger::Ptr& logger = nullptr);
 };
 }  // namespace basalt

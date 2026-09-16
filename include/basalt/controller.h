@@ -7,6 +7,7 @@
 #include <basalt/visualisation/utils.h>  // basalt::GtPose
 
 #include <basalt/calibration/calibration.hpp>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -33,12 +34,16 @@ public:
 
     // Initialize mid-flight with specific state. The trailing
     // enableVisualisation flag arms the visualisation taps and is the single
-    // source of truth for whether the GUI is required.
+    // source of truth for whether the GUI is required. Empty logDirectory
+    // disables the comma separated logger sink; the console sink follows
+    // vio_config_.vio_debug regardless.
     void initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
                     const Eigen::Vector3d& vel_w_i, const Eigen::Vector3d& bg,
                     const Eigen::Vector3d& ba,
                     bool useProducerConsumerArchitecture = false,
-                    bool enableVisualisation = false);
+                    bool enableVisualisation = false,
+                    const std::string& logDirectory = std::string(),
+                    bool alignToGroundTruth = false);
 
     void GrabImage(basalt::OpticalFlowInput::Ptr data);
     void GrabIMU(basalt::ImuData<double>::Ptr data);
@@ -60,6 +65,7 @@ public:
     basalt::Calibration<double>& GetCalibration();
 
     bool IsVisualisationEnabled() const;
+    bool IsGroundTruthAligned() const;
     void SetGroundTruthVisualisationQueue(
         tbb::concurrent_bounded_queue<basalt::GtPose>* queue);
 
@@ -84,6 +90,8 @@ private:
     tbb::concurrent_bounded_queue<basalt::Keyframe::Ptr> local_map_kf_queue_;
     std::shared_ptr<basalt::LocalMapper> local_mapper_;
 
+    basalt::Logger::Ptr mpLogger;
+
     // Member for latest pose, updated by an internal thread
     basalt::PoseVelBiasState<double>::Ptr current_latest_pose_;
     mutable std::mutex pose_mutex_;
@@ -100,7 +108,20 @@ private:
     tbb::concurrent_bounded_queue<basalt::GtPose>* mvpGroundTruthQueue =
         nullptr;
 
+    bool mpAlignToGroundTruth = false;
+    bool mpGroundTruthSeeded = false;
+
     int64_t mpCurrentFrameTime;
+
+    // Inertial ingest counters, reported once per `kImuLogPeriod` samples
+    // under `vio_debug`.
+    static constexpr int64_t kImuLogPeriod = 200;
+    int64_t mpImuSampleCount = 0;
+    int64_t mpImuLastTNs = -1;
+    int64_t mpImuWindowFirstTNs = -1;
+    int64_t mpImuWindowMaxGapNs = 0;
+    int64_t mpImuNonMonotonic = 0;
+    std::chrono::steady_clock::time_point mpImuWindowWallStart{};
 };
 
 }  // namespace basalt

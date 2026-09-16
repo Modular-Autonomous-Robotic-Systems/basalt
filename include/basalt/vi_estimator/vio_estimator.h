@@ -38,6 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <basalt/utils/imu_types.h>
 
 #include <atomic>
+#include <optional>
 #include <type_traits>
 
 #include "basalt/imu/imu_types.h"
@@ -134,7 +135,8 @@ public:
     virtual void addVisionToQueue(const OpticalFlowResult::Ptr& data) = 0;
 
     virtual typename PoseVelBiasState<Scalar>::Ptr ProcessFrame(
-        OpticalFlowResult::Ptr& curr_frame) = 0;
+        OpticalFlowResult::Ptr& curr_frame,
+        std::optional<Sophus::SE3d> gtcw = std::nullopt) = 0;
 
 protected:
     OpticalFlowResult::Ptr prev_frame = nullptr;
@@ -147,7 +149,8 @@ public:
     static typename VioEstimatorBase<Scalar>::Ptr getVioEstimator(
         const VioConfig& config, const Calibration<Scalar>& cam,
         const Eigen::Vector3d& g, bool use_imu,
-        bool useProducerConsumerArchitecture = false);
+        bool useProducerConsumerArchitecture = false,
+        const Logger::Ptr& logger = nullptr);
 };
 
 double alignSVD(const std::vector<int64_t>& filter_t_ns,
