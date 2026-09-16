@@ -21,6 +21,17 @@ LocalMapper::LocalMapper(const Calibration<double>& calib,
     // supports RemoveKeyframes (needed for keyframe culling).
     hash_bow_database =
         std::make_shared<HashBowStl<256>>(config.mapper_bow_num_bits);
+    // Only this estimator reads covisibility.
+    lmdb.EnableCovisibilityTracking(true);
+
+    mpMaxLocalMapSize = config.local_mapper_max_local_map_size;
+    mpMinLocalMapSize = config.local_mapper_min_local_map_size;
+    mpMinRedundantObservers = config.local_mapper_min_redundant_observers;
+    mpCullRedundancyThresh = config.local_mapper_cull_redundancy_thresh;
+    mpMinObservedForCull = config.local_mapper_min_observed_for_cull;
+    mpMaxCullPerPass = config.local_mapper_max_cull_per_pass;
+    mpOptIterations = config.local_mapper_opt_iterations;
+    mpFilterOutlierThreshold = config.local_mapper_filter_outlier_threshold;
 }
 
 LocalMapper::~LocalMapper() { Stop(); }
@@ -249,7 +260,14 @@ void LocalMapper::MapLocally() {
                       << "s" << std::endl;
 
         tStep = std::chrono::high_resolution_clock::now();
-        filterOutliers(mpFilterOutlierThreshold, 4);
+        // The hard-coded 4 deleted every landmark left
+        // with fewer than four inlier observations, and the measured histogram
+        // peaks at two and three, so it removed 150 to 250 landmarks per cycle.
+        // filterOutliers(mpFilterOutlierThreshold, 4);
+        const size_t nLmBeforeFilter = lmdb.numLandmarks();
+        filterOutliers(mpFilterOutlierThreshold, mpFilterMinObs);
+        const int64_t cycleTNs =
+            frame_poses.empty() ? 0 : frame_poses.rbegin()->first;
         tEnd = std::chrono::high_resolution_clock::now();
         if (mpVioDebugMode)
             std::cout << "[Local Mapper] filterOutliers time taken: "
@@ -417,6 +435,7 @@ void LocalMapper::CollectNewKeyframesAfterMatching() {
 // ═══════════════════════════════════════════════════════════════════
 
 void LocalMapper::MatchLocal() {
+    int neighbourPairs = 0;
     std::vector<TimeCamId> keys;
     std::unordered_map<TimeCamId, size_t> id_to_key_idx;
 
@@ -450,16 +469,22 @@ void LocalMapper::MatchLocal() {
                     kd.bow_vector, config.mapper_num_frames_to_match, results,
                     &tcid.frame_id);
 
+                double best_score = 0.0;
+                size_t above = 0;
                 for (const auto& otcid_score : results) {
-                    if (otcid_score.first.frame_id != tcid.frame_id &&
-                        otcid_score.second >
-                            config.mapper_frames_to_match_threshold) {
-                        match_pair m;
-                        m.i = i;
-                        m.j = id_to_key_idx.at(otcid_score.first);
-                        m.score = otcid_score.second;
-                        ids_to_match.emplace_back(m);
-                    }
+                    if (otcid_score.first.frame_id == tcid.frame_id) continue;
+                    best_score = std::max(best_score, otcid_score.second);
+                    if (otcid_score.second <=
+                        config.mapper_frames_to_match_threshold)
+                        continue;
+                    const auto idx_it = id_to_key_idx.find(otcid_score.first);
+                    if (idx_it == id_to_key_idx.end()) continue;
+                    ++above;
+                    match_pair m;
+                    m.i = i;
+                    m.j = idx_it->second;
+                    m.score = otcid_score.second;
+                    ids_to_match.emplace_back(m);
                 }
             }
         }
@@ -467,7 +492,46 @@ void LocalMapper::MatchLocal() {
 
     tbb::parallel_for(keys_range, compute_pairs);
 
-    auto t2 = std::chrono::high_resolution_clock::now();
+    // Temporal neighbours, added unconditionally. Bag-of-words retrieval is a
+    // place-recognition mechanism and says nothing useful about the keyframes
+    // immediately preceding the current one, which a local map already knows
+    // are its neighbours. Relying on retrieval alone left track building
+    // with no inputs. BoW Matching to be investigated later to ensure
+    // appropriate number of matches are available
+    {
+        std::set<std::pair<size_t, size_t>> already;
+        for (const auto& m : ids_to_match) already.emplace(m.i, m.j);
+
+        std::vector<TimeCamId> vOlder;
+        for (const auto& tcid : keys)
+            if (mpNewKeyframesForTracking.count(tcid.frame_id) == 0)
+                vOlder.push_back(tcid);
+        std::sort(vOlder.begin(), vOlder.end(),
+                  [](const TimeCamId& a, const TimeCamId& b) {
+                      return a.frame_id > b.frame_id;  // newest first
+                  });
+
+        size_t nNeighbourPairs = 0;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (mpNewKeyframesForTracking.count(keys[i].frame_id) == 0)
+                continue;
+            size_t taken = 0;
+            for (const TimeCamId& other : vOlder) {
+                if (taken >= mpLocalMatchNeighbours) break;
+                if (other.frame_id >= keys[i].frame_id) continue;
+                const size_t j = id_to_key_idx.at(other);
+                ++taken;
+                if (already.count({i, j})) continue;
+                match_pair m;
+                m.i = i;
+                m.j = j;
+                m.score = 0.0;  // not retrieved, admitted on adjacency
+                ids_to_match.emplace_back(m);
+                ++nNeighbourPairs;
+            }
+        }
+        neighbourPairs = int(nNeighbourPairs);
+    }
 
     if (mpVioDebugMode)
         std::cout << "[Local Mapper] Matching " << ids_to_match.size()
@@ -489,7 +553,8 @@ void LocalMapper::MatchLocal() {
             MatchData md;
 
             matchDescriptors(f1.corner_descriptors, f2.corner_descriptors,
-                             md.matches, 70, 1.2);
+                             md.matches, config.mapper_max_hamming_distance,
+                             config.mapper_second_best_test_ratio);
 
             if (static_cast<int>(md.matches.size()) >
                 config.mapper_min_matches) {
@@ -548,7 +613,7 @@ void LocalMapper::build_tracks() {
 
     if (!mpIsTrackBuilderInitialised) {
         mpTrackBuilder.Build(tbb_matches);
-        mpTrackBuilder.Filter(config.mapper_min_track_length);
+        mpTrackBuilder.Filter(2);
         feature_tracks.clear();
         mpTrackBuilder.Export(feature_tracks);
         mpIsTrackBuilderInitialised = true;
@@ -567,20 +632,34 @@ void LocalMapper::setup_opt() {
     const double min_triang_dist2 = config.mapper_min_triangulation_dist *
                                     config.mapper_min_triangulation_dist;
 
+    // Triangulation accounting. Every landmark that fails to enter lmdb does so
+    // for exactly one of these reasons, so the totals localise the failure.
+    size_t nTracks = 0, nShortTrack = 0, nAlreadyKnown = 0, nNewOk = 0;
+    size_t nNoCorners = 0, nNoHostPose = 0, nNoObsPose = 0, nShortBaseline = 0;
+    size_t nBadDepth = 0, nNoTriangulation = 0, nObsAdded = 0;
+    size_t nBehind = 0, nTooClose = 0, nNonFinite = 0, nLowParallax = 0;
+    const size_t nLandmarksBefore = lmdb.numLandmarks();
+
     // Step A — retire merged landmarks.
     for (const TrackId retired : mpRetiredTrackIds) {
         if (lmdb.landmarkExists(retired)) {
             lmdb.removeLandmark(retired);
         }
     }
+    const size_t nRetired = mpRetiredTrackIds.size();
     mpRetiredTrackIds.clear();
 
     // Step B — iterate updated feature tracks.
     for (const auto& kv : feature_tracks) {
-        if (kv.second.size() < 2) continue;
+        ++nTracks;
+        if (kv.second.size() < 2) {
+            ++nShortTrack;
+            continue;
+        }
 
         // Add landmark iff not yet known to lmdb — skip-if-exists preserves
         // optimised geometry from previous iterations.
+        if (lmdb.landmarkExists(kv.first)) ++nAlreadyKnown;
         if (!lmdb.landmarkExists(kv.first)) {
             auto it_h = kv.second.begin();
             TimeCamId tcid_h = it_h->first;
@@ -591,33 +670,84 @@ void LocalMapper::setup_opt() {
             Eigen::Vector4d pos_3d_h;
             calib.intrinsics[tcid_h.cam_id].unproject(pos_2d_h, pos_3d_h);
 
-            bool triangulated = false;
+            if (!frame_poses.count(tcid_h.frame_id)) {
+                ++nNoHostPose;
+                continue;
+            }
+            const Sophus::SE3d T_w_h =
+                frame_poses.at(tcid_h.frame_id).getPose() *
+                calib.T_i_c[tcid_h.cam_id];
+
+            std::vector<std::pair<double, decltype(kv.second.begin())>> vCands;
             for (auto it_o = std::next(it_h); it_o != kv.second.end(); ++it_o) {
+                if (feature_corners.count(it_o->first) == 0) {
+                    ++nNoCorners;
+                    continue;
+                }
+                if (!frame_poses.count(it_o->first.frame_id)) {
+                    ++nNoObsPose;
+                    continue;
+                }
+                const Sophus::SE3d T_w_o =
+                    frame_poses.at(it_o->first.frame_id).getPose() *
+                    calib.T_i_c[it_o->first.cam_id];
+                vCands.emplace_back(
+                    (T_w_h.inverse() * T_w_o).translation().squaredNorm(),
+                    it_o);
+            }
+            std::sort(
+                vCands.begin(), vCands.end(),
+                [](const auto& a, const auto& b) { return a.first > b.first; });
+
+            bool triangulated = false;
+            for (const auto& cand : vCands) {
+                auto it_o = cand.second;
                 TimeCamId tcid_o = it_o->first;
                 FeatureId fid_o = it_o->second;
-                if (feature_corners.count(tcid_o) == 0) continue;
-                if (!frame_poses.count(tcid_h.frame_id)) continue;
-                if (!frame_poses.count(tcid_o.frame_id)) continue;
 
                 Eigen::Vector2d pos_2d_o =
                     feature_corners.at(tcid_o).corners[fid_o];
                 Eigen::Vector4d pos_3d_o;
                 calib.intrinsics[tcid_o.cam_id].unproject(pos_2d_o, pos_3d_o);
 
-                Sophus::SE3d T_w_h = frame_poses.at(tcid_h.frame_id).getPose() *
-                                     calib.T_i_c[tcid_h.cam_id];
                 Sophus::SE3d T_w_o = frame_poses.at(tcid_o.frame_id).getPose() *
                                      calib.T_i_c[tcid_o.cam_id];
                 Sophus::SE3d T_h_o = T_w_h.inverse() * T_w_o;
 
-                if (T_h_o.translation().squaredNorm() < min_triang_dist2)
+                if (cand.first < min_triang_dist2) {
+                    ++nShortBaseline;
+                    continue;  // sorted descending, but keep the accounting
+                }
+
+                // ORB-SLAM3's parallax gate
+                // Near-parallel bearing rays make the
+                // linear solve ill-conditioned, and it then returns a point
+                // behind the camera or at absurd depth rather than failing.
+                const Eigen::Vector3d ray_h = pos_3d_h.head<3>().normalized();
+                const Eigen::Vector3d ray_o =
+                    (T_h_o.so3() * pos_3d_o.head<3>()).normalized();
+                if (ray_h.dot(ray_o) > mpMaxCosParallax) {
+                    ++nLowParallax;
                     continue;
+                }
 
                 Eigen::Vector4d pos_3d =
                     triangulate(pos_3d_h.head<3>(), pos_3d_o.head<3>(), T_h_o);
-                if (!pos_3d.array().isFinite().all() || pos_3d[3] <= 0 ||
-                    pos_3d[3] > 2.0)
+                if (!pos_3d.array().isFinite().all()) {
+                    ++nNonFinite;
+                    ++nBadDepth;
                     continue;
+                }
+                if (pos_3d[3] <= 0) {
+                    ++nBehind;
+                    ++nBadDepth;
+                    continue;
+                }
+                if (pos_3d[3] > mpMaxInvDist) {
+                    ++nTooClose;
+                    ++nBadDepth;
+                    continue;
+                }
 
                 Keypoint<Scalar> kpt;
                 kpt.host_kf_id = tcid_h;
@@ -625,9 +755,13 @@ void LocalMapper::setup_opt() {
                 kpt.inv_dist = pos_3d[3];
                 lmdb.addLandmark(kv.first, kpt);
                 triangulated = true;
+                ++nNewOk;
                 break;
             }
-            if (!triangulated) continue;
+            if (!triangulated) {
+                ++nNoTriangulation;
+                continue;
+            }
         }
 
         // Add observations (idempotent — safe to repeat).
@@ -638,6 +772,7 @@ void LocalMapper::setup_opt() {
             ko.kpt_id = kv.first;
             ko.pos = feature_corners.at(obs_kv.first).corners[obs_kv.second];
             lmdb.addObservation(obs_kv.first, ko);
+            ++nObsAdded;
         }
     }
 }
@@ -646,84 +781,145 @@ void LocalMapper::setup_opt() {
 // ComputeCovisibility
 // ═══════════════════════════════════════════════════════════════════
 
-size_t LocalMapper::ComputeCovisibility(int64_t tid_a, int64_t tid_b,
-                                        int num_cameras) {
-    size_t covisibility = 0;
-    for (int i = 0; i < num_cameras; i++) {
-        for (int j = 0; j < num_cameras; j++) {
-            covisibility += lmdb.getObservationsCountForPair(
-                TimeCamId(tid_a, i), TimeCamId(tid_b, j));
-            covisibility += lmdb.getObservationsCountForPair(
-                TimeCamId(tid_b, j), TimeCamId(tid_a, i));
-        }
-    }
-    return covisibility;
-}
+// size_t LocalMapper::ComputeCovisibility(int64_t tid_a, int64_t tid_b,
+//                                         int num_cameras) {
+//     size_t covisibility = 0;
+//     for (int i = 0; i < num_cameras; i++) {
+//         for (int j = 0; j < num_cameras; j++) {
+//             covisibility += lmdb.getObservationsCountForPair(
+//                 TimeCamId(tid_a, i), TimeCamId(tid_b, j));
+//             covisibility += lmdb.getObservationsCountForPair(
+//                 TimeCamId(tid_b, j), TimeCamId(tid_a, i));
+//         }
+//     }
+//     return covisibility;
+// }
 
 // ═══════════════════════════════════════════════════════════════════
 // SelectKeyframeToCull
 // ═══════════════════════════════════════════════════════════════════
 
+ObservedByFrameMap LocalMapper::BuildObservedSets() const {
+    ObservedByFrameMap seen;
+    for (const auto& [host, targets] : lmdb.getObservations())
+        for (const auto& [target, lms] : targets)
+            seen[target.frame_id].insert(lms.begin(), lms.end());
+    return seen;
+}
+
+CovisMatrix LocalMapper::BuildCovisibilityMatrix(
+    const ObservedByFrameMap& seen) const {
+    CovisMatrix m;
+    for (auto it = seen.begin(); it != seen.end(); ++it)
+        for (auto jt = std::next(it); jt != seen.end(); ++jt) {
+            std::vector<KeypointId> shared;
+            std::set_intersection(it->second.begin(), it->second.end(),
+                                  jt->second.begin(), jt->second.end(),
+                                  std::back_inserter(shared));
+            if (shared.empty()) continue;
+            m[it->first][jt->first] = shared.size();
+            m[jt->first][it->first] = shared.size();
+        }
+    return m;
+}
+
+double LocalMapper::RedundancyScore(int64_t kf, const ObservedByFrameMap& seen,
+                                    const std::set<int64_t>& alive,
+                                    size_t& nObservedOut) const {
+    const ObservedByFrameMap::const_iterator it = seen.find(kf);
+    if (it == seen.end() || it->second.empty()) {
+        nObservedOut = 0;
+        return 0.0;
+    }
+    size_t redundant = 0;
+    for (const KeypointId lm : it->second) {
+        size_t others = 0;
+        const ObserverFrameMap& observers = lmdb.GetObserverFrames(lm);
+        for (ObserverFrameMap::const_iterator f = observers.begin();
+             f != observers.end(); ++f) {
+            if (f->first == kf || alive.count(f->first) == 0) continue;
+            if (++others >= mpMinRedundantObservers) break;
+        }
+        if (others >= mpMinRedundantObservers) ++redundant;
+    }
+    nObservedOut = it->second.size();
+    return static_cast<double>(redundant) / static_cast<double>(nObservedOut);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SelectKeyframesToCull
+// ═══════════════════════════════════════════════════════════════════
+
 bool LocalMapper::SelectKeyframesToCull(std::vector<int64_t>& keyframesToCull) {
-    // if (frame_poses.size() <= 5) return false;  // keep minimum map
+    if (frame_poses.size() <= mpMinLocalMapSize) return false;
+
+    const ObservedByFrameMap& seen = lmdb.GetObservedByFrame();
+
+    if (mpVioDebugMode) {
+        const ObservedByFrameMap ref_seen = BuildObservedSets();
+        const CovisMatrix ref_covis = BuildCovisibilityMatrix(ref_seen);
+        const bool ok = ref_seen == seen && ref_covis == lmdb.GetCovisibility();
+        const int64_t covisTNs =
+            frame_poses.empty() ? 0 : frame_poses.rbegin()->first;
+        mpLogger->AddMapCovis(
+            covisTNs, ok, int(seen.size()), int(ref_seen.size()),
+            int(lmdb.GetCovisibility().size()), int(ref_covis.size()));
+        mpLogger->PrintMapCovis();
+    }
 
     std::vector<int64_t> ordered;
     ordered.reserve(frame_poses.size());
-    for (const auto& kv : frame_poses) {
-        ordered.push_back(kv.first);
-    }
+    for (const auto& kv : frame_poses) ordered.push_back(kv.first);
     std::sort(ordered.begin(), ordered.end());
-    // We want to cull the keyframes with the most redundant keyframes without
-    // any preferential treatment for the latest keyframes const size_t
-    // keep_recent =
-    //     std::min<size_t>(mpNewKeyframesForTracking.size(), ordered.size());
-    const size_t eligible_end = ordered.size();  // - keep_recent;
 
-    const auto& obs = lmdb.getObservations();
+    const size_t keep_recent =
+        std::min<size_t>(mpNewKeyframesForTracking.size(), ordered.size());
+    const size_t eligible_end = ordered.size() - keep_recent;
+    const size_t max_cull =
+        std::min(frame_poses.size() - mpMinLocalMapSize, mpMaxCullPerPass);
 
-    // Criterion 1 — redundancy.
-    for (size_t i = 0; i < eligible_end; ++i) {
-        const int64_t a = ordered[i];
-        size_t total_a = 0;
-        for (size_t cam = 0; cam < calib.intrinsics.size(); ++cam) {
-            TimeCamId tcid_a(a, cam);
-            auto obs_it = obs.find(tcid_a);
-            if (obs_it != obs.end()) {
-                for (const auto& [target, kpt_set] : obs_it->second) {
-                    total_a += kpt_set.size();
-                }
-            }
-            // total_a +=
-            // lmdb.getNonLandmarkObservationsCountForKeyFrame(tcid_a);
-        }
-        if (total_a == 0) continue;
+    std::set<int64_t> alive(ordered.begin(), ordered.end());
 
-        // Check covisibility against every other KF.
-        for (size_t j = i; j < ordered.size(); ++j) {
-            if (i == j) continue;
-            const int64_t b = ordered[j];
-            const size_t covis =
-                ComputeCovisibility(a, b, calib.intrinsics.size());
-            // std::cout << "[Local Mapper] Computed covisibility: "
-            //           << static_cast<double>(covis) /
-            //                  static_cast<double>(total_a)
-            //           << std::endl;
-            if (static_cast<double>(covis) / static_cast<double>(total_a) >=
-                mpCullCovisibilityThresh) {
-                keyframesToCull.push_back(a);
-                break;
+    // Remove one keyframe at a time, always the most redundant survivor, and
+    // re-score against `alive` after each removal. Re-scoring reproduces
+    // ORB-SLAM3's live-state semantics inside a batch selection, and it is what
+    // stops both members of a mutually covisible pair being culled together.
+    while (keyframesToCull.size() < max_cull) {
+        int64_t worst = -1;
+        double worstScore = mpCullRedundancyThresh;
+        size_t worstObserved = 0;
+        for (size_t i = 0; i < eligible_end; ++i) {
+            const int64_t a = ordered[i];
+            if (!alive.count(a)) continue;
+            size_t nObserved = 0;
+            const double score = RedundancyScore(a, seen, alive, nObserved);
+            if (nObserved < mpMinObservedForCull) continue;
+            if (score > worstScore) {
+                worstScore = score;
+                worst = a;
+                worstObserved = nObserved;
             }
         }
+        if (worst < 0) break;
+        if (mpVioDebugMode)
+            std::cout << "[Local Mapper][cull-select] redundancy pick kf="
+                      << worst << " score=" << worstScore
+                      << " observed=" << worstObserved << std::endl;
+        keyframesToCull.push_back(worst);
+        alive.erase(worst);
     }
 
-    // Criterion 2 — capacity (oldest eligible KF).
+    // Criterion 2 — capacity. Retained because a keyframe that observes nothing
+    // scores zero under the redundancy criterion and is exempted by
+    // mpMinObservedForCull, so this is the only path that can remove it.
+    bool capacityRuleFired = false;
     if (frame_poses.size() > mpMaxLocalMapSize && keyframesToCull.empty()) {
         if (mpVioDebugMode)
-            std::cout
-                << "[Local Mapper] No Keyframe Found with Covisibility below "
-                   "threshold; Culling Last Frame"
-                << std::endl;
+            std::cout << "[Local Mapper][cull-select] capacity rule, culling "
+                         "oldest keyframe"
+                      << std::endl;
         keyframesToCull.push_back(ordered.front());
+        capacityRuleFired = true;
     }
     if (keyframesToCull.empty()) {
         return false;
@@ -733,6 +929,14 @@ bool LocalMapper::SelectKeyframesToCull(std::vector<int64_t>& keyframesToCull) {
                       << " keyframes to cull" << std::endl;
         return true;
     }
+
+    if (mpVioDebugMode) {
+        std::cout << "[Local Mapper][cull-select] selected [";
+        for (const int64_t kf : keyframesToCull) std::cout << kf << " ";
+        std::cout << "]" << std::endl;
+    }
+
+    return !keyframesToCull.empty();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -758,8 +962,14 @@ int64_t LocalMapper::FindBestRehostKf(int64_t culled_kf, TrackId lm_id,
         }
         if (!observed) continue;
 
-        const size_t cv =
-            ComputeCovisibility(culled_kf, c, calib.intrinsics.size());
+        size_t cv = 0;
+        const CovisMatrix& covis_matrix = lmdb.GetCovisibility();
+        const CovisMatrix::const_iterator row = covis_matrix.find(c);
+        if (row != covis_matrix.end())
+            for (CovisRow::const_iterator cell = row->second.begin();
+                 cell != row->second.end(); ++cell)
+                if (candidates.count(cell->first)) cv += cell->second;
+
         if (cv > best_covis) {
             best_covis = cv;
             best = c;
@@ -774,11 +984,17 @@ int64_t LocalMapper::FindBestRehostKf(int64_t culled_kf, TrackId lm_id,
 
 void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
                                  int64_t new_host_kf) {
+    const int64_t rehostTNs =
+        frame_poses.empty() ? 0 : frame_poses.rbegin()->first;
     const Keypoint<double>& old_kpt = lmdb.getLandmark(lm_id);
 
-    // Preserve observations before removeLandmark tears them down.
+    // Preserve observations and the existing geometry before removeLandmark
+    // tears them down. The geometry feeds the reprojection fallback below.
     Eigen::aligned_map<TimeCamId, Eigen::Vector2d> obs_copy(old_kpt.obs.begin(),
                                                             old_kpt.obs.end());
+    const TimeCamId old_host_tcid = old_kpt.host_kf_id;
+    const Eigen::Vector2d old_direction = old_kpt.direction;
+    const double old_inv_dist = old_kpt.inv_dist;
 
     // Choose the cam_id of the new host that actually observed this landmark.
     // Prefer camera 0 for determinism when both cameras observed it.
@@ -793,7 +1009,9 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
                 break;
             }
         }
-        if (!found_obs) return;
+        if (!found_obs) {
+            return;
+        }
     } else if (obs_copy.count(new_host_tcid) == 0) {
         return;
     }
@@ -802,8 +1020,9 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
     const Eigen::Vector2d& pos_2d_new = obs_copy.at(new_host_tcid);
     Eigen::Vector4d pos_3d_new_hom;
     if (!calib.intrinsics[new_host_tcid.cam_id].unproject(pos_2d_new,
-                                                          pos_3d_new_hom))
+                                                          pos_3d_new_hom)) {
         return;
+    }
 
     Sophus::SE3d T_w_newh = frame_poses.at(new_host_kf).getPose() *
                             calib.T_i_c[new_host_tcid.cam_id];
@@ -836,6 +1055,31 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
         break;
     }
     if (!triangulated) {
+        const Sophus::SE3d T_w_oldh = frame_poses.at(culled_kf).getPose() *
+                                      calib.T_i_c[old_host_tcid.cam_id];
+        Eigen::Vector4d p_oldh =
+            StereographicParam<double>::unproject(old_direction);
+        p_oldh[3] = old_inv_dist;
+        Eigen::Vector4d p_newh =
+            (T_w_newh.inverse() * T_w_oldh).matrix() * p_oldh;
+        // triangulate() guarantees a unit-length direction head with the
+        // inverse distance in the last component, and the rest of the pipeline
+        // relies on that. Rescaling the homogeneous point leaves the 3D
+        // position unchanged while restoring the invariant.
+        const double dir_norm = p_newh.head<3>().norm();
+        if (dir_norm > 0) p_newh /= dir_norm;
+        if (p_newh.array().isFinite().all() && dir_norm > 0 && p_newh[3] > 0 &&
+            p_newh[3] <= 2.0) {
+            new_kpt.direction = StereographicParam<double>::project(p_newh);
+            new_kpt.inv_dist = p_newh[3];
+            triangulated = true;
+            mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
+                                   int(obs_copy.size()), 0, 2, 0);
+            mpLogger->PrintMapRehost();
+        }
+    }
+
+    if (!triangulated) {
         lmdb.removeLandmark(lm_id);
         return;
     }
@@ -846,7 +1090,6 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
     int obs_added = 0;
     for (const auto& o : obs_copy) {
         if (o.first.frame_id == culled_kf) continue;
-        if (o.first == new_host_tcid) continue;
         KeypointObservation<double> ko;
         ko.kpt_id = lm_id;
         ko.pos = o.second;
@@ -882,8 +1125,18 @@ void LocalMapper::CullRedundantKeyframes() {
 
     // ─── Step 1 — rehost landmarks hosted by culled KF ─────────────────
     for (int64_t culled : keyframesToCull) {
+        const size_t nLmBeforeKf = lmdb.numLandmarks();
+        const int mapBefore = int(frame_poses.size());
+        size_t nRehosted = 0, nNoHost = 0;
+
+        // A keyframe still queued for culling must not become a host, or the
+        // landmark pays the rehost cost again when that keyframe's turn comes.
+        // frame_poses.erase only removes victims already processed.
+        const std::set<int64_t> doomed(keyframesToCull.begin(),
+                                       keyframesToCull.end());
         std::set<int64_t> candidates;
-        for (const auto& kv : frame_poses) candidates.insert(kv.first);
+        for (const auto& kv : frame_poses)
+            if (!doomed.count(kv.first)) candidates.insert(kv.first);
 
         // Collect unique landmark IDs hosted by the culled KF via the
         // observations index — avoids getLandmarksForHost (which throws on
@@ -905,10 +1158,12 @@ void LocalMapper::CullRedundantKeyframes() {
         for (const TrackId lm : hosted_lm_ids) {
             const int64_t new_host = FindBestRehostKf(culled, lm, candidates);
             if (new_host < 0) {
+                ++nNoHost;
                 if (lmdb.landmarkExists(lm)) {
                     landmarksToRemove.push_back(lm);
                 }
             } else {
+                ++nRehosted;
                 RehostLandmark(lm, culled, new_host);
             }
         }
@@ -919,19 +1174,6 @@ void LocalMapper::CullRedundantKeyframes() {
         // ─── Step 2 — remove remaining observations of culled KF ───────────
         lmdb.removeFrame(culled);
 
-        // ─── Step 2b — drop landmarks now below min_num_obs ─────────────────
-        const auto& landmarks = lmdb.getLandmarks();
-        landmarksToRemove.clear();
-        for (auto it = landmarks.begin(); it != landmarks.end(); ++it) {
-            if (lmdb.numObservations(it->first) < 2) {
-                if (lmdb.landmarkExists(it->first)) {
-                    landmarksToRemove.push_back(it->first);
-                }
-            }
-        }
-        for (const KeypointId id : landmarksToRemove) {
-            lmdb.removeLandmark(id);
-        }
 
         // ─── Step 3 — prune NFR factors referencing culled KF ──────────────
         rel_pose_factors.erase(

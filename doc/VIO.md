@@ -1218,7 +1218,7 @@ The null-space vector corresponding to the smallest singular value is returned b
 **Stereographic landmark parameterisation.** The resulting $(\mathbf{d}, \rho)$ pair with $\|\mathbf{d}\|=1$ lies on the unit sphere (a 2-manifold) times the positive real line. To give the direction a *minimal* two-parameter representation, Basalt uses a stereographic projection `StereographicParam::project` (`thirdparty/basalt-headers/include/basalt/camera/stereographic_param.hpp:79`):
 
 $$
-\pi(\mathbf{d}) = \left[\frac{d_x}{d+d_z},\; \frac{d_y}{d+d_z}\right]^T, \quad d = \|\mathbf{d}\|.
+\pi(\mathbf{d}) = \left[\frac{d_x}{d+d_z},\; \frac{d_y}{d+d_z}\right]^T, \quad d = |\mathbf{d}|.
 $$
 
 The landmark is stored as `(Vec2 direction, Scalar inv_dist)` in `Keypoint<Scalar>` (`include/basalt/vi_estimator/landmark_database.h:53`). This gives 3 DOF per landmark instead of the 4 of a homogeneous point, eliminating the gauge freedom of the 4-vector's scale. Stereographic projection is smooth and bijective except at the antipodal point $-\mathbf{z}$ — a benign restriction because landmarks always lie in front of the host camera ($d_z > 0$).

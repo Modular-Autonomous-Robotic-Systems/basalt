@@ -36,6 +36,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <basalt/vi_estimator/landmark_database.h>
 
 #include <algorithm>
+#include <iterator>
+#include <set>
 
 namespace basalt {
 
@@ -109,8 +111,12 @@ std::vector<const Keypoint<Scalar_>*>
 LandmarkDatabase<Scalar_>::getLandmarksForHost(const TimeCamId& tcid) const {
     std::vector<const Keypoint<Scalar>*> res;
 
+    // A landmark appears in one row per observing keyframe, so emitting it per
+    // row publishes it once per observation
+    std::set<KeypointId> seen;
     for (const auto& [k, obs] : observations.at(tcid))
-        for (const auto& v : obs) res.emplace_back(&kpts.at(v));
+        for (const auto& v : obs)
+            if (seen.insert(v).second) res.emplace_back(&kpts.at(v));
 
     return res;
 }
@@ -121,7 +127,16 @@ void LandmarkDatabase<Scalar_>::addObservation(
     auto it = kpts.find(o.kpt_id);
     BASALT_ASSERT(it != kpts.end());
 
-    it->second.obs[tcid_target] = o.pos;
+    // setup_opt re-adds every observation of every live
+    // track on every cycle, so the covisibility hook needs the novelty that a
+    // plain assignment discards. The else branch reproduces this line.
+    // it->second.obs[tcid_target] = o.pos;
+    const std::pair<typename Keypoint<Scalar>::MapIter, bool> ins =
+        it->second.obs.emplace(tcid_target, o.pos);
+    if (ins.second)
+        CovisAddObserver(it->first, tcid_target);
+    else
+        ins.first->second = o.pos;
 
     observations[it->second.host_kf_id][tcid_target].insert(it->first);
 }
@@ -208,6 +223,10 @@ template <class Scalar_>
 typename LandmarkDatabase<Scalar_>::MapIter
 LandmarkDatabase<Scalar_>::removeLandmarkHelper(
     LandmarkDatabase<Scalar>::MapIter it) {
+    // Ahead of the early return below. The covisibility state is keyed on
+    // frames rather than hosts, so it must be torn down on that path too.
+    CovisRemoveLandmark(it->first);
+
     auto host_it = observations.find(it->second.host_kf_id);
 
     // host_it may be end() in two legitimate situations:
@@ -242,6 +261,8 @@ typename Keypoint<Scalar_>::MapIter
 LandmarkDatabase<Scalar_>::removeLandmarkObservationHelper(
     LandmarkDatabase<Scalar>::MapIter it,
     typename Keypoint<Scalar>::MapIter it2) {
+    CovisRemoveObserver(it->first, it2->first);
+
     auto host_it = observations.find(it->second.host_kf_id);
     auto target_it = host_it->second.find(it2->first);
     target_it->second.erase(it->first);
@@ -274,6 +295,122 @@ void LandmarkDatabase<Scalar_>::removeObservations(
     if (it->second.obs.size() < min_num_obs) {
         removeLandmarkHelper(it);
     }
+}
+
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::EnableCovisibilityTracking(bool enable) {
+    mpCovisEnabled = enable;
+}
+
+template <class Scalar_>
+const CovisMatrix& LandmarkDatabase<Scalar_>::GetCovisibility() const {
+    return mpCovisibility;
+}
+
+template <class Scalar_>
+const ObservedByFrameMap& LandmarkDatabase<Scalar_>::GetObservedByFrame()
+    const {
+    return mpObservedByFrame;
+}
+
+template <class Scalar_>
+const ObserverFrameMap& LandmarkDatabase<Scalar_>::GetObserverFrames(
+    KeypointId lm_id) const {
+    static const ObserverFrameMap kEmpty;
+    const ObserverIndex::const_iterator it = mpObserverFrames.find(lm_id);
+    return it == mpObserverFrames.end() ? kEmpty : it->second;
+}
+
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisDecrementDirected(FrameId from,
+                                                       FrameId to) {
+    const CovisMatrix::iterator row = mpCovisibility.find(from);
+    if (row == mpCovisibility.end()) return;
+    const CovisRow::iterator cell = row->second.find(to);
+    if (cell == row->second.end()) return;
+    BASALT_ASSERT(cell->second > 0);
+    if (--cell->second == 0) row->second.erase(cell);
+    if (row->second.empty()) mpCovisibility.erase(row);
+}
+
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisDecrementPair(FrameId a, FrameId b) {
+    CovisDecrementDirected(a, b);
+    CovisDecrementDirected(b, a);
+}
+
+// A stereo pair contributes one observer frame and not two, so the covisibility
+// counters move only on the zero to one transition of the camera count.
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisAddObserver(KeypointId lm_id,
+                                                 const TimeCamId& tcid) {
+    if (!mpCovisEnabled) return;
+    ObserverFrameMap& frames = mpObserverFrames[lm_id];
+    if (++frames[tcid.frame_id] > 1) return;
+
+    // The size guard is not an optimisation. operator[] materialises the row,
+    // so on a landmark's first observation it would leave an empty row that a
+    // rebuild from lmdb never produces.
+    if (frames.size() > 1) {
+        CovisRow& row = mpCovisibility[tcid.frame_id];
+        for (ObserverFrameMap::const_iterator f = frames.begin();
+             f != frames.end(); ++f) {
+            if (f->first == tcid.frame_id) continue;
+            ++row[f->first];
+            ++mpCovisibility[f->first][tcid.frame_id];
+        }
+    }
+    mpObservedByFrame[tcid.frame_id].insert(lm_id);
+}
+
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisRemoveObserver(KeypointId lm_id,
+                                                    const TimeCamId& tcid) {
+    if (!mpCovisEnabled) return;
+    const ObserverIndex::iterator lm_it = mpObserverFrames.find(lm_id);
+    if (lm_it == mpObserverFrames.end()) return;
+    ObserverFrameMap& frames = lm_it->second;
+    const ObserverFrameMap::iterator f_it = frames.find(tcid.frame_id);
+    if (f_it == frames.end()) return;
+    BASALT_ASSERT(f_it->second > 0);
+    if (--f_it->second > 0) return;
+    frames.erase(f_it);
+
+    for (ObserverFrameMap::const_iterator f = frames.begin(); f != frames.end();
+         ++f)
+        CovisDecrementPair(tcid.frame_id, f->first);
+
+    const ObservedByFrameMap::iterator obf =
+        mpObservedByFrame.find(tcid.frame_id);
+    if (obf != mpObservedByFrame.end()) {
+        obf->second.erase(lm_id);
+        if (obf->second.empty()) mpObservedByFrame.erase(obf);
+    }
+    if (frames.empty()) mpObserverFrames.erase(lm_it);
+}
+
+// Driven off mpObserverFrames rather than Keypoint::obs, so it stays correct
+// where the host-keyed observations index has gone stale.
+template <class Scalar_>
+void LandmarkDatabase<Scalar_>::CovisRemoveLandmark(KeypointId lm_id) {
+    if (!mpCovisEnabled) return;
+    const ObserverIndex::iterator lm_it = mpObserverFrames.find(lm_id);
+    if (lm_it == mpObserverFrames.end()) return;
+
+    const ObserverFrameMap& frames = lm_it->second;
+    for (ObserverFrameMap::const_iterator it = frames.begin();
+         it != frames.end(); ++it) {
+        for (ObserverFrameMap::const_iterator jt = std::next(it);
+             jt != frames.end(); ++jt)
+            CovisDecrementPair(it->first, jt->first);
+        const ObservedByFrameMap::iterator obf =
+            mpObservedByFrame.find(it->first);
+        if (obf != mpObservedByFrame.end()) {
+            obf->second.erase(lm_id);
+            if (obf->second.empty()) mpObservedByFrame.erase(obf);
+        }
+    }
+    mpObserverFrames.erase(lm_it);
 }
 
 // //////////////////////////////////////////////////////////////////

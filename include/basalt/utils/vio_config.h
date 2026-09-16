@@ -34,6 +34,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 namespace basalt {
@@ -41,71 +42,80 @@ namespace basalt {
 enum class LinearizationType { ABS_QR, ABS_SC, REL_SC };
 
 struct VioConfig {
-  VioConfig();
-  void load(const std::string& filename);
-  void save(const std::string& filename);
+    VioConfig();
+    void load(const std::string& filename);
+    void save(const std::string& filename);
 
-  std::string optical_flow_type;
-  int optical_flow_detection_grid_size;
-  float optical_flow_max_recovered_dist2;
-  int optical_flow_pattern;
-  int optical_flow_max_iterations;
-  int optical_flow_levels;
-  float optical_flow_epipolar_error;
-  int optical_flow_skip_frames;
+    std::string optical_flow_type;
+    int optical_flow_detection_grid_size;
+    float optical_flow_max_recovered_dist2;
+    int optical_flow_pattern;
+    int optical_flow_max_iterations;
+    int optical_flow_levels;
+    float optical_flow_epipolar_error;
+    int optical_flow_skip_frames;
 
-  LinearizationType vio_linearization_type;
-  bool vio_sqrt_marg;
+    LinearizationType vio_linearization_type;
+    bool vio_sqrt_marg;
 
-  int vio_max_states;
-  int vio_max_kfs;
-  int vio_min_frames_after_kf;
-  float vio_new_kf_keypoints_thresh;
-  bool vio_debug;
-  bool vio_extended_logging;
+    int vio_max_states;
+    int vio_max_kfs;
+    int vio_min_frames_after_kf;
+    float vio_new_kf_keypoints_thresh;
+    bool vio_debug;
+    bool vio_extended_logging;
 
-  //  double vio_outlier_threshold;
-  //  int vio_filter_iteration;
-  int vio_max_iterations;
+    //  double vio_outlier_threshold;
+    //  int vio_filter_iteration;
+    int vio_max_iterations;
 
-  double vio_obs_std_dev;
-  double vio_obs_huber_thresh;
-  double vio_min_triangulation_dist;
+    double vio_obs_std_dev;
+    double vio_obs_huber_thresh;
+    double vio_min_triangulation_dist;
 
-  bool vio_enforce_realtime;
+    bool vio_enforce_realtime;
 
-  bool vio_use_lm;
-  double vio_lm_lambda_initial;
-  double vio_lm_lambda_min;
-  double vio_lm_lambda_max;
+    bool vio_use_lm;
+    double vio_lm_lambda_initial;
+    double vio_lm_lambda_min;
+    double vio_lm_lambda_max;
 
-  bool vio_scale_jacobian;
+    bool vio_scale_jacobian;
 
-  double vio_init_pose_weight;
-  double vio_init_ba_weight;
-  double vio_init_bg_weight;
+    double vio_init_pose_weight;
+    double vio_init_ba_weight;
+    double vio_init_bg_weight;
 
-  bool vio_marg_lost_landmarks;
-  double vio_kf_marg_feature_ratio;
+    bool vio_marg_lost_landmarks;
+    double vio_kf_marg_feature_ratio;
 
-  double mapper_obs_std_dev;
-  double mapper_obs_huber_thresh;
-  int mapper_detection_num_points;
-  double mapper_num_frames_to_match;
-  double mapper_frames_to_match_threshold;
-  double mapper_min_matches;
-  double mapper_ransac_threshold;
-  double mapper_min_track_length;
-  double mapper_max_hamming_distance;
-  double mapper_second_best_test_ratio;
-  int mapper_bow_num_bits;
-  double mapper_min_triangulation_dist;
-  bool mapper_no_factor_weights;
-  bool mapper_use_factors;
+    double mapper_obs_std_dev;
+    double mapper_obs_huber_thresh;
+    int mapper_detection_num_points;
+    double mapper_num_frames_to_match;
+    double mapper_frames_to_match_threshold;
+    double mapper_min_matches;
+    double mapper_ransac_threshold;
+    double mapper_min_track_length;
+    double mapper_max_hamming_distance;
+    double mapper_second_best_test_ratio;
+    int mapper_bow_num_bits;
+    double mapper_min_triangulation_dist;
+    bool mapper_no_factor_weights;
+    bool mapper_use_factors;
 
-  bool mapper_use_lm;
-  double mapper_lm_lambda_min;
-  double mapper_lm_lambda_max;
+    bool mapper_use_lm;
+    double mapper_lm_lambda_min;
+    double mapper_lm_lambda_max;
+
+    size_t local_mapper_max_local_map_size;
+    size_t local_mapper_min_local_map_size;
+    size_t local_mapper_min_redundant_observers;
+    double local_mapper_cull_redundancy_thresh;
+    size_t local_mapper_min_observed_for_cull;
+    size_t local_mapper_max_cull_per_pass;
+    int local_mapper_opt_iterations;
+    double local_mapper_filter_outlier_threshold;
 };
 
 }  // namespace basalt

@@ -107,6 +107,15 @@ VioConfig::VioConfig() {
   mapper_use_lm = false;
   mapper_lm_lambda_min = 1e-32;
   mapper_lm_lambda_max = 1e2;
+
+  local_mapper_max_local_map_size = 30;
+  local_mapper_min_local_map_size = 8;
+  local_mapper_min_redundant_observers = 3;
+  local_mapper_cull_redundancy_thresh = 0.9;
+  local_mapper_min_observed_for_cull = 30;
+  local_mapper_max_cull_per_pass = 2;
+  local_mapper_opt_iterations = 5;
+  local_mapper_filter_outlier_threshold = 3.0;
 }
 
 void VioConfig::save(const std::string& filename) {
@@ -218,5 +227,14 @@ void serialize(Archive& ar, basalt::VioConfig& config) {
   ar(CEREAL_NVP(config.mapper_use_lm));
   ar(CEREAL_NVP(config.mapper_lm_lambda_min));
   ar(CEREAL_NVP(config.mapper_lm_lambda_max));
+
+  ar(CEREAL_NVP(config.local_mapper_max_local_map_size));
+  ar(CEREAL_NVP(config.local_mapper_min_local_map_size));
+  ar(CEREAL_NVP(config.local_mapper_min_redundant_observers));
+  ar(CEREAL_NVP(config.local_mapper_cull_redundancy_thresh));
+  ar(CEREAL_NVP(config.local_mapper_min_observed_for_cull));
+  ar(CEREAL_NVP(config.local_mapper_max_cull_per_pass));
+  ar(CEREAL_NVP(config.local_mapper_opt_iterations));
+  ar(CEREAL_NVP(config.local_mapper_filter_outlier_threshold));
 }
 }  // namespace cereal

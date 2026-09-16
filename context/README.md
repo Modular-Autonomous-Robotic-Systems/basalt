@@ -24,7 +24,7 @@ When a recorded fact turns out to be wrong, rewrite it in place so that the docu
 | `linearisation.md` | The `LinearizationBase` family read from source. Default `ABS_QR` selection, the confirmed `vio_init_ba_weight`/`vio_init_bg_weight` transposition with its authoritative index proof, why the prior needs no index remapping and where that is asserted, `MargLinData::H` being a square root factor and not a Hessian, where the square root property is kept versus spent, the landmark block storage layout and the `numQ2rows` accounting subtlety, whitening as the precondition for QR, the dead and latent code inventory, the threading split, and the proof that local mapping does not use this framework | 2026-09-02 |
 | `visualiser_pipeline.md` | `class SlamVisualiser` internals. The two palettes and why `vis_utils.h` must not be edited, the `cam_color`/`state_color` collision that hides a current-frame highlight, `states.back()` being the live edge, the Pangolin `Plotter` default `$0..$9` series and the `GuiChanged` consume-on-read trap, the panel widget dispatch and `META_FLAG_READONLY`, latest-only cache semantics and why a vanished layer is always an empty payload rather than a drop, and the frame-classification method used on the SITL recording | 2026-09-08 |
 | `imu_static_calibration.md` | calib_accel_bias (9-param) and calib_gyro_bias (12-param) model; code usage; EuRoC vs SITL values; how to calibrate a real IMU | 2026-07-13 |
-| `keyframe_driven_local_mapping.md` | The two local-mapper input queues after the 2026-09-06 driver change, `struct Keyframe` and its alignment requirement, where a keyframe is published and why the commit block rather than the threshold test, the proof that the marginalisation queue cannot deadlock the estimator, the culled-keyframe and factor-pruning invariants, the proof that estimator `frame_poses` is a subset of `kf_ids`, the dead `MargData::frame_states` loop, and the four shutdown sentinel sites | 2026-09-06 |
+| `keyframe_driven_local_mapping.md` | The two local-mapper input queues after the 2026-09-06 driver change, `struct Keyframe` and its alignment requirement, where a keyframe is published and why the commit block rather than the threshold test, the proof that the marginalisation queue cannot deadlock the estimator, the culled-keyframe and factor-pruning invariants, the proof that estimator `frame_poses` is a subset of `kf_ids`, the dead `MargData::frame_states` loop, the four shutdown sentinel sites, the 2026-09-08 measured landmark annihilation loop with the two-observation track ceiling, the identically-0.5 redundancy ratio and the impossible rehost, the 2026-09-10 tracking failure where local matching depends solely on bag-of-words retrieval, and the 2026-09-12 `LandmarkDatabase` mutation-surface audit with the measured `CullRedundantKeyframes` cost distribution | 2026-09-06/2026-09-12 |
 
 ## Quick Reference
 
@@ -36,6 +36,16 @@ When a recorded fact turns out to be wrong, rewrite it in place so that the docu
 - A `Var<std::string>` renders as a live `TextInput` readout; `META_FLAG_READONLY` makes it display-only
 - The latest-only caches are never reset, so a **vanished layer means an empty payload, never a dropped one**
 - `states.back()` is the newest state, because `Eigen::aligned_map` is an ordered `std::map`
+
+### Mapping Feature Pipeline Numbers (`feature_detection_descriptors.md`)
+- `detectKeypointsMapping` is **Shi-Tomasi**, not FAST and not Harris. `goodFeaturesToTrack(img, pts, N, 0.01, 8)` leaves `useHarrisDetector=false`. The FAST detector in the same file is `detectKeypoints`, used only by the VO front end
+- `EDGE_THRESHOLD = 19` is **derived**: pattern extent `[-13,12]` gives radius `sqrt(2)*13 = 18.38`, plus half a pixel of rounding. Adding a scale pyramid invalidates it
+- `mapper_max_hamming_distance = 70` is 7.25 sd below the `Binomial(256,0.5)` mean of 128. `P(d_H<=70) = 1.3e-13`. Very conservative
+- `mapper_bow_num_bits = 16`: a true match at Hamming distance 20 shares a word only **26%** of the time. That is why `mapper_frames_to_match_threshold` must be 0.04
+- The HashBow score **is** the DBoW2 L1 score `1 - 0.5*||q-d||_1`, over an untrained LSH vocabulary. No vocabulary file needed
+- `mapper_obs_std_dev = 0.25` is already **below** the `1/sqrt(12) = 0.289` pixel-quantisation floor. `cornerSubPix` is commented out at `keypoints.cpp:239-243`
+- **No patch smoothing** before the BRIEF tests, which BRIEF requires. No scale pyramid anywhere. No gate on centroid magnitude, so `atan2(0,0)=0` passes silently
+- Detection is **serial** since commit `5de98a1` (2026-06-25); only the `add_to_database` call was ever the race
 
 ### GT-SLAM Mismatch Fix (applies to both EuRoC and TUM-VI)
 - **Root cause**: World frame origin/orientation mismatch (NOT camera-IMU extrinsics)
