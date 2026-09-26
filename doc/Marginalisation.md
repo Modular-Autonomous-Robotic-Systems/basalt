@@ -16,7 +16,7 @@ The state estimation is formulated as a nonlinear least squares problem defined 
 
 $$ E(\mathbf{s}) = \frac{1}{2} \mathbf{r}(\mathbf{s})^T \mathbf{W} \mathbf{r}(\mathbf{s}) $$
 
-where $\mathbf{W} = \Sigma^{-1}$ is the block-diagonal weight (information) matrix. Please note that $\mathbf{W}$ is the measurement information matrix obtained directly from the sensor noise model. The matrix represents the uncertainity in each measurement used to compute the residual. Please note the following key properties of the measurement information matrix:
+where $\mathbf{W} = \Sigma^{-1}$ is the block-diagonal weight (information) matrix. Please note that $\mathbf{W}$ is the measurement information matrix obtained directly from the sensor noise model. The matrix represents the uncertainty in each measurement used to compute the residual. Please note the following key properties of the measurement information matrix:
 1. The Matrix is Block-diagonal across the full stacked residual vector, because individual measurements from different factors are assumed to be statistically independent.
 2. Fully determined by the sensor noise model used and is fixed before any optimization begins.
 3. For vision $\Sigma_{ij}$ is the covariance of the 2D pixel observation. For IMU measurements, $\Sigma_{k}$ is the preintegrated noise covariance, which grows as you integrate more IMU readings. Both the quantities must be estimated before hand and provided to the downstream VIO algorithm for use.
@@ -25,7 +25,7 @@ Please note that currently the vision noise estimates are hard-coded and with in
 
 The per-observation covariance is defined as $\Sigma_{ij} = \sigma_0^2 \cdot \rho^{2L} \mathbf{I}_{2 \times 2}$, where $\sigma_0$ is the base pixel noise standard deviation and $\rho$ is the per-octave scale factor of the image pyramid, yielding an information weight of $\Sigma_{ij}^{-1} = (\sigma_0^2 \cdot \rho^{2L})^{-1} \mathbf{I}_{2 \times 2}$ that automatically assigns lower weight to features detected at coarser scales where spatial localisation is inherently less precise. This approach provides a principled, detector-coupled noise model that partially accounts for the environment dependence of visual localisation uncertainty without requiring a dedicated offline calibration procedure.
 
-### Gauss-Newton Approximation
+### 2.1 Gauss-Newton Approximation
 Because the residual function $\mathbf{r}(\mathbf{s})$ is nonlinear, we linearize it around the current state estimate $\mathbf{s}$ using a first-order Taylor expansion:
 
 $$ \mathbf{r}(\mathbf{s} \oplus \xi) \approx \mathbf{r}(\mathbf{s}) + \mathbf{J} \xi $$
@@ -39,6 +39,7 @@ $$ E(\mathbf{s} \oplus \xi) \approx \frac{1}{2} ( \mathbf{r}(\mathbf{s}) + \math
 Expanding this expression (and using the fact that $\mathbf{r}^T \mathbf{W} \mathbf{J} \xi = \xi^T \mathbf{J}^T \mathbf{W} \mathbf{r}$ since it is a scalar), we obtain:
 
 $$ E(\mathbf{s} \oplus \xi) \approx \frac{1}{2} \mathbf{r}(\mathbf{s})^T \mathbf{W} \mathbf{r}(\mathbf{s}) + \xi^T \mathbf{J}^T \mathbf{W} \mathbf{r}(\mathbf{s}) + \frac{1}{2} \xi^T \mathbf{J}^T \mathbf{W} \mathbf{J} \xi $$
+
 $$ E(\mathbf{s} \oplus \xi) \approx E(\mathbf{s}) + \xi^T \mathbf{J}^T \mathbf{W} \mathbf{r}(\mathbf{s}) + \frac{1}{2} \xi^T \mathbf{J}^T \mathbf{W} \mathbf{J} \xi $$
 
 To find the minimum increment $\xi^{\ast}$ that minimizes the error, we take the partial derivative of this quadratic objective with respect to $\xi$ and set it to zero:
@@ -58,7 +59,7 @@ Substituting these into the normal equations gives the final linear system:
 
 $$ \mathbf{H} \xi = \mathbf{b} $$
 
-### The Information Matrix ($\mathbf{H}$) and Information Vector ($\mathbf{b}$)
+### 2.2 The Information Matrix ($\mathbf{H}$) and Information Vector ($\mathbf{b}$)
 
 1. Information Matrix ($\mathbf{H}$): The matrix $\mathbf{H} = \mathbf{J}^T \mathbf{W} \mathbf{J}$ is the Gauss-Newton approximation of the Hessian matrix (also related to the Fisher Information Matrix). It is a sparse, symmetric, positive semi-definite matrix that encapsulates the certainty and structural correlation of the state variables. Each block element $\mathbf{H}_{ij}$ describes how strongly variable $i$ is coupled with variable $j$ given the measurements.
 2. Information Vector ($\mathbf{b}$): The right-hand side vector $\mathbf{b} = - \mathbf{J}^T \mathbf{W} \mathbf{r}(\mathbf{s})$ is the gradient-related vector that drives the optimization. It represents the negative gradient of the objective function at the current linearization point. It aggregates the weighted residual errors projected into the state space via the Jacobian, effectively "pulling" the state update $\xi$ in the direction that reduces the error. When the system converges and residuals are minimized, $\mathbf{b}$ approaches $\mathbf{0}$. 
@@ -68,78 +69,11 @@ $$ \mathbf{H} \xi = \mathbf{b} $$
 
 ---
 
-## 3. VIO Frame to Frame Tracking
-
-The visual-inertial odometry pipeline continuously processes incoming camera images and high-frequency Inertial Measurement Unit (IMU) data to estimate the sensor's ego-motion.
-
-### Problem Formulation
-The state estimation is cast as a fixed-lag smoothing (or sliding window) non-linear least squares optimization problem. A factor graph is formed where nodes represent state variables and edges represent measurement constraints (factors).
-
-Variables:
-1.   Optimized Variables (Active State, $\mathbf{s}$):
-    1.   $\mathbf{s}_k$: Camera poses $\mathbf{T}_k \in SE(3)$ for a set of older, selected keyframes.
-    2.   $\mathbf{s}_f$: Full navigation states for the most recent frames in the sliding window. Each state includes the camera pose $\mathbf{T}_i \in SE(3)$, linear velocity $\mathbf{v}_i \in \mathbb{R}^3$, and IMU biases $\mathbf{b}_i = [\mathbf{b}_i^a, \mathbf{b}_i^g]^T \in \mathbb{R}^6$.
-    3.   $\mathbf{s}_l$: Landmark parameters $\mathbf{l}_j$ (parameterized by a 2D stereographic projection direction and an inverse distance relative to their host frame).
-1.   Non-Optimized Variables (Fixed/Prior Context):
-    1.   Marginalized states that are no longer actively optimized but influence the current estimate through the marginalization prior $E_{marg}(\mathbf{s})$.
-    2.   Fixed calibration parameters (e.g., camera intrinsics, camera-IMU extrinsics).
-1.   Configuration Parameters:
-    1.   Gravity vector $\mathbf{g}$, noise covariances for IMU ($\Sigma_{a}, \Sigma_{g}, \Sigma_{ba}, \Sigma_{bg}$) and vision ($\Sigma_{v}$), and threshold heuristics for keyframe selection and marginalization.
-
-### Residual Errors
-To find the optimal state $\mathbf{s}^{\ast}$, we minimize the total objective function $E(\mathbf{s})$, which aggregates the residual errors from visual observations, IMU preintegration, and the marginalization prior. 
-
-Complete VIO Objective Function:
-
-$$ E(\mathbf{s}) = \sum_{(i,j) \in \mathcal{V}} \mathbf{r}_{ij}^T \Sigma_{ij}^{-1} \mathbf{r}_{ij} + \sum_{k \in \mathcal{I}} \mathbf{r}_k^T \Sigma_k^{-1} \mathbf{r}_k + E_{\mathbf{marg}}(\mathbf{s}) $$
-Where:
-1.   $\mathcal{V}$ is the set of all valid visual observations (feature $j$ observed in frame $i$).
-2.   $\mathcal{I}$ is the set of IMU preintegrated measurements connecting consecutive frames.
-3.   $E_{marg}(\mathbf{s})$ is the quadratic prior derived from previously marginalized states.
-
-#### Reprojection Error
-Visual tracking operates by matching sparse features between frames. In `basalt`, patch-based KLT Optical Flow tracking is used. For a point $j$ hosted in frame $h(j)$ and observed in target frame $i$ at coordinates $\mathbf{z}_{ij}$, the reprojection residual $\mathbf{r}_{ij}$ is:
-
-$$ \mathbf{r}_{ij} = \mathbf{z}_{ij} - \pi ( \mathbf{T}_{i}^{-1} \mathbf{T}_{h(j)} \mathbf{q}_j(u, v, d) ) $$
-
-where $\mathbf{T}_{i}$ and $\mathbf{T}_{h(j)}$ are the poses of the target and host frames, $\mathbf{q}_j(u, v, d)$ is the 3D landmark reconstructed from its minimal parameters, and $\pi(\cdot)$ is the camera projection model. $\Sigma_{ij}$ is the covariance of the visual measurement.
-
-#### IMU Preintegration Error
-Due to the high frequency of IMU measurements, multiple readings between consecutive frames $k$ and $k+1$ are preintegrated into a single pseudo-measurement $\Delta \mathbf{s} = (\Delta \mathbf{R}, \Delta \mathbf{v}, \Delta \mathbf{p})$. The IMU residuals $\mathbf{r}_k$ are defined as:
-
-$$ \mathbf{r}_{\Delta R} = \text{Log}( (\Delta \mathbf{R} \hat{\mathbf{R}})^T \mathbf{R}_k^T \mathbf{R}_{k+1} ) $$
-
-$$ \mathbf{r}_{\Delta v} = \mathbf{R}_k^T ( \mathbf{v}_{k+1} - \mathbf{v}_k - \mathbf{g}\Delta t ) - \Delta \hat{\mathbf{v}} $$
-
-$$ \mathbf{r}_{\Delta p} = \mathbf{R}_k^T ( \mathbf{p}_{k+1} - \mathbf{p}_k - \frac{1}{2}\mathbf{g}\Delta t^2 ) - \Delta \hat{\mathbf{p}} $$
-
-where $\mathbf{R}$ and $\mathbf{p}$ represent rotation and translation of the pose $\mathbf{T}$, $\mathbf{v}$ is velocity, and $\mathbf{g}$ is gravity. Changes in biases $\mathbf{b}^{a}$ and $\mathbf{b}^{g}$ during the preintegration interval are accounted for using a first-order linear approximation. $\Sigma_k$ is the preintegrated noise covariance.
-
-#### Marginalisation Residual
-When variables (e.g., old keyframes, velocities, biases) are removed from the active state to cap computational complexity, the constraints connected to them must not be simply discarded. As discussed in [1] and [2], discarding these variables would lead to a significant loss of information and rapid accumulation of drift. Instead, the information from the marginalized variables is compressed into a dense quadratic prior on the remaining coupled variables (the Markov blanket). This prior is parameterized by an information matrix $\mathbf{H}^{\ast}$ and an information vector $\mathbf{b}^{\ast}$, derived analytically by performing the Schur complement on the partitioned linearized system (as detailed in Section 4.2).
-
-For the non-linear least squares optimization, this newly constructed prior must be incorporated into the total objective function. This yields a marginalization penalty acting on the active state increment $\xi$:
-
-$$ E_{\mathbf{marg}}(\xi) = \mathbf{b}^{\ast T} \xi + \frac{1}{2} \xi^T \mathbf{H}^{\ast} \xi $$
-
-To optimize this objective alongside standard visual and inertial residuals using Gauss-Newton or Levenberg-Marquardt solvers, the marginalization energy is conventionally formulated as a sum of squared residuals. The relationship between the energy $E_{\mathbf{marg}}(\xi)$ and its equivalent squared residual $\mathbf{r}_{\mathbf{marg}}(\xi)$ is given by $E_{\mathbf{marg}}(\xi) = \frac{1}{2} \|\mathbf{r}_{\mathbf{marg}}(\xi)\|^2 + C$. To find this residual, the information matrix $\mathbf{H}^{\ast}$ is decomposed using a square-root decomposition (such as Cholesky or Eigenvalue decomposition) such that $\mathbf{J}_{\mathbf{marg}}^T \mathbf{J}_{\mathbf{marg}} = \mathbf{H}^{\ast}$. The corresponding residual vector is then defined as:
-
-$$ \mathbf{r}_{\mathbf{marg}}(\xi) = \mathbf{J}_{\mathbf{marg}} \xi + \mathbf{r}_{\mathbf{marg}, 0} $$
-
-By expanding the squared norm:
-
-$ \frac{1}{2} (\|\mathbf{J}_{\mathbf{marg}} \xi + \mathbf{r}_{\mathbf{marg}, 0}\|)^2 = \frac{1}{2} \xi^T \mathbf{J}_{\mathbf{marg}}^T \mathbf{J}_{\mathbf{marg}} \xi + \mathbf{r}_{\mathbf{marg}, 0}^T \mathbf{J}_{\mathbf{marg}} \xi + \frac{1}{2} \mathbf{r}_{\mathbf{marg}, 0}^T \mathbf{r}_{\mathbf{marg}, 0} $
-, we can match the linear terms with the marginalization energy $E_{\mathbf{marg}}(\xi)$ to find the constant offset vector $\mathbf{r}_{\mathbf{marg}, 0}$. It must satisfy $\mathbf{J}_{\mathbf{marg}}^T \mathbf{r}_{\mathbf{marg}, 0} = \mathbf{b}^\{\ast}$, which yields the formulation derivation $\mathbf{r}_{\mathbf{marg}, 0} = (\mathbf{J}_{\mathbf{marg}}^T)^{+} \mathbf{b}^{\ast}$. Minimizing the squared norm of $\mathbf{r}_{\mathbf{marg}}(\xi)$ perfectly reproduces the behavior of minimizing $E_{\mathbf{marg}}(\xi)$. A complete step-by-step derivation of this formulation, including all required mathematical background, is presented in Appendix A.
-
-The inclusion of the marginalization residual is vital because it anchors the actively optimized states to the historically accumulated visual-inertial constraints, significantly improving both tracking robustness and accuracy. A critical mathematical consideration when adding this residual is the proper handling of unobservable state directions, namely global position and yaw around the gravity vector. The true VIO system has a nullspace corresponding to these dimensions, meaning the system possesses no absolute information about them. When constructing $\mathbf{H}^{\ast}$, its nullspace should perfectly align with these unobservable directions. However, if the active variables were to be relinearized around new estimates in subsequent optimization steps, the Jacobians would change. This inconsistency would alter the nullspace of the marginalization prior relative to the current state, causing the non-linear solver to artificially introduce non-zero information (spurious information gain) along the global position and yaw dimensions. To prevent this, the system enforces the First-Estimate Jacobians (FEJ) approach. As soon as a variable becomes part of the marginalization prior, its linearization point $\mathbf{s}_0$ is permanently fixed for all future evaluations of its associated Jacobians. By freezing the linearization point, the mathematical structure of $\mathbf{H}^{\ast}$ is preserved, ensuring that the marginalization residual only penalizes deviations in the observable subspace, maintaining global consistency and preventing long-term drift.
-
----
-
-## 4. Marginalisation
+## 3. Marginalisation
 
 Marginalisation allows the system to bound the size of the optimization problem (the number of variables in $\mathbf{H}$) by analytically eliminating old variables.
 
-### 4.1 Keyframe Selection Logic
+### 3.1 Keyframe Selection Logic
 The decision to spawn a new keyframe or marginalise an old one defines the structure of the factor graph.
 
 **Spawning a Keyframe:** 
@@ -180,7 +114,7 @@ The strategy for selecting a keyframe to drop (excluding the two most recent one
     ```
 The keyframe with the lowest score (most redundant) is selected as `id_to_marg` and scheduled for marginalisation.
 
-### 4.2 Schur's Complement (Mathematical Formulation)
+### 3.2 Schur's Complement (Mathematical Formulation)
 
 Given the linearized system $\mathbf{H} \xi = \mathbf{b}$, we want to partition the state $\xi$ into a set of variables to keep, $\xi_{\alpha}$, and a set of variables to marginalize out, $\xi_\beta$. 
 
@@ -200,11 +134,11 @@ $$ \mathbf{b}^* = \mathbf{b}_\alpha - \mathbf{H}_{\alpha\beta} \mathbf{H}_{\beta
 
 The term $\mathbf{H}_{\alpha\alpha} - \mathbf{H}_{\alpha\beta}\mathbf{H}_{\beta\beta}^{-1}\mathbf{H}_{\beta\alpha}$ is known as the Schur complement of block $\mathbf{H}_{\beta\beta}$.
 
-### 5.3 Implementation in Code
+### 3.3 Implementation in Code
 
 In `basalt`, marginalisation is systematically orchestrated to cleanly transition the mathematical theory into efficient matrix operations.
 
-#### 5.3.1 Key Classes and Interfaces
+#### 3.3.1 Key Classes and Interfaces
 
 **1. `AbsOrderMap`**
 *   **Header Path:** `include/basalt/utils/imu_types.h`
@@ -271,7 +205,7 @@ In `basalt`, marginalisation is systematically orchestrated to cleanly transitio
     *   `static void marginalizeHelperSqToSqrt(...)`: Gaussian elimination returning the square-root format.
     *   `static void marginalizeHelperSqrtToSqrt(...)`: Stable Householder/QR decomposition on Jacobians.
 
-#### 5.3.2 Execution Flow & Pipeline
+#### 3.3.2 Execution Flow & Pipeline
 
 The pipeline is executed primarily within `SqrtKeypointVioEstimator::marginalize` (located in `src/vi_estimator/sqrt_keypoint_vio.cpp` and `src/vi_estimator/sqrt_keypoint_vo.cpp`). The sequence of operations is as follows:
 
@@ -315,7 +249,7 @@ After computing the Schur complement and finalizing state cleanup, the new dense
 
 ---
 
-## 6. Conclusion: From Marginalisation to Global Mapping
+## 4. Conclusion: From Marginalisation to Global Mapping
 
 The process of marginalisation effectively reduces the dimensionality of the state vector while perfectly summarizing the past linearised visual-inertial constraints into a dense prior ($\mathbf{H}^*$, $\mathbf{b}^*$). Within the fixed-lag smoother, this prior provides the necessary anchoring to prevent drift in the local window.
 
@@ -325,7 +259,7 @@ To achieve globally consistent mapping and loop closures, this dense prior is su
 
 ---
 
-## 7. References
+## 5. References
 
 1. Usenko, V., Demmel, N., Schubert, D., Stückler, J., & Cremers, D. (2020). *Visual-Inertial Mapping with Non-Linear Factor Recovery*. arXiv preprint arXiv:1904.06504v3.
 2. Mazuran, M., Burgard, W., & Tipaldi, G. D. (2015). *Nonlinear Factor Recovery for Long-Term SLAM*. The International Journal of Robotics Research (IJRR).
@@ -335,7 +269,7 @@ To achieve globally consistent mapping and loop closures, this dense prior is su
 
 ## Appendix A: Derivation of the Marginalisation Residual
 
-This appendix presents the complete step-by-step derivation of the marginalisation residual $\mathbf{r}_\text{marg}(\xi)$ introduced in Section 3. The derivation requires several foundational mathematical concepts that are introduced first, followed by the derivation steps in a logical sequence.
+This appendix presents the complete step-by-step derivation of the marginalisation residual $\mathbf{r}_\text{marg}(\xi)$ introduced in `doc/VIO.md` §3.1.3. The derivation requires several foundational mathematical concepts that are introduced first, followed by the derivation steps in a logical sequence.
 
 ### A.1 Background: Key Mathematical Concepts
 
@@ -383,7 +317,7 @@ where $(\boldsymbol{\Lambda}^{1/2})^+$ replaces each non-zero entry $\lambda_i^{
 
 ### A.2 Origin of the Marginalisation Energy
 
-The marginalisation energy originates from the Schur complement operation described in Section 4.2. When the state vector is partitioned into variables to retain ($\xi_\alpha$, the Markov blanket) and variables to eliminate ($\xi_\beta$, the marginalized states), the full linearized system has the block structure:
+The marginalisation energy originates from the Schur complement operation described in §3.2. When the state vector is partitioned into variables to retain ($\xi_\alpha$, the Markov blanket) and variables to eliminate ($\xi_\beta$, the marginalized states), the full linearized system has the block structure:
 
 $$\begin{bmatrix} \mathbf{H}_{\alpha\alpha} & \mathbf{H}_{\alpha\beta} \\ \mathbf{H}_{\beta\alpha} & \mathbf{H}_{\beta\beta} \end{bmatrix} \begin{bmatrix} \xi_\alpha \\ \xi_\beta \end{bmatrix} = \begin{bmatrix} \mathbf{b}_\alpha \\ \mathbf{b}_\beta \end{bmatrix}$$
 
@@ -437,7 +371,7 @@ Substituting $\mathbf{J}_\text{marg}^T \mathbf{J}_\text{marg} = \mathbf{H}^*$ fr
 
 $$\frac{1}{2}\|\mathbf{r}_\text{marg}(\xi)\|^2 = \frac{1}{2} \xi^T \mathbf{H}^* \xi + \mathbf{r}_{\text{marg},0}^T \mathbf{J}_\text{marg} \xi + \underbrace{\frac{1}{2}\|\mathbf{r}_{\text{marg},0}\|^2}_{C}$$
 
-The term $C = \frac{1}{2}\|\mathbf{r}_{\text{marg},0}\|^2$ is independent of $\xi$. It contributes neither to the gradient $\partial E / \partial \xi$ nor to the Hessian $\partial^2 E / \partial \xi^2$ of the objective function. The optimisation is therefore identical whether or not this constant is retained, confirming the relation $\frac{1}{2}\|\mathbf{r}_\text{marg}(\xi)\|^2 = E_\text{marg}(\xi) + C$ stated in Section 3.
+The term $C = \frac{1}{2}\|\mathbf{r}_{\text{marg},0}\|^2$ is independent of $\xi$. It contributes neither to the gradient $\partial E / \partial \xi$ nor to the Hessian $\partial^2 E / \partial \xi^2$ of the objective function. The optimisation is therefore identical whether or not this constant is retained, confirming the relation $\frac{1}{2}\|\mathbf{r}_\text{marg}(\xi)\|^2 = E_\text{marg}(\xi) + C$ stated in `doc/VIO.md` §3.1.3.
 
 ---
 
@@ -497,7 +431,7 @@ $$\mathbf{r}_\text{marg}(0) = \mathbf{r}_{\text{marg},0}$$
 
 The constant offset $\mathbf{r}_{\text{marg},0}$ therefore represents the current deviation of the active state from the minimum of the marginalisation prior. As the optimiser computes a state increment $\xi$ that reduces the total cost, $\mathbf{r}_\text{marg}(\xi)$ approaches zero at convergence, which is consistent with the behaviour of all other residuals in the system.
 
-After each optimisation step, the linearization point shifts to the updated state estimate. The offset $\mathbf{r}_{\text{marg},0}$ must be updated accordingly through the re-centering operation described in Section 5.3. In the implementation this corresponds to the `computeDelta` call followed by `marg_data.b -= marg_data.H * delta`, which compensates the information vector so that the prior is evaluated correctly relative to the new baseline.
+After each optimisation step, the linearization point shifts to the updated state estimate. The offset $\mathbf{r}_{\text{marg},0}$ must be updated accordingly through the re-centering operation described in §3.3. In the implementation this corresponds to the `computeDelta` call followed by `marg_data.b -= marg_data.H * delta`, which compensates the information vector so that the prior is evaluated correctly relative to the new baseline.
 
 ---
 
@@ -509,4 +443,4 @@ The derivation presented in this appendix relies on the following three assumpti
 
 2. $\mathbf{b}^*$ lies in the column space of $\mathbf{H}^*$. This is guaranteed by the Schur complement construction because $\mathbf{b}^*$ and $\mathbf{H}^*$ are derived from the same set of measurement Jacobians, ensuring that the linear system $\mathbf{J}_\text{marg}^T \mathbf{r}_{\text{marg},0} = \mathbf{b}^*$ is consistent and a solution exists.
 
-3. The linearization point of the marginalized variables is permanently fixed at the moment of marginalisation, which is the First-Estimate Jacobians condition described in Section 3. This ensures that the nullspace of $\mathbf{H}^*$ remains correctly aligned with the unobservable state directions in all subsequent optimisation steps, preventing the introduction of spurious information along those directions and maintaining the long-term consistency of the estimator.
+3. The linearization point of the marginalized variables is permanently fixed at the moment of marginalisation, which is the First-Estimate Jacobians condition described in `doc/VIO.md` §3.1.3. This ensures that the nullspace of $\mathbf{H}^*$ remains correctly aligned with the unobservable state directions in all subsequent optimisation steps, preventing the introduction of spurious information along those directions and maintaining the long-term consistency of the estimator.

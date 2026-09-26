@@ -169,7 +169,7 @@ public:
     };
 
     NfrMapper(const basalt::Calibration<double>& calib,
-              const VioConfig& config);
+              const VioConfig& config, const Logger::Ptr& logger = nullptr);
 
     void addMargData(basalt::MargData::Ptr& data);
 
@@ -223,5 +223,6 @@ public:
     double lambda, min_lambda, max_lambda, lambda_vee;
 
     bool mpVioDebugMode;
+    Logger::Ptr mpLogger;
 };
 }  // namespace basalt

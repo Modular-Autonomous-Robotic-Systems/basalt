@@ -38,7 +38,11 @@ struct GtPose {
 // constants are const at namespace scope, giving them internal linkage, so
 // including this header in several translation units raises no one-definition
 // rule violation.
+
+const uint8_t current_frame_color[3]{250, 0, 26};    // newest state, live edge
+const uint8_t window_state_color[3]{120, 120, 120};  // older window states
+
 const uint8_t local_map_point_color[3]{255, 128, 0};  // orange
-const uint8_t local_map_kf_color[3]{255, 128, 128};   // amber
+const uint8_t local_map_kf_color[3]{255, 191, 0};     // amber
 
 }  // namespace basalt

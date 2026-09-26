@@ -32,11 +32,13 @@ NfrMapper::setup_opt()                  — triangulation → LandmarkDatabase
 
 The following sections examine each stage in depth, beginning with feature extraction (Section 2) and moving through the two-stage matching pipeline (Section 3). Section 4 provides a consolidated reference for all relevant classes, data structures, and configuration parameters. Section 5 ties the discussion back to the broader mapping system.
 
+A complementary treatment of the same extraction stage, carrying the historical background of each algorithm, the derivations of its invariance properties, the numerical calibration of the Hamming and retrieval thresholds, and a survey of improvements, is given in [`doc/Mapping.md`](Mapping.md) Section 3.2.
+
 ---
 
 ## 2. Feature Extraction
 
-The feature extraction stage transforms a raw keyframe image into a structured per-camera data record containing detected corner positions, their orientations, binary descriptors, back-projected bearing vectors, and a BoW representation suitable for database lookup. The entire computation is executed in the method `NfrMapper::detect_timestamp_keypoints()` (`src/vi_estimator/nfr_mapper.cpp:465`), called in parallel across all keyframe timestamps by `NfrMapper::detect_keypoints()` (`nfr_mapper.cpp:496`).
+The feature extraction stage transforms a raw keyframe image into a structured per-camera data record containing detected corner positions, their orientations, binary descriptors, back-projected bearing vectors, and a BoW representation suitable for database lookup. The entire computation is executed in the method `NfrMapper::detect_timestamp_keypoints()` (`src/vi_estimator/nfr_mapper.cpp:477-506`), called in parallel across all keyframe timestamps by `NfrMapper::detect_keypoints()` (`nfr_mapper.cpp:508-539`).
 
 ### 2.1 Mathematical Background
 
@@ -94,22 +96,21 @@ Two images are compared using the L1 similarity score, computed efficiently via 
 
 ### 2.2 Pipeline Description
 
-The extraction pipeline is orchestrated at two levels. The outer function `NfrMapper::detect_keypoints()` (`nfr_mapper.cpp:496`) iterates over the `img_data` store, selects only those timestamps for which a pose exists in `frame_poses`, and dispatches the per-frame work in parallel:
+The extraction pipeline is orchestrated at two levels. The outer function `NfrMapper::detect_keypoints()` (`nfr_mapper.cpp:508-539`) iterates over the `img_data` store, selects only those timestamps for which a pose exists in `frame_poses`, and dispatches the per-frame work serially:
 
 ```cpp
-// nfr_mapper.cpp:506
-tbb::parallel_for(tbb::blocked_range<size_t>(0, keys.size()),
-    [&](const tbb::blocked_range<size_t>& r) {
-        for (size_t j = r.begin(); j != r.end(); ++j) {
-            auto kv = img_data.find(keys[j]);
-            if (kv->second.get()) {
-                detect_timestamp_keypoints(kv->first, kv->second);
-            }
-        }
-    });
+// nfr_mapper.cpp:518-523
+// parallelisation removed due to crash because of invalid update of
+// `HashBowStl::inverted_index` from two threads
+for (size_t j = 0; j != keys.size(); ++j) {
+    auto kv = img_data.find(keys[j]);
+    if (kv->second.get()) {
+        detect_timestamp_keypoints(kv->first, kv->second);
+    }
+}
 ```
 
-For each frame, `NfrMapper::detect_timestamp_keypoints()` (`nfr_mapper.cpp:465`) iterates over every camera in the rig (indexed by `i`) and performs the following steps:
+For each frame, `NfrMapper::detect_timestamp_keypoints()` (`nfr_mapper.cpp:477-506`) iterates over every camera in the rig (indexed by `i`) and performs the following steps:
 
 **Step 1 — Image preparation.** The 16-bit raw image stored in `data->img_data[i].img` is reinterpreted as `Image<const uint16_t>`. Images that carry a null pointer are silently skipped (`nfr_mapper.cpp:469`).
 

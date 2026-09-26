@@ -59,12 +59,13 @@ namespace basalt {
 template <class Scalar_>
 SqrtKeypointVoEstimator<Scalar_>::SqrtKeypointVoEstimator(
     const basalt::Calibration<double> &calib_, const VioConfig &config_,
-    bool useProducerConsumerArchitecture)
+    bool useProducerConsumerArchitecture, const Logger::Ptr &logger)
     : VioEstimatorBase<Scalar_>(), take_kf(true), frames_after_kf(0),
       initialized(false), config(config_),
       lambda(config_.vio_lm_lambda_initial),
       min_lambda(config_.vio_lm_lambda_min),
       max_lambda(config_.vio_lm_lambda_max), lambda_vee(2),
+      mpLogger(logger ? logger : Logger::Disabled()),
       mpUseProducerConsumerArchitecture(useProducerConsumerArchitecture) {
     obs_std_dev = Scalar(config.vio_obs_std_dev);
     huber_thresh = Scalar(config.vio_obs_huber_thresh);
@@ -150,6 +151,8 @@ void SqrtKeypointVoEstimator<Scalar_>::initialize(const Eigen::Vector3d &bg,
                 this->out_vis_queue->push(nullptr);
             if (this->out_marg_queue)
                 this->out_marg_queue->push(nullptr);
+            if (this->mpKFOutputQueue)
+                this->mpKFOutputQueue->push(nullptr);
             if (this->out_state_queue)
                 this->out_state_queue->push(nullptr);
 
@@ -170,8 +173,16 @@ void SqrtKeypointVoEstimator<Scalar_>::initialize(const Eigen::Vector3d &bg,
 template <class Scalar>
 typename PoseVelBiasState<Scalar>::Ptr
 SqrtKeypointVoEstimator<Scalar>::ProcessFrame(
-    OpticalFlowResult::Ptr &curr_frame) {
+    OpticalFlowResult::Ptr &curr_frame, std::optional<Sophus::SE3d> gtcw) {
     if (!curr_frame.get()) {
+        // Mirrors SqrtKeypointVioEstimator::ProcessFrame. Without these the
+        // event-driven model never emits a sentinel and LocalMapper::Stop
+        // blocks joining a thread parked on its input queue.
+        if (this->out_vis_queue) this->out_vis_queue->push(nullptr);
+        if (this->out_marg_queue) this->out_marg_queue->push(nullptr);
+        if (this->mpKFOutputQueue) this->mpKFOutputQueue->push(nullptr);
+        if (this->out_state_queue) this->out_state_queue->push(nullptr);
+        this->finished = true;
         return nullptr;
     }
     // Correct camera time offset (relevant for VIO)
@@ -183,6 +194,9 @@ SqrtKeypointVoEstimator<Scalar>::ProcessFrame(
     }
 
     if (!initialized) {
+        // VO has no gravity reference, so the ground truth attitude is the
+        // only source of up.
+        if (gtcw) T_w_i_init = gtcw->template cast<Scalar>();
         last_state_t_ns = curr_frame->t_ns;
 
         frame_poses[last_state_t_ns] =
@@ -334,6 +348,7 @@ SqrtKeypointVoEstimator<Scalar_>::measure(
         // Triangulate new points from one of the observations (with sufficient
         // baseline) and make keyframe for camera 0
         take_kf = false;
+        mpIsCurrentFrameKF = true;
         frames_after_kf = 0;
         kf_ids.emplace(last_state_t_ns);
 
@@ -1391,6 +1406,34 @@ void SqrtKeypointVoEstimator<Scalar_>::optimize_and_marg(
     const std::unordered_set<KeypointId> &lost_landmaks) {
     optimize();
     marginalize(num_points_connected, lost_landmaks);
+    PublishKeyframe();
+}
+
+// Hands the just-selected keyframe to the local mapper. Mirrors
+// SqrtKeypointVioEstimator::PublishKeyframe so the mapper is driven
+// identically in visual-only mode.
+template <class Scalar_>
+void SqrtKeypointVoEstimator<Scalar_>::PublishKeyframe() {
+    if (!mpIsCurrentFrameKF) return;
+    mpIsCurrentFrameKF = false;
+
+    if (!this->mpKFOutputQueue) return;
+
+    const auto it_state = frame_states.find(last_state_t_ns);
+    const auto it_flow = prev_opt_flow_res.find(last_state_t_ns);
+    if (it_state == frame_states.end() || it_flow == prev_opt_flow_res.end())
+        return;
+
+    Keyframe::Ptr kf(new Keyframe);
+    kf->timestamp = last_state_t_ns;
+    // Rebuilt rather than copied so linearized stays false, which
+    // NfrMapper::optimize asserts before applying an increment.
+    kf->pose = PoseStateWithLin<double>(
+        last_state_t_ns,
+        it_state->second.getState().T_w_i.template cast<double>());
+    kf->opt_flow_res = it_flow->second;
+
+    this->mpKFOutputQueue->push(kf);
 }
 
 template <class Scalar_>

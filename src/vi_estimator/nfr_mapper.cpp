@@ -43,13 +43,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace basalt {
 
-NfrMapper::NfrMapper(const Calibration<double>& calib, const VioConfig& config)
+NfrMapper::NfrMapper(const Calibration<double>& calib, const VioConfig& config,
+                     const Logger::Ptr& logger)
     : config(config),
       lambda(config.mapper_lm_lambda_min),
       min_lambda(config.mapper_lm_lambda_min),
       max_lambda(config.mapper_lm_lambda_max),
       lambda_vee(2),
-      mpVioDebugMode(config.vio_debug) {
+      mpVioDebugMode(config.vio_debug),
+      mpLogger(logger ? logger : Logger::Disabled()) {
     this->calib = calib;
     this->obs_std_dev = config.mapper_obs_std_dev;
     this->huber_thresh = config.mapper_obs_huber_thresh;
@@ -296,13 +298,11 @@ void NfrMapper::optimize(int num_iterations) {
 
         double error_total = rld_error + lopt.rel_error + lopt.roll_pitch_error;
 
-        if (mpVioDebugMode) {
-            std::cout << "[LINEARIZE] iter " << iter
-                      << " before_update_error: vision: " << rld_error
-                      << " rel_error: " << lopt.rel_error
-                      << " roll_pitch_error: " << lopt.roll_pitch_error
-                      << " total: " << error_total << std::endl;
-        }
+        mpLogger->AddMapperLinearise(
+            iter, rld_error, lopt.rel_error, lopt.roll_pitch_error,
+            error_total, int(lmdb.numLandmarks()), int(lmdb.numObservations()),
+            int(rel_pose_factors.size()), int(roll_pitch_factors.size()));
+        mpLogger->PrintMapperLinearise();
 
         lopt.accum.iterative_solver = true;
         lopt.accum.print_info = false;
@@ -311,6 +311,7 @@ void NfrMapper::optimize(int num_iterations) {
         const Eigen::VectorXd Hdiag = lopt.accum.Hdiagonal();
 
         bool converged = false;
+        int inner = 0;
 
         if (config.mapper_use_lm) {  // Use Levenberg–Marquardt
             bool step = false;
@@ -360,31 +361,27 @@ void NfrMapper::optimize(int num_iterations) {
                                            after_roll_pitch_error;
 
                 double f_diff = (error_total - after_error_total);
+                const bool errorIncreased = after_error_total > error_total;
 
                 if (f_diff < 0) {
-                    if (mpVioDebugMode) {
-                        std::cout
-                            << "\t[REJECTED] lambda:" << lambda
-                            << " f_diff: " << f_diff << " max_inc: " << max_inc
-                            << " vision_error: " << after_update_vision_error
-                            << " rel_error: " << after_rel_error
-                            << " roll_pitch_error: " << after_roll_pitch_error
-                            << " total: " << after_error_total << std::endl;
-                    }
+                    mpLogger->AddMapperSolverIter(
+                        iter, inner, 1, lambda, f_diff, max_inc,
+                        after_update_vision_error, after_rel_error,
+                        after_roll_pitch_error, after_error_total, converged,
+                        errorIncreased);
+                    mpLogger->PrintMapperSolverIter();
+
                     lambda = std::min(max_lambda, lambda_vee * lambda);
                     lambda_vee *= 2;
 
                     restore();
                 } else {
-                    if (mpVioDebugMode) {
-                        std::cout
-                            << "\t[ACCEPTED] lambda:" << lambda
-                            << " f_diff: " << f_diff << " max_inc: " << max_inc
-                            << " vision_error: " << after_update_vision_error
-                            << " rel_error: " << after_rel_error
-                            << " roll_pitch_error: " << after_roll_pitch_error
-                            << " total: " << after_error_total << std::endl;
-                    }
+                    mpLogger->AddMapperSolverIter(
+                        iter, inner, 0, lambda, f_diff, max_inc,
+                        after_update_vision_error, after_rel_error,
+                        after_roll_pitch_error, after_error_total, converged,
+                        errorIncreased);
+                    mpLogger->PrintMapperSolverIter();
 
                     lambda = std::max(min_lambda, lambda / 3);
                     lambda_vee = 2;
@@ -393,11 +390,7 @@ void NfrMapper::optimize(int num_iterations) {
                 }
 
                 max_iter--;
-
-                if (after_error_total > error_total) {
-                    std::cout << "[Mapper] increased error after update!!!"
-                              << std::endl;
-                }
+                inner++;
             }
         } else {  // Use Gauss-Newton
             Eigen::VectorXd Hdiag_lambda = Hdiag * min_lambda;
@@ -430,11 +423,10 @@ void NfrMapper::optimize(int num_iterations) {
         auto elapsed =
             std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
 
-        if (mpVioDebugMode) {
-            std::cout << "iter " << iter << " time : " << elapsed.count()
-                      << "(us),  num_states " << frame_states.size()
-                      << " num_poses " << frame_poses.size() << std::endl;
-        }
+        mpLogger->AddMapperIterSummary(iter, double(elapsed.count()) * 1e-6,
+                                       int(frame_states.size()),
+                                       int(frame_poses.size()), inner);
+        mpLogger->PrintMapperIterSummary();
 
         if (converged) break;
 
@@ -529,13 +521,18 @@ void NfrMapper::detect_keypoints() {
     auto elapsed1 =
         std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
 
-    if (mpVioDebugMode) {
-        std::cout << "Processed " << feature_corners.size() << " frames."
-                  << std::endl;
-
-        std::cout << "Detection time: " << elapsed1.count() * 1e-6 << "s."
-                  << std::endl;
+    int cornersTotal = 0;
+    for (const int64_t key : keys) {
+        for (size_t cam = 0; cam < calib.intrinsics.size(); cam++) {
+            const auto it = feature_corners.find(TimeCamId(key, cam));
+            if (it != feature_corners.end())
+                cornersTotal += int(it->second.corners.size());
+        }
     }
+
+    mpLogger->AddMapperDetect(int(keys.size()), elapsed1.count() * 1e-6,
+                             cornersTotal);
+    mpLogger->PrintMapperDetect();
 }
 
 void NfrMapper::match_stereo() {
@@ -545,9 +542,6 @@ void NfrMapper::match_stereo() {
     // Essential matrix
     Eigen::Matrix4d E;
     computeEssential(T_0_1, E);
-
-    std::cout << "Matching " << img_data.size() << " stereo pairs..."
-              << std::endl;
 
     int num_matches = 0;
     int num_inliers = 0;
@@ -580,9 +574,8 @@ void NfrMapper::match_stereo() {
         }
     }
 
-    std::cout << "Matched " << img_data.size() << " stereo pairs with "
-              << num_inliers << " inlier matches (" << num_matches << " total)."
-              << std::endl;
+    mpLogger->AddMapperStereo(int(img_data.size()), num_matches, num_inliers);
+    mpLogger->PrintMapperStereo();
 }
 
 void NfrMapper::match_all() {

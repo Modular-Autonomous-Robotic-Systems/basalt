@@ -14,6 +14,7 @@ All rights reserved.
 #include <pangolin/gl/gldraw.h>
 #include <pangolin/image/image.h>
 
+#include <cstdio>
 #include <functional>
 
 namespace basalt {
@@ -133,6 +134,18 @@ void SlamVisualiser::SetupLayout() {
     mpShowLocalMapKfs = std::make_unique<pangolin::Var<bool>>(
         "ui.show_local_map_kfs", true, false, true);
 
+    // A std::string Var renders as a TextInput, which re-reads the value every
+    // frame. READONLY clears its can_edit so it displays without being
+    // editable. TextInput::Render draws the title left-aligned and the value
+    // right-aligned on one row and never wraps, so a long value overlaps the
+    // title. One narrow Var per field gives each its own line.
+    mpLocalMapPts = std::make_unique<pangolin::Var<std::string>>(
+        "ui.map_pts", std::string("-"), pangolin::META_FLAG_READONLY);
+    mpLocalMapKfs = std::make_unique<pangolin::Var<std::string>>(
+        "ui.map_kfs", std::string("-"), pangolin::META_FLAG_READONLY);
+    mpLocalMapAge = std::make_unique<pangolin::Var<std::string>>(
+        "ui.map_age", std::string("-"), pangolin::META_FLAG_READONLY);
+
     // One ImageView per camera, each bound to DrawImageOverlay with its camera
     // index captured via a member-function bind on this.
     while (mpImgViews.size() < mpCalib.intrinsics.size()) {
@@ -163,6 +176,8 @@ void SlamVisualiser::SetupLayout() {
 
     main_display.AddDisplay(img_view_display);
     main_display.AddDisplay(display3D);
+
+    DrawPlots();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -188,8 +203,11 @@ void SlamVisualiser::Run() {
             // IO-normalised GT is in the initial IMU body frame. The SLAM
             // gravity-aligns its world frame so its first T_w_i != Identity.
             // Multiplying by slam_first maps GT into the SLAM world frame.
+            // An aligned SLAM world is already the GT world.
             Sophus::SE3d T_gt_vis =
-                slam_first ? *slam_first * gt.T_w_i : gt.T_w_i;
+                slam_first && !mpController.IsGroundTruthAligned()
+                    ? *slam_first * gt.T_w_i
+                    : gt.T_w_i;
             mvpGroundTruthTrajectory.emplace_back(T_gt_vis.translation());
         }
 
@@ -234,6 +252,8 @@ void SlamVisualiser::Run() {
         if (mpShowEstPos->GuiChanged() || mpShowEstVel->GuiChanged() ||
             mpShowEstBg->GuiChanged() || mpShowEstBa->GuiChanged())
             DrawPlots();
+
+        UpdateLocalMapStatus();
 
         pangolin::FinishFrame();  // renders the view tree, fires callbacks,
                                   // swaps
@@ -293,15 +313,19 @@ void SlamVisualiser::DrawScene(pangolin::View& view) {
 
     // ── 3. Latest VIO frusta + sliding-window landmarks ───────────────
     if (vio) {
-        for (const auto& p : vio->states)
+        for (size_t s = 0; s + 1 < vio->states.size(); s++)
             for (size_t i = 0; i < mpCalib.T_i_c.size(); i++)
-                render_camera((p * mpCalib.T_i_c[i]).matrix(), 2.0f,
-                              state_color, 0.1f);
+                render_camera((vio->states[s] * mpCalib.T_i_c[i]).matrix(),
+                              2.0f, window_state_color, 0.1f);
+        if (!vio->states.empty())
+            for (size_t i = 0; i < mpCalib.T_i_c.size(); i++)
+                render_camera((vio->states.back() * mpCalib.T_i_c[i]).matrix(),
+                              3.0f, current_frame_color, 0.15f);
         for (const auto& p : vio->frames)
             for (size_t i = 0; i < mpCalib.T_i_c.size(); i++)
                 render_camera((p * mpCalib.T_i_c[i]).matrix(), 2.0f, pose_color,
                               0.1f);
-        glPointSize(3);
+        glPointSize(2);
         glColor3ubv(pose_color);
         pangolin::glDrawPoints(vio->points);
     }
@@ -309,7 +333,7 @@ void SlamVisualiser::DrawScene(pangolin::View& view) {
     // ── 4. Local map: distinct marker (orange, larger) + amber KF frusta ─
     if (lm) {
         if (*mpShowLocalMapPoints) {
-            glPointSize(3);
+            glPointSize(2);
             glColor3ubv(local_map_point_color);
             pangolin::glDrawPoints(lm->points);
         }
@@ -458,6 +482,30 @@ void SlamVisualiser::DrawPlots() {
     }
 }
 
+void SlamVisualiser::UpdateLocalMapStatus() {
+    basalt::LocalMapperVisualizationData::Ptr lm;
+    std::chrono::steady_clock::time_point arrival;
+    bool has_lm;
+    {
+        std::lock_guard<std::mutex> lock(mpMtxLocalMap);
+        lm = mpLatestLocalMap;
+        arrival = mpLocalMapArrival;
+        has_lm = mpHasLocalMap;
+    }
+    if (!has_lm || !lm) return;
+
+    const double age = std::chrono::duration<double>(
+                           std::chrono::steady_clock::now() - arrival)
+                           .count();
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%zu", lm->points.size());
+    *mpLocalMapPts = std::string(buf);
+    std::snprintf(buf, sizeof(buf), "%zu", lm->keyframes.size());
+    *mpLocalMapKfs = std::string(buf);
+    std::snprintf(buf, sizeof(buf), "%.1fs", age);
+    *mpLocalMapAge = std::string(buf);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Consumer threads (no GL calls; fill caches only)
 // ═══════════════════════════════════════════════════════════════════
@@ -505,6 +553,8 @@ void SlamVisualiser::ConsumeLocalMapQueue() {
         if (!data) break;
         std::lock_guard<std::mutex> lock(mpMtxLocalMap);
         mpLatestLocalMap = data;  // keep only the newest map
+        mpLocalMapArrival = std::chrono::steady_clock::now();
+        mpHasLocalMap = true;
     }
 }
 

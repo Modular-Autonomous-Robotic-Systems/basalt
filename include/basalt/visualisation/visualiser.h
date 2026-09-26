@@ -9,9 +9,11 @@
 #include <pangolin/display/image_view.h>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -46,6 +48,7 @@ private:
     void DrawImageOverlay(pangolin::View& view, size_t cam_id);
     void DrawPlots();
     void SetupLayout();
+    void UpdateLocalMapStatus();
 
     // ── consumer-thread bodies (no GL calls) ──────────────────────────
     void ConsumeVioVisQueue();    // → mpLatestVio
@@ -72,6 +75,11 @@ private:
     // ── latest-only caches (live edge; no history, no image cache) ────
     basalt::VioVisualizationData::Ptr mpLatestVio;
     basalt::LocalMapperVisualizationData::Ptr mpLatestLocalMap;
+    // Arrival wall time of mpLatestLocalMap, written under mpMtxLocalMap. The
+    // mapper is keyframe-driven, so without an age the panel cannot separate an
+    // idle mapper from one publishing empty maps.
+    std::chrono::steady_clock::time_point mpLocalMapArrival;
+    bool mpHasLocalMap = false;
     std::mutex mpMtxVioVis;    // guards mpLatestVio
     std::mutex mpMtxVioState;  // guards mvpVioTrajectory
     std::mutex mpMtxLocalMap;  // guards mpLatestLocalMap
@@ -100,6 +108,12 @@ private:
     std::unique_ptr<pangolin::Var<bool>> mpShowObs, mpShowFlow, mpShowIds,
         mpShowGt, mpShowEstPos, mpShowEstVel, mpShowEstBg, mpShowEstBa,
         mpFollow, mpShowLocalMapPoints, mpShowLocalMapKfs;
+
+    // Read-only panel readout of the latest local-map snapshot. Pangolin's
+    // TextInput draws title and value on one row and never wraps, so one Var
+    // per field is the only way to give each its own line.
+    std::unique_ptr<pangolin::Var<std::string>> mpLocalMapPts, mpLocalMapKfs,
+        mpLocalMapAge;
 
     // ── consumer threads + lifecycle flags ────────────────────────────
     std::thread mpVioVisConsumerThread, mpVioStateConsumerThread,

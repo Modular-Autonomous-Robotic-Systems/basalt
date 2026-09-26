@@ -301,30 +301,275 @@ where $\mathbf{r}_k \in \mathbb{R}^2$ is the roll-pitch residual defined in Sect
 
 ### 3.2 Feature Detection
 
-Fresh keypoint detection is performed on every keyframe image stored in `NfrMapper::img_data` (populated from `opt_flow_res` during `processMargData`). Detection runs in parallel over all frames using TBB (`nfr_mapper.cpp:465–499`):
+Fresh keypoint detection is performed on every keyframe image stored in `NfrMapper::img_data`, populated from `opt_flow_res` during `processMargData`. The mapper does not reuse the corners that the optical-flow front end already tracked, because those corners were selected to be trackable across a short baseline and carry no descriptor, whereas the mapper needs a representation that survives an arbitrary gap in time and viewpoint. Detection is driven by `NfrMapper::detect_keypoints` (`nfr_mapper.cpp:508-539`), which walks `img_data` serially and calls `NfrMapper::detect_timestamp_keypoints` (`nfr_mapper.cpp:477-506`) once per timestamp. The per-frame routine performs six steps for each camera in the rig.
 
-1. **Keypoint detection**: `detectKeypointsMapping` extracts up to `mapper_detection_num_points` FAST/Harris corners per image.
-2. **Angle computation**: `computeAngles` estimates the dominant orientation of each corner.
-3. **Descriptor computation**: `computeDescriptors` computes binary descriptors (ORB-style) for matching.
+1. **Keypoint detection**: `detectKeypointsMapping` extracts up to `mapper_detection_num_points` Shi-Tomasi corners per image.
+2. **Angle computation**: `computeAngles` estimates the dominant orientation of each corner from its intensity centroid.
+3. **Descriptor computation**: `computeDescriptors` computes a 256 bit steered BRIEF descriptor per corner.
 4. **Unprojection**: Each 2D corner is unprojected to a unit-sphere ray using the calibrated camera intrinsics (`calib.intrinsics[cam_id].unproject`).
 5. **BoW encoding**: `hash_bow_database->compute_bow` converts the descriptor set into a Bag-of-Words vector.
 6. **Database insertion**: `hash_bow_database->add_to_database(tcid, kd.bow_vector)` registers the frame for subsequent retrieval.
 
-Detected keypoints are stored in `NfrMapper::feature_corners` keyed by `TimeCamId` (a `(frame_id, cam_id)` pair).
+Detected keypoints are stored in `NfrMapper::feature_corners` keyed by `TimeCamId`, a `(frame_id, cam_id)` pair.
+
+For the offline mapper detection runs in parallel over all frames using TBB as can be seen in `src/vi_estimator/nfr_mapper.cpp:465-499`. However, the `tbb::parallel_for` was removed because two threads updating `HashBowStl::inverted_index` concurrently corrupted it, and the loop at `src/vi_estimator/nfr_mapper.cpp:518-523` now carries a comment recording that. The same section also described step 1 as extracting FAST or Harris corners. Neither is correct for this path. `detectKeypointsMapping` calls `goodFeaturesToTrack` with `useHarrisDetector` left at its default of `false`, so the response is the Shi-Tomasi minimum eigenvalue. FAST is used by the sibling routine `detectKeypoints` (`keypoints.cpp:161-250`), which serves the cell-based visual odometry front end and is never called from the mapping path.
+
+The three algorithmic steps are treated in turn below. Section 3.2.1 covers corner selection, Section 3.2.2 the orientation estimate that makes the descriptor rotation invariant, and Section 3.2.3 the descriptor itself. Section 3.2.4 completes the record with unprojection and Bag-of-Words encoding, Section 3.2.5 draws the three together into an argument for why this particular combination is the right one for the mapping thread, and Section 3.2.6 surveys the improvements the literature offers. A complementary treatment of the same pipeline with a stronger emphasis on the matching stages that consume it is given in [`doc/MappingFeatureExtractionMatching.md`](MappingFeatureExtractionMatching.md).
+
+#### 3.2.1 Corner Detection — the Shi-Tomasi Criterion
+
+**History.** The search for image locations that can be relocated reliably in a second view begins with Moravec's interest operator of 1980, which scored a patch by the minimum sum of squared differences over four discrete shift directions. Harris and Stephens replaced the discrete shifts with a first-order Taylor expansion in 1988, turning the score into an algebraic function of a 2 by 2 matrix and making the response isotropic rather than quantised to four directions. Shi and Tomasi refined the response function itself in 1994, and it is their criterion, not Harris's, that `basalt` uses. Rosten and Drummond's FAST detector of 2006 took the opposite path, abandoning the gradient formulation entirely in favour of a learned decision tree over a Bresenham circle of sixteen pixels, trading the well-conditioned structure tensor for roughly an order of magnitude in speed.
+
+**Mathematical background.** Consider a weighted patch centred at $(x,y)$ and the sum of squared intensity differences induced by displacing it by $\boldsymbol{\Delta} = (\Delta x, \Delta y)^T$,
+
+$$E(\boldsymbol{\Delta}) = \sum_{(u,v) \in \mathcal{W}} w(u,v) \left[ I(u + \Delta x,\, v + \Delta y) - I(u,v) \right]^2 .$$
+
+A first-order Taylor expansion of the shifted intensity, $I(u + \Delta x, v + \Delta y) \approx I(u,v) + \nabla I^T \boldsymbol{\Delta}$, reduces this to a quadratic form,
+
+$$E(\boldsymbol{\Delta}) \approx \boldsymbol{\Delta}^T \mathbf{M} \boldsymbol{\Delta}, \qquad \mathbf{M}(x,y) = \sum_{(u,v) \in \mathcal{W}} w(u,v) \begin{bmatrix} I_x^2 & I_x I_y \\ I_x I_y & I_y^2 \end{bmatrix},$$
+
+where $\mathbf{M}$ is the second-moment matrix, also called the structure tensor. It is symmetric and positive semi-definite, so it admits the eigendecomposition $\mathbf{M} = \mathbf{R}\,\mathrm{diag}(\lambda_1, \lambda_2)\,\mathbf{R}^T$ with $\lambda_1 \geq \lambda_2 \geq 0$. The level sets of $E$ are ellipses whose semi-axes are $\lambda_1^{-1/2}$ and $\lambda_2^{-1/2}$, so over all unit displacement directions the smallest rise in $E$ is exactly $\lambda_2$. The Shi-Tomasi response is therefore
+
+$$R = \min(\lambda_1, \lambda_2) = \tfrac{1}{2}\left[ \left(\textstyle\sum I_x^2 + \sum I_y^2\right) - \sqrt{\left(\textstyle\sum I_x^2 - \sum I_y^2\right)^2 + 4\left(\textstyle\sum I_x I_y\right)^2} \right],$$
+
+which is the worst-case sensitivity of the patch to displacement in any direction. A large $R$ certifies that the patch changes appreciably however it is moved, which is precisely the property that makes it relocatable.
+
+The significance of this choice runs deeper than a scalar summary of two eigenvalues. The same matrix $\mathbf{M}$ is the normal-equation matrix of the Lucas-Kanade differential tracker, whose update solves $\mathbf{M}\boldsymbol{\Delta} = \mathbf{b}$. Requiring $\lambda_{\min}$ to be large is therefore identical to requiring that the tracker's own linear system be well conditioned, which is why Shi and Tomasi titled their paper "Good Features to Track" and why OpenCV names the function `goodFeaturesToTrack`. The criterion does not merely describe a corner, it selects the features on which the downstream estimator is numerically stable.
+
+Harris and Stephens instead used $R_H = \det \mathbf{M} - k\,(\mathrm{tr}\,\mathbf{M})^2 = \lambda_1 \lambda_2 - k(\lambda_1 + \lambda_2)^2$, which avoids the square root but introduces a free sensitivity parameter $k$ with no principled value, conventionally fixed between 0.04 and 0.06. Shi-Tomasi has no such parameter. Given that the square root above costs a single instruction on a 2 by 2 system, the Harris economy is no longer worth its tuning burden, and this is the standard modern justification for preferring the minimum eigenvalue.
+
+**Implementation.** `detectKeypointsMapping` (`keypoints.cpp:136-159`) first converts the 16 bit image to 8 bit by a right shift of eight places,
+
+```cpp
+uint8_t* dst = image.ptr();
+const uint16_t* src = img_raw.ptr;
+for (size_t i = 0; i < img_raw.size(); i++) {
+  dst[i] = (src[i] >> 8);
+}
+
+std::vector<cv::Point2f> points;
+goodFeaturesToTrack(image, points, num_features, 0.01, 8);
+```
+
+The five-argument call leaves `blockSize` at its OpenCV default of 3, `useHarrisDetector` at `false` and the mask empty, so $\mathcal{W}$ is a 3 by 3 box window with uniform weights and the response is the minimum eigenvalue. OpenCV computes $R$ at every pixel, then applies three filters in order. A corner is kept only if $R > q \cdot \max_{(x,y)} R$ with the quality level $q = 0.01$, surviving corners are visited in descending $R$ and greedily suppressed if they lie within `minDistance` $= 8$ pixels of an already accepted corner, and the list is finally truncated to `maxCorners`, which `basalt` sets to `config.mapper_detection_num_points`. That parameter defaults to 800 (`vio_config.cpp:94`) and is raised to 1800 in `data/sitl_config_vo.json:40`.
+
+Each surviving corner is admitted only if it clears an image border of `EDGE_THRESHOLD` $= 19$ pixels,
+
+```cpp
+if (img_raw.InBounds(points[i].x, points[i].y, EDGE_THRESHOLD)) {
+  kd.corners.emplace_back(points[i].x, points[i].y);
+}
+```
+
+That constant is not arbitrary. The BRIEF sampling offsets of Section 3.2.3 span the range $[-13, 12]$ in both axes, so the largest distance from the patch centre to a sample is $\sqrt{13^2 + 13^2} = 18.38$ pixels. Rotation preserves that norm and rounding to the nearest integer can add at most half a pixel per axis, so a steered sample never falls further than 19 pixels from the corner. `Image::InBounds(x, y, border)` requires `border <= x < w - border - 1` (`basalt-headers/include/basalt/image/image.h:723-727`), so a border of 19 is exactly sufficient and not one pixel more. The orientation patch of Section 3.2.2 needs only 15 pixels and is therefore covered a fortiori.
+
+**Properties and limitations.** Shi-Tomasi corners are invariant to rotation of the image plane, because $\mathbf{M}$ transforms by conjugation under a rotation and its eigenvalues are unchanged, and they are equivariant under an affine intensity change $I \mapsto aI + b$ only up to the factor $a^2$, which the relative quality threshold partly absorbs. Three limitations bear directly on the mapping thread.
+
+The first is the absence of scale invariance. `detectKeypointsMapping` runs on a single full-resolution image with no pyramid, whereas ORB detects over eight octaves with a scale factor of 1.2 and assigns each keypoint an octave. A corner detected at one distance therefore has no guarantee of being redetected when the vehicle has halved or doubled its range to the structure, which bounds the viewpoint change over which a loop can close.
+
+The second is that the acceptance threshold is relative to the single strongest response in the frame. A specular highlight, a lens flare or one very high contrast structure raises $\max R$ and with it the bar for the entire image, so the detected count can collapse on a frame that is otherwise perfectly textured. This is a plausible contributor to the retrieval failure recorded in [`../context/keyframe_driven_local_mapping.md`](../context/keyframe_driven_local_mapping.md), where the 2026-09-10 run returned zero bag-of-words hits on 57 of 66 mapping cycles, and it is the reason the instrumentation planned there must separate "no keypoints at all" from "keypoints fine, retrieval too strict".
+
+The third is that corner positions are never refined below the pixel. The `cv::cornerSubPix` call that would do so is commented out at `keypoints.cpp:239-243`. A position quantised uniformly to the pixel grid carries a standard deviation of $1/\sqrt{12} = 0.289$ pixels, and `mapper_obs_std_dev` is set to 0.25 (`vio_config.cpp:92`). The assumed observation noise in the bundle adjustment of Section 3.1.1 is thus accounted for almost entirely by quantisation, leaving no budget for detector jitter or calibration residual. Sub-pixel refinement would not merely reduce the residuals, it would make the assumed $\boldsymbol{\Sigma}_{ij}$ defensible.
+
+#### 3.2.2 Orientation Assignment — the Intensity Centroid
+
+**History.** Binary intensity-comparison descriptors are not rotation invariant by construction, because the sample pattern is expressed in image axes. Rotation invariance must therefore be supplied by an external orientation estimate attached to each keypoint. SIFT solved this in 2004 with a 36 bin histogram of gradient orientations weighted by gradient magnitude, taking the dominant peak. That is accurate but costs a gradient computation and a histogram per keypoint. Rosin proposed the intensity centroid in 1999 as a far cheaper alternative, and Rublee and colleagues adopted it for ORB in 2011 after measuring it to be both faster and, on their data, more stable than the gradient histogram. `basalt` uses Rosin's construction unchanged.
+
+**Mathematical background.** Define the raw image moments of a patch $\mathcal{D}$ centred on the corner,
+
+$$m_{pq} = \sum_{(x,y) \in \mathcal{D}} x^p y^q\, I(x,y),$$
+
+where $x$ and $y$ are offsets from the corner, not absolute pixel indices. The intensity centroid is the first moment normalised by the zeroth,
+
+$$\mathbf{C} = \left( \frac{m_{10}}{m_{00}},\; \frac{m_{01}}{m_{00}} \right).$$
+
+The orientation is the direction of the vector from the patch centre to the centroid, and since $m_{00} > 0$ scales both components identically it may be dropped,
+
+$$\theta = \mathrm{atan2}(m_{01},\, m_{10}).$$
+
+The construction is meaningful precisely because a corner is, by the definition of Section 3.2.1, a location where intensity is not symmetric about the centre, so the centroid is displaced from it by a margin that grows with the corner's own distinctiveness.
+
+The property that matters is equivariance. Let the patch be rotated about its centre by $\varphi$, so that the observed intensity becomes $I'(\mathbf{x}) = I(\mathbf{R}(-\varphi)\mathbf{x})$. Substituting into the moment sum and changing variables gives
+
+$$\begin{pmatrix} m_{10}' \\ m_{01}' \end{pmatrix} = \mathbf{R}(\varphi) \begin{pmatrix} m_{10} \\ m_{01} \end{pmatrix} \quad \Longrightarrow \quad \theta' = \theta + \varphi .$$
+
+The estimated angle therefore rotates exactly with the image content, which is what allows the descriptor of Section 3.2.3 to cancel the rotation by steering its sampling pattern by $-\theta$ in the patch frame.
+
+Two invariances follow from the geometry of the support. Because $\mathcal{D}$ is centrally symmetric, $\sum_{\mathcal{D}} x = \sum_{\mathcal{D}} y = 0$, so an additive brightness offset $I \mapsto I + b$ leaves $m_{10}$ and $m_{01}$ unchanged. Because a multiplicative gain $I \mapsto aI$ scales both components equally, it leaves $\theta$ unchanged. The angle is thus invariant to any affine photometric change $I \mapsto aI + b$ with $a > 0$. The support must nonetheless be a disc rather than the square patch, since a square support admits different pixels as the content rotates and would break the equivariance derived above.
+
+**Implementation.** `computeAngles` (`keypoints.cpp:252-281`) accumulates the two moments over the disc of radius `HALF_PATCH_SIZE` $= 15$, giving the 31 by 31 patch from which the descriptor pattern tables take their name.
+
+```cpp
+if (rotate_features) {
+  double m01 = 0, m10 = 0;
+  for (int x = -HALF_PATCH_SIZE; x <= HALF_PATCH_SIZE; x++) {
+    for (int y = -HALF_PATCH_SIZE; y <= HALF_PATCH_SIZE; y++) {
+      if (x * x + y * y <= HALF_PATCH_SIZE * HALF_PATCH_SIZE) {
+        double val = img_raw(cx + x, cy + y);
+        m01 += y * val;
+        m10 += x * val;
+      }
+    }
+  }
+  angle = atan2(m01, m10);
+}
+```
+
+The mapper passes `rotate_features = true` at `nfr_mapper.cpp:488`, so the branch is always taken on this path. Note that the summation reads `img_raw`, the full 16 bit image, whereas detection in Section 3.2.1 worked on the 8 bit reduction. The angle therefore carries more photometric precision than the corner position it is attached to.
+
+**Properties and limitations.** The estimate costs one multiply-accumulate pair per pixel over roughly $\pi \cdot 15^2 \approx 707$ pixels and needs no gradient, no smoothing and no histogram, which is the whole reason it was adopted. Its weakness is that it is a single first-order statistic and offers no confidence measure. When the disc is close to radially symmetric in intensity the moment vector shrinks towards zero and the angle becomes dominated by noise, and in the exact degenerate case IEEE 754 defines $\mathrm{atan2}(0,0) = 0$, so a wholly undetermined orientation is silently reported as zero radians rather than rejected. `basalt` applies no gate on $\|(m_{10}, m_{01})\|$, so such keypoints enter the descriptor stage with an arbitrary steering angle and contribute descriptors that will not match their own counterparts in an adjacent view. A magnitude gate is among the improvements of Section 3.2.6.
+
+#### 3.2.3 Descriptor Computation — Steered BRIEF
+
+**History.** The descriptor problem is to summarise the neighbourhood of a keypoint in a form that is stable across viewpoint and illumination yet cheap to compare. SIFT answered it in 2004 with a 128 dimensional histogram of oriented gradients, and SURF in 2006 accelerated the same idea using integral images and Haar responses. Both produce floating-point vectors, 512 bytes for SIFT, compared under the Euclidean metric. Calonder and colleagues broke from that lineage in 2010 with BRIEF, which forms the descriptor directly as a string of binary intensity comparisons, reducing storage to 32 bytes and the metric to a Hamming distance. BRIEF as published was not rotation invariant. ORB supplied the missing invariance in 2011 by steering the sampling pattern with the intensity-centroid angle of Section 3.2.2 and, critically, by relearning the pattern so that the steered bits retained the statistical properties that make a binary code discriminative. BRISK and FREAK followed in 2011 and 2012 with hand-designed concentric sampling patterns and explicit scale handling, and the learned binary descriptors, of which BEBLID in 2020 is the most directly substitutable, later recovered accuracy close to SIFT at a cost below ORB.
+
+**Mathematical background.** For a smoothed or raw patch $\mathbf{p}$ and an ordered pair of sample locations $(\mathbf{a}_i, \mathbf{b}_i)$, the elementary binary test is
+
+$$\tau(\mathbf{p}; \mathbf{a}_i, \mathbf{b}_i) = \begin{cases} 1 & \text{if } I(\mathbf{a}_i) < I(\mathbf{b}_i) \\ 0 & \text{otherwise.} \end{cases}$$
+
+The descriptor is the concatenation of $n_d = 256$ such tests, $\mathbf{d} = \left( \tau_1, \tau_2, \dots, \tau_{256} \right) \in \{0,1\}^{256}$, and similarity between two descriptors is the Hamming distance
+
+$$d_H\!\left(\mathbf{d}^{(1)}, \mathbf{d}^{(2)}\right) = \mathrm{popcount}\!\left( \mathbf{d}^{(1)} \oplus \mathbf{d}^{(2)} \right),$$
+
+which four XOR operations and four `POPCNT` instructions evaluate on a 64 bit machine. Because each bit is the sign of a difference, the descriptor is invariant to any monotonically increasing photometric transform, which is a stronger guarantee than the affine invariance that normalised gradient histograms provide.
+
+Rotation invariance is obtained by steering. Collect the sample locations into $\mathbf{S} = \begin{bmatrix} \mathbf{a}_1 & \cdots & \mathbf{a}_{256} \\ \mathbf{b}_1 & \cdots & \mathbf{b}_{256} \end{bmatrix}$ and rotate them by the keypoint angle,
+
+$$\mathbf{S}_\theta = \mathbf{R}(\theta)\, \mathbf{S}, \qquad \tilde{\mathbf{a}}_i = \left\lfloor \mathbf{R}(\theta)\, \mathbf{a}_i \right\rceil, \quad \tilde{\mathbf{b}}_i = \left\lfloor \mathbf{R}(\theta)\, \mathbf{b}_i \right\rceil,$$
+
+with $\lfloor \cdot \rceil$ denoting rounding to the nearest integer pixel. By the equivariance established in Section 3.2.2, a rotation $\varphi$ of the scene rotates $\theta$ by $\varphi$ and hence rotates $\mathbf{S}_\theta$ by $\varphi$, so the same physical pixel pairs are compared and the descriptor is unchanged up to resampling error.
+
+The choice of the 256 pairs is the subtle part, and it is what separates ORB's rBRIEF from plain BRIEF. A binary bit carries its maximum entropy of one bit when its mean over the data is 0.5, and a code of $n_d$ bits attains its maximum joint entropy of $n_d$ bits only when the bits are mutually uncorrelated. Calonder's isotropic Gaussian sampling gives bits with mean near 0.5 and high variance in the unsteered case, but Rublee and colleagues measured that steering destroys both properties, because the rotated tests become concentrated along the dominant gradient direction that defines $\theta$ and therefore correlated with one another. Their remedy was to learn the pattern. From roughly $205{,}000$ candidate tests evaluated on a training set of some $300{,}000$ keypoint patches, tests were ranked by $\left| \bar{\tau}_i - 0.5 \right|$ and then greedily accepted in that order, each candidate admitted only if its absolute correlation with every already-accepted test fell below a threshold, until 256 had been chosen. The resulting table is what ships in OpenCV as `bit_pattern_31_`, and the effect is that the 256 bit code approaches 256 bits of usable discriminability rather than the far smaller effective dimension a correlated code would deliver. This is what makes the Hamming distance a well-calibrated metric and, downstream, what makes the second-best ratio test of Section 3.3 meaningful.
+
+**Implementation.** The pattern is embedded directly in `keypoints.cpp:58-134` as four `char[256]` tables, `pattern_31_x_a`, `pattern_31_y_a`, `pattern_31_x_b` and `pattern_31_y_b`. Their entries are exactly OpenCV's learned ORB table de-interleaved into four arrays. The first four quadruples are $(8,-3,9,5)$, $(4,2,7,-12)$, $(-11,9,-8,2)$ and $(7,-12,12,-13)$, matching `bit_pattern_31_` element for element, and all 1024 entries lie in $[-13, 12]$, which is the bound that fixes `EDGE_THRESHOLD` in Section 3.2.1. `basalt` therefore inherits ORB's decorrelation learning without carrying its training code.
+
+```cpp
+Eigen::Rotation2Dd rot(angle);
+Eigen::Matrix2d mat_rot = rot.matrix();
+
+for (int i = 0; i < 256; i++) {
+  Eigen::Vector2d va(pattern_31_x_a[i], pattern_31_y_a[i]),
+      vb(pattern_31_x_b[i], pattern_31_y_b[i]);
+
+  Eigen::Vector2i vva = (mat_rot * va).array().round().cast<int>();
+  Eigen::Vector2i vvb = (mat_rot * vb).array().round().cast<int>();
+
+  descriptor[i] =
+      img_raw(cx + vva[0], cy + vva[1]) < img_raw(cx + vvb[0], cy + vvb[1]);
+}
+```
+
+Two deviations from the reference ORB implementation are visible here and both are deliberate to record. First, the rotation is applied at full precision per keypoint, whereas OpenCV quantises $\theta$ to increments of $2\pi/30$ and precomputes thirty steered pattern tables. `basalt` pays two matrix-vector products and a rounding per bit in exchange for removing a steering quantisation of up to six degrees. Second, and more consequentially, no smoothing is applied to the patch before the tests. Calonder and colleagues established that smoothing is not optional for BRIEF, since each test is effectively the sign of a derivative and an unsmoothed sign is maximally sensitive to sensor noise, and they recommended a Gaussian of standard deviation 2 over a 9 by 9 window. OpenCV's ORB achieves the same end with a 5 by 5 box filter evaluated through an integral image. `basalt` samples the raw 16 bit pixels directly, so every bit rests on a single pixel pair whose steered locations have themselves been displaced by up to half a pixel by rounding.
+
+**Properties and limitations.** The descriptor occupies 32 bytes, against 512 for SIFT, and a comparison costs four XOR and four `POPCNT` operations against a 128 dimensional Euclidean norm. For a mapper holding tens of keyframes at 800 to 1800 features each, that ratio decides whether the descriptor store remains in cache. The Hamming metric is also what makes the threshold `mapper_max_hamming_distance` $= 70$ interpretable. Two independent random 256 bit codes have a Hamming distance distributed as $\mathrm{Binomial}(256, \tfrac{1}{2})$, with mean 128 and standard deviation 8, so the threshold sits 7.25 standard deviations into the lower tail and admits a random pair with probability $1.3 \times 10^{-13}$. The threshold is thus extremely conservative against chance agreement, and any false match that survives it is a genuine appearance ambiguity in the scene rather than a statistical accident.
+
+Against those strengths stand three limitations. The descriptor inherits the single-scale detection of Section 3.2.1 and carries no octave, so it is not scale invariant. It is not affine invariant, since steering corrects a planar rotation but not the anisotropic distortion induced by a change in viewing angle on a slanted surface. And the absent smoothing costs real matching accuracy, which is the most tractable of the three to remedy.
+
+#### 3.2.4 Unprojection, Bag-of-Words Encoding and Database Insertion
+
+The remaining three steps turn the per-camera descriptor set into a record that the matching stages of Section 3.3 can consume. Unprojection lifts each 2D corner onto the unit sphere through the calibrated camera model, producing `kd.corners_3d` as homogeneous bearing vectors, and it is these rays rather than the pixel coordinates that the essential-matrix and RANSAC verifiers operate on, which is what allows a single code path to serve pinhole, Kannala-Brandt and double-sphere cameras alike.
+
+Bag-of-Words encoding then compresses the descriptor set into a retrievable signature. `basalt` departs from the DBoW2 lineage here in a way worth stating plainly. DBoW2 trains an offline hierarchical vocabulary by $k$-means over a large descriptor corpus and ships the resulting tree as a data file. `HashBowBase::compute_hash` (`hash_bow.h:33-39`) instead forms the word by extracting `num_bits` descriptor bits at positions drawn from a fixed compile-time random permutation, which is a locality-sensitive hash rather than a trained quantiser. With `mapper_bow_num_bits` $= 16$ the vocabulary is the $2^{16} = 65536$ possible words, and no vocabulary file, no training corpus and no domain assumption is required. The bag-of-words vector is the L1 normalised histogram of word frequencies, $\mathbf{v}_w = c_w / \sum_j c_j$.
+
+The price of that simplicity is quantifiable. Two descriptors hash to the same word if and only if they agree on all 16 selected bits, so two unrelated descriptors collide with probability $2^{-16} = 1.5 \times 10^{-5}$, which is the desired behaviour, but a genuinely matching pair separated by a Hamming distance of $h$ shares a word only with probability $\binom{256-h}{16} \big/ \binom{256}{16}$. That evaluates to 0.52 at $h = 10$, 0.26 at $h = 20$ and 0.13 at $h = 30$. A good match is therefore more likely than not to be split across two different words, and the retrieval score of a true revisit is correspondingly depressed. This is the reason `mapper_frames_to_match_threshold` must be as low as 0.04, and it is directly relevant to the zero-retrieval failure recorded in the context store.
+
+The score itself is computed by `HashBowStl::querry_database` (`hash_bow.h:229-260`) as
+
+```cpp
+scores[v.first] += std::abs(kv.second - v.second) - std::abs(kv.second) - std::abs(v.second);
+...
+results.emplace_back(kv.first, -kv.second / 2.0);
+```
+
+For non-negative histogram entries the accumulated quantity is $|q_w - d_w| - q_w - d_w = -2\min(q_w, d_w)$, so the reported score is the histogram intersection $\sum_w \min(q_w, d_w)$. Since both vectors are L1 normalised this equals $1 - \tfrac{1}{2}\lVert \mathbf{q} - \mathbf{d} \rVert_1$, which is exactly the L1 score of Gálvez-López and Tardós. `basalt` reproduces the DBoW2 similarity measure over an untrained hash vocabulary, and `add_to_database` (`hash_bow.h:219-227`) maintains the inverted index that keeps the query cost proportional to the number of occupied words rather than to the database size.
+
+#### 3.2.5 Significance — Why This Combination
+
+The three algorithms above are not an arbitrary assembly of well-known components. Each is selected by a constraint that the mapping thread imposes, and together they resolve a tension that the optical-flow front end does not face.
+
+That tension is the difference between tracking and recognition. The visual odometry front end matches a frame against its immediate predecessor, where displacement is small, illumination is essentially unchanged and a patch and a gradient descent suffice. The mapper must match a keyframe against any keyframe in the local map, and eventually against a keyframe from an earlier traversal of the same place, where the baseline may be metres, the viewing angle tens of degrees and the exposure entirely different. No patch-based tracker crosses that gap. A descriptor is mandatory, and once a descriptor is mandatory the question becomes which one is affordable.
+
+Affordability is the binding constraint, because the mapper runs concurrently with the estimator on the same vehicle. Detection is invoked on every keyframe entering the local map through `LocalMapper::MapLocally`, which calls the inherited `detect_keypoints` at `local_mapper.cpp:170`, and measurements recorded in the context store put a single `CullRedundantKeyframes` pass at a median of 8.2 milliseconds, so the extraction stage has a budget of the same order and not more. That rules out SIFT and SURF at 800 to 1800 features per image and leaves the binary family.
+
+Within those constraints each choice answers a specific need. Shi-Tomasi supplies corners whose structure tensor is well conditioned, which matters twice over, once because such corners are repeatable across the wide baselines the mapper must bridge, and once because the same conditioning governs the reprojection Jacobians that the bundle adjustment of Section 3.6 will assemble from these very observations. A corner selected by minimum eigenvalue is a corner whose image position constrains the pose, so detection and optimisation are aligned by construction rather than by coincidence. The intensity centroid supplies the rotation invariance that the rest of the pipeline cannot do without, at a cost of one accumulation pass over a 707 pixel disc and no gradients, which is the cheapest credible orientation estimate available. A gradient histogram would cost several times as much for an accuracy the wide-baseline matching cannot exploit. Steered BRIEF supplies discriminability at 32 bytes and four instructions per comparison, and because ORB's learned pattern is embedded verbatim, `basalt` receives the decorrelation and variance properties that make those 256 bits carry close to 256 bits of information, without importing a training pipeline.
+
+The binary representation then propagates its advantage forward through the whole mapping stack. The Hamming metric makes `mapper_max_hamming_distance` calibratable against a known binomial null distribution, as computed in Section 3.2.3, so a match threshold can be set from first principles rather than by tuning. The same bit string is the input to the hash vocabulary, so place recognition needs no second representation and no offline training artefact, a property of real operational value for a vehicle deployed into an environment for which no vocabulary was ever trained. And the resulting correspondences, once verified by the essential matrix and RANSAC of Section 3.3, are exactly the inputs the track builder of Section 3.4 fuses and the triangulation of Section 3.5 converts into the landmarks over which Section 3.6 optimises. The detector, the orientation estimate and the descriptor are therefore the foundation on which the entire non-linear factor recovery formulation of this document rests, since a pose graph with recovered factors cannot correct drift it was never given the correspondences to observe.
+
+What the combination does not provide is equally worth naming. It is not scale invariant, it is not affine invariant, and its descriptor is computed without the smoothing its own originating paper requires. These are the axes along which the pipeline can be improved, and they are taken up next.
+
+#### 3.2.6 Possible Improvements
+
+The improvements below are drawn from the literature and ordered by the aspect of system behaviour they address. Each names the change, the evidence for it and the expected cost.
+
+**Improving tracking and matching robustness.**
+
+Restoring the patch smoothing that BRIEF prescribes is the single cheapest correction available. Calonder and colleagues showed that recognition rate degrades sharply without it and that a Gaussian of standard deviation 2, or equivalently a 5 by 5 box filter evaluated through an integral image as OpenCV's ORB does, is sufficient. The change is confined to `computeDescriptors` and costs one integral-image pass per keyframe, which is negligible beside the detection it follows.
+
+Adding a scale pyramid would remove the most restrictive of the three limitations identified in Section 3.2.3. Detecting over eight octaves at a scale factor of 1.2, as ORB does, and scaling the sampling pattern by the octave, extends the range of viewpoint change over which a landmark remains matchable and directly widens the window in which a loop can be recognised. The cost is a detection pass per octave, roughly a factor of $\sum_k 1.2^{-2k} \approx 2.2$ on the detection stage alone.
+
+Gating the orientation estimate on $\lVert (m_{10}, m_{01}) \rVert$ would suppress the silent $\mathrm{atan2}(0,0) = 0$ degeneracy of Section 3.2.2. Keypoints whose centroid vector is short carry an arbitrary steering angle and produce descriptors that cannot match their own counterparts, so discarding them costs nothing and removes a source of unexplained match failure.
+
+Replacing the descriptor outright is the larger step. BEBLID learns its binary tests by AdaBoost with equal weak-learner weights and reports accuracy close to SIFT at a cost below ORB, and it is available in OpenCV from version 4.5.1, where substituting it for the ORB descriptor has been measured to improve matching by around 14 percent. It is a drop-in replacement in the sense that it consumes the same keypoints and emits the same binary type, so `matchDescriptors`, the hash vocabulary and every threshold downstream continue to apply.
+
+Beyond the binary family, learned front ends are now within embedded budget. XFeat achieves sparse inference on CPU at VGA resolution in real time and reports performance comparable to SuperPoint at a small fraction of its cost, with measurements on embedded hardware of 1.8 frames per second against 0.16 for SuperPoint and 0.58 for ALIKE. Reported integrations of ALIKED, SuperPoint and XFeat into visual-inertial pipelines find learned front ends viable in real time but not uniformly superior to classical tracking, so this warrants evaluation rather than adoption on principle.
+
+**Improving bag-of-words matching.**
+
+The quantified weakness of the present scheme is the word-splitting probability derived in Section 3.2.4, where a true match at a Hamming distance of 20 shares a word only 26 percent of the time. Three remedies exist, in ascending order of disruption.
+
+The first is to hash each descriptor into several independent words rather than one, drawing $L$ disjoint bit subsets from the permutation and inserting the descriptor under all of them. The probability that a true match is missed entirely falls as $(1 - p)^L$, which at $p = 0.26$ and $L = 4$ takes the miss rate from 74 percent to 30 percent, at the cost of an $L$-fold larger inverted index. This is the classical multi-index hashing construction and it requires no training.
+
+The second is to adopt a search structure designed for binary descriptors. HBST builds a binary search tree whose splits are chosen on individual descriptor bits, giving insertion and search in time logarithmic in the database size while retaining a bounded Hamming neighbourhood at each leaf, and it is distributed as a header-only C++ library, which suits a codebase that already avoids heavyweight dependencies. Multi-index hashing offers exact $k$ nearest neighbour search in Hamming space as an alternative with a stronger guarantee.
+
+The third is to replace appearance retrieval with a learned global descriptor. Evaluations consistently find DBoW2-class methods outperformed by NetVLAD-derived approaches under large viewpoint change and severe perceptual aliasing, and recent work reports large retrieval-time reductions at map scales far beyond the present local map. Within the classical family, BoWG addresses perceptual aliasing specifically by grouping co-occurring words, and iBoW-LCD builds the vocabulary incrementally and online, which would preserve the present system's freedom from a trained vocabulary file.
+
+**Improving map fidelity.**
+
+Enabling sub-pixel corner refinement addresses the quantisation floor identified in Section 3.2.1, where the $0.289$ pixel standard deviation of pixel-grid quantisation already exceeds the $0.25$ assumed by `mapper_obs_std_dev`. The `cv::cornerSubPix` call needed is already present in commented form at `keypoints.cpp:239-243`. Restoring it would reduce reprojection residuals and, more importantly, make the observation covariance of Section 3.1.1 an honest description of the measurement rather than an optimistic one.
+
+Enforcing a homogeneous spatial distribution of keypoints is the second significant gain. The greedy `minDistance` suppression that `goodFeaturesToTrack` performs enforces a local separation but does nothing to prevent all retained corners clustering in the most textured region of the image, and a spatially concentrated observation set conditions the pose estimate poorly whatever its cardinality. ORB-SLAM addresses this with a quadtree that subdivides until the requested count is reached. Bailo and colleagues showed that adaptive non-maximal suppression selects the strongest and best distributed subset far more cheaply, their Suppression via Square Covering variant in particular, and reported that it substantially improves motion estimation accuracy for a fixed keypoint budget. Since the mapping thread operates under exactly such a budget through `mapper_detection_num_points`, this is the change with the best ratio of accuracy gained to cost incurred.
+
+Replacing the relative quality gate would remove the failure mode described in Section 3.2.1, where one bright structure suppresses detection across the whole frame. Applying the quality level within each cell of a coarse grid, rather than against the global maximum, decouples regions of differing contrast and composes naturally with the spatial distribution measure above.
+
+**Improving detection speed.**
+
+Restoring the parallelism that commit `5de98a1` removed is the largest single saving available and the one most clearly worth taking. The `tbb::parallel_for` was withdrawn because concurrent insertion corrupted `HashBowStl::inverted_index`, not because the detection work itself is serial. Splitting the loop into a parallel phase that performs detection, orientation, description, unprojection and bag-of-words computation into per-frame local storage, followed by a short serial phase that performs only the database insertions, recovers nearly all of the concurrency while removing the data race by construction. The insertion phase touches no image data and is a small fraction of the total.
+
+Substituting FAST for Shi-Tomasi in the detection stage is the conventional speed trade. FAST evaluates a learned decision tree over a sixteen pixel Bresenham circle and is roughly an order of magnitude faster than a structure-tensor computation, and it is already implemented in this file at `keypoints.cpp:213` for the visual odometry path. The cost is the loss of the eigenvalue conditioning argument of Section 3.2.1, so it should be paired with a Harris or Shi-Tomasi re-ranking of the FAST candidates, which is what ORB itself does.
+
+Two further reductions are available without changing any algorithm. The descriptor loop of Section 3.2.3 recomputes $\mathbf{R}(\theta)$ per keypoint and performs 512 matrix-vector products per descriptor, which ORB's thirty precomputed steered tables avoid entirely at a steering quantisation of six degrees. And detection operates on the 8 bit reduction while description reads the 16 bit original, so the shifted image is built for the detector and then discarded, where a single pass producing both representations, or description on the 8 bit image throughout, would remove one full-image traversal per camera per keyframe.
+
+| Axis | Change | Expected benefit | Cost |
+|------|--------|------------------|------|
+| Matching | Patch smoothing before BRIEF tests | Restores the stability BRIEF requires | One integral-image pass |
+| Matching | Scale pyramid over eight octaves | Scale invariance, wider loop-closure range | About 2.2× detection |
+| Matching | Gate orientation on centroid magnitude | Removes silent `atan2(0,0)` degeneracy | Negligible |
+| Matching | BEBLID in place of steered BRIEF | Around 14% better matching, faster than ORB | Drop-in, same binary type |
+| Matching | Learned front end (XFeat, ALIKED) | Largest robustness gain reported | Inference budget, evaluation required |
+| Retrieval | $L$ disjoint hash words per descriptor | Miss rate $(1-p)^L$ instead of $1-p$ | $L$× inverted index |
+| Retrieval | HBST or multi-index hashing | Logarithmic search, exact kNN option | Header-only dependency |
+| Retrieval | Learned global descriptor | Robust to viewpoint change and aliasing | Model, training data |
+| Fidelity | Sub-pixel corner refinement | Residual floor below `mapper_obs_std_dev` | Already present, commented out |
+| Fidelity | ANMS or quadtree distribution | Better conditioned pose for fixed budget | Small, one suppression pass |
+| Fidelity | Per-cell quality threshold | Removes global-maximum suppression failure | Negligible |
+| Speed | Restore TBB with serial insertion phase | Recovers the concurrency of `5de98a1` | Restructure, no race by construction |
+| Speed | FAST candidates with Shi-Tomasi re-ranking | About 10× on the detection stage | Loses pure eigenvalue selection |
+| Speed | Precomputed steered pattern tables | Removes 512 products per descriptor | 6° steering quantisation |
+| Speed | Single-pass 8 bit and 16 bit preparation | One fewer full-image traversal | Negligible |
 
 ### 3.3 Feature Matching
 
-#### 3.4.1 Stereo Matching
+#### 3.3.1 Stereo Matching
 
-For each stereo pair `(tcid_left, tcid_right)` at the same timestamp, `match_stereo` (`nfr_mapper.cpp:513`) uses the known stereo extrinsic calibration $\mathbf{T}_{0,1} = \mathbf{T}_{w,0}^{-1} \mathbf{T}_{w,1}$ to compute the essential matrix $\mathbf{E}$ via `computeEssential`. Descriptor matching is performed with `matchDescriptors` subject to a Hamming distance threshold `mapper_max_hamming_distance` and second-best ratio test `mapper_second_best_test_ratio`. Only geometrically verified inliers passing the essential-matrix check (`findInliersEssential`, epipolar tolerance $10^{-3}$) with at least 16 inliers are retained.
+For each stereo pair `(tcid_left, tcid_right)` at the same timestamp, `match_stereo` (`nfr_mapper.cpp:541-587`) uses the known stereo extrinsic calibration $\mathbf{T}_{0,1} = \mathbf{T}_{w,0}^{-1} \mathbf{T}_{w,1}$ to compute the essential matrix $\mathbf{E}$ via `computeEssential`. Descriptor matching is performed with `matchDescriptors` subject to a Hamming distance threshold `mapper_max_hamming_distance` and second-best ratio test `mapper_second_best_test_ratio`. Only geometrically verified inliers passing the essential-matrix check (`findInliersEssential`, epipolar tolerance $10^{-3}$) with at least 16 inliers are retained.
 
-#### 3.4.2 Appearance-Based Temporal and Loop-Closure Matching
+#### 3.3.2 Appearance-Based Temporal and Loop-Closure Matching
 
-`match_all` (`nfr_mapper.cpp:555`) performs cross-frame matching for temporal and potential loop-closure connections:
+`match_all` (`nfr_mapper.cpp:588-707`) performs cross-frame matching for temporal and potential loop-closure connections:
 
-1. **BoW retrieval** (parallel over all frames): For each `TimeCamId`, query the `HashBow` database for the `mapper_num_frames_to_match` most visually similar frames, excluding frames from the same timestamp. Pairs with similarity score below `mapper_frames_to_match_threshold` are discarded.
+1. **BoW retrieval** (parallel over all frames, `nfr_mapper.cpp:638`): For each `TimeCamId`, query the `HashBow` database for the `mapper_num_frames_to_match` most visually similar frames. The query passes `&tcid.frame_id` as the `max_t_ns` bound (`nfr_mapper.cpp:612-614`), so only strictly earlier frames are ever returned, and pairs from the same timestamp or with a similarity score below `mapper_frames_to_match_threshold` are discarded. The retrieval stage retained its `tbb::parallel_for` because `querry_database` only reads the inverted index.
 2. **Descriptor matching**: For each candidate pair, `matchDescriptors` is run with a fixed Hamming distance of 70 and ratio 1.2.
-3. **Geometric verification**: `findInliersRansac` runs a RANSAC fundamental-matrix test (threshold `mapper_ransac_threshold`, minimum inliers `mapper_min_matches`) to retain only geometrically consistent matches.
+3. **Geometric verification**: `findInliersRansac` runs a RANSAC relative-pose test (threshold `mapper_ransac_threshold`, minimum inliers `mapper_min_matches`) to retain only geometrically consistent matches. The solver is OpenGV's `CentralRelativePoseSacProblem` in `STEWENIUS` mode (`keypoints.cpp:383-389`), which is the five-point essential-matrix minimal solver operating on the calibrated bearing vectors `kd.corners_3d`, followed by a non-linear refinement of the recovered pose. Correction, 2026-09-12. This step previously described it as a fundamental-matrix test. No fundamental matrix is estimated anywhere in `basalt`, because the intrinsics are always known and the unprojection of Section 3.2.4 has already removed them.
 
 All verified match pairs are stored in `NfrMapper::feature_matches`.
 
@@ -968,3 +1213,34 @@ The following changes are required to upgrade the mapper for real-time use:
 4. `basalt` Mapper Sample Driver: `src/mapper.cpp`.
 5. `basalt` NFR Utilities: `include/basalt/utils/nfr.h`.
 6. `basalt` Marginalisation Documentation: `doc/Marginalisation.md`.
+7. `basalt` Feature Extraction and Matching Documentation: `doc/MappingFeatureExtractionMatching.md`.
+
+### Feature Detection and Description (Section 3.2)
+
+8. Moravec, H. P. (1980). *Obstacle Avoidance and Navigation in the Real World by a Seeing Robot Rover*. PhD thesis, Stanford University.
+9. Harris, C., & Stephens, M. (1988). *A Combined Corner and Edge Detector*. Alvey Vision Conference, 147–151.
+10. Shi, J., & Tomasi, C. (1994). *Good Features to Track*. IEEE CVPR, 593–600.
+11. Lucas, B. D., & Kanade, T. (1981). *An Iterative Image Registration Technique with an Application to Stereo Vision*. IJCAI, 674–679.
+12. Rosten, E., & Drummond, T. (2006). *Machine Learning for High-Speed Corner Detection*. ECCV, 430–443.
+13. Rosin, P. L. (1999). *Measuring Corner Properties*. Computer Vision and Image Understanding, 73(2), 291–307.
+14. Lowe, D. G. (2004). *Distinctive Image Features from Scale-Invariant Keypoints*. IJCV, 60(2), 91–110.
+15. Bay, H., Tuytelaars, T., & Van Gool, L. (2006). *SURF: Speeded Up Robust Features*. ECCV, 404–417.
+16. Calonder, M., Lepetit, V., Strecha, C., & Fua, P. (2010). *BRIEF: Binary Robust Independent Elementary Features*. ECCV, 778–792. Extended as Calonder et al. (2012), *BRIEF: Computing a Local Binary Descriptor Very Fast*, IEEE TPAMI, 34(7), 1281–1298.
+17. Rublee, E., Rabaud, V., Konolige, K., & Bradski, G. (2011). *ORB: An Efficient Alternative to SIFT or SURF*. IEEE ICCV, 2564–2571.
+18. Leutenegger, S., Chli, M., & Siegwart, R. (2011). *BRISK: Binary Robust Invariant Scalable Keypoints*. IEEE ICCV, 2548–2555.
+19. Alahi, A., Ortiz, R., & Vandergheynst, P. (2012). *FREAK: Fast Retina Keypoint*. IEEE CVPR, 510–517.
+20. Gálvez-López, D., & Tardós, J. D. (2012). *Bags of Binary Words for Fast Place Recognition in Image Sequences*. IEEE Transactions on Robotics, 28(5), 1188–1197.
+21. Mur-Artal, R., Montiel, J. M. M., & Tardós, J. D. (2015). *ORB-SLAM: A Versatile and Accurate Monocular SLAM System*. IEEE Transactions on Robotics, 31(5), 1147–1163.
+
+### Improvements Surveyed (Section 3.2.6)
+
+22. Bailo, O., Rameau, F., Joo, K., Park, J., Bogdan, O., & Kweon, I. S. (2018). *Efficient Adaptive Non-Maximal Suppression Algorithms for Homogeneous Spatial Keypoint Distribution*. Pattern Recognition Letters, 106, 53–60. Code at https://github.com/BAILOOL/ANMS-Codes.
+23. Suárez, I., Sfeir, G., Buenaposada, J. M., & Baumela, L. (2020). *BEBLID: Boosted Efficient Binary Local Image Descriptor*. Pattern Recognition Letters, 133, 366–372. arXiv:2402.04482. Available in OpenCV from 4.5.1.
+24. Schlegel, D., & Grisetti, G. (2018). *HBST: A Hamming Distance Embedding Binary Search Tree for Feature-Based Visual Place Recognition*. IEEE Robotics and Automation Letters. arXiv:1802.09261.
+25. Norouzi, M., Punjani, A., & Fleet, D. J. (2014). *Fast Exact Search in Hamming Space with Multi-Index Hashing*. IEEE TPAMI, 36(6), 1107–1119. arXiv:1307.2982.
+26. Garcia-Fidalgo, E., & Ortiz, A. (2018). *iBoW-LCD: An Appearance-Based Loop Closure Detection Approach Using Incremental Bags of Binary Words*. IEEE Robotics and Automation Letters. arXiv:1802.05909.
+27. *Bag-of-Word-Groups (BoWG): A Robust and Efficient Loop Closure Detection Method Under Perceptual Aliasing* (2025). arXiv:2510.22529.
+28. Arandjelović, R., Gronat, P., Torii, A., Pajdla, T., & Sivic, J. (2016). *NetVLAD: CNN Architecture for Weakly Supervised Place Recognition*. IEEE CVPR, 5297–5307.
+29. Potje, G., Cadar, F., Araujo, A., Martins, R., & Nascimento, E. R. (2024). *XFeat: Accelerated Features for Lightweight Image Matching*. IEEE CVPR. arXiv:2404.19174. Code at https://github.com/verlab/accelerated_features.
+30. DeTone, D., Malisiewicz, T., & Rabinovich, A. (2018). *SuperPoint: Self-Supervised Interest Point Detection and Description*. IEEE CVPR Workshops, 224–236.
+31. Zhao, X., Wu, X., Chen, W., Chen, P. C. Y., Xu, Q., & Li, Z. (2023). *ALIKED: A Lighter Keypoint and Descriptor Extraction Network via Deformable Transformation*. IEEE Transactions on Instrumentation and Measurement, 72, 1–16.

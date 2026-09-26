@@ -46,16 +46,17 @@ template <class Scalar>
 typename VioEstimatorBase<Scalar>::Ptr
 factory_helper(const VioConfig &config, const Calibration<double> &cam,
                const Eigen::Vector3d &g, bool use_imu,
-               bool useProducerConsumerArchitecture = false) {
+               bool useProducerConsumerArchitecture,
+               const Logger::Ptr &logger) {
     typename VioEstimatorBase<Scalar>::Ptr res;
 
     if (use_imu) {
         res.reset(new SqrtKeypointVioEstimator<Scalar>(
-            g, cam, config, useProducerConsumerArchitecture));
+            g, cam, config, useProducerConsumerArchitecture, logger));
 
     } else {
         res.reset(new SqrtKeypointVoEstimator<Scalar>(
-            cam, config, useProducerConsumerArchitecture));
+            cam, config, useProducerConsumerArchitecture, logger));
     }
 
     return res;
@@ -68,9 +69,10 @@ typename VioEstimatorBase<Scalar>::Ptr
 VioEstimatorFactory::getVioEstimator(const VioConfig &config,
                                      const Calibration<Scalar> &cam,
                                      const Eigen::Vector3d &g, bool use_imu,
-                                     bool useProducerConsumerArchitecture) {
+                                     bool useProducerConsumerArchitecture,
+                                     const Logger::Ptr &logger) {
     return factory_helper<Scalar>(config, cam, g, use_imu,
-                                  useProducerConsumerArchitecture);
+                                  useProducerConsumerArchitecture, logger);
 }
 
 double alignSVD(const std::vector<int64_t> &filter_t_ns,
@@ -178,7 +180,7 @@ template VioEstimatorBase<double>::Ptr
 VioEstimatorFactory::getVioEstimator<double>(const VioConfig &,
                                              const Calibration<double> &,
                                              const Eigen::Vector3d &, bool,
-                                             bool);
+                                             bool, const Logger::Ptr &);
 #endif
 
 #ifdef BASALT_INSTANTIATIONS_FLOAT

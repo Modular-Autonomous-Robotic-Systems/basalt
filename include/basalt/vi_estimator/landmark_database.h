@@ -35,135 +35,168 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
 #include <basalt/utils/imu_types.h>
+
 #include <basalt/utils/eigen_utils.hpp>
+#include <cstdint>
+#include <map>
+#include <set>
 
 namespace basalt {
 
+using ObserverFrameMap = std::map<FrameId, uint32_t>;
+using ObserverIndex = std::map<KeypointId, ObserverFrameMap>;
+using ObservedByFrameMap = std::map<FrameId, std::set<KeypointId>>;
+using CovisRow = std::map<FrameId, size_t>;
+using CovisMatrix = std::map<FrameId, CovisRow>;
+
 template <class Scalar_>
 struct KeypointObservation {
-  using Scalar = Scalar_;
+    using Scalar = Scalar_;
 
-  int kpt_id;
-  Eigen::Matrix<Scalar, 2, 1> pos;
+    int kpt_id;
+    Eigen::Matrix<Scalar, 2, 1> pos;
 
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
 // keypoint position defined relative to some frame
 template <class Scalar_>
 struct Keypoint {
-  using Scalar = Scalar_;
-  using Vec2 = Eigen::Matrix<Scalar, 2, 1>;
+    using Scalar = Scalar_;
+    using Vec2 = Eigen::Matrix<Scalar, 2, 1>;
 
-  using ObsMap = Eigen::aligned_map<TimeCamId, Vec2>;
-  using MapIter = typename ObsMap::iterator;
+    using ObsMap = Eigen::aligned_map<TimeCamId, Vec2>;
+    using MapIter = typename ObsMap::iterator;
 
-  // 3D position parameters
-  Vec2 direction;
-  Scalar inv_dist;
+    // 3D position parameters
+    Vec2 direction;
+    Scalar inv_dist;
 
-  // Observations
-  TimeCamId host_kf_id;
-  ObsMap obs;
+    // Observations
+    TimeCamId host_kf_id;
+    ObsMap obs;
 
-  inline void backup() {
-    backup_direction = direction;
-    backup_inv_dist = inv_dist;
-  }
+    inline void backup() {
+        backup_direction = direction;
+        backup_inv_dist = inv_dist;
+    }
 
-  inline void restore() {
-    direction = backup_direction;
-    inv_dist = backup_inv_dist;
-  }
+    inline void restore() {
+        direction = backup_direction;
+        inv_dist = backup_inv_dist;
+    }
 
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
- private:
-  Vec2 backup_direction;
-  Scalar backup_inv_dist;
+private:
+    Vec2 backup_direction;
+    Scalar backup_inv_dist;
 };
 
 template <class Scalar_>
 class LandmarkDatabase {
- public:
-  using Scalar = Scalar_;
+public:
+    using Scalar = Scalar_;
 
-  // Non-const
-  void addLandmark(KeypointId lm_id, const Keypoint<Scalar>& pos);
+    // Non-const
+    void addLandmark(KeypointId lm_id, const Keypoint<Scalar>& pos);
 
-  void removeFrame(const FrameId& frame);
+    void removeFrame(const FrameId& frame);
 
-  void removeKeyframes(const std::set<FrameId>& kfs_to_marg,
-                       const std::set<FrameId>& poses_to_marg,
-                       const std::set<FrameId>& states_to_marg_all);
+    void removeKeyframes(const std::set<FrameId>& kfs_to_marg,
+                         const std::set<FrameId>& poses_to_marg,
+                         const std::set<FrameId>& states_to_marg_all);
 
-  void addObservation(const TimeCamId& tcid_target,
-                      const KeypointObservation<Scalar>& o);
+    void addObservation(const TimeCamId& tcid_target,
+                        const KeypointObservation<Scalar>& o);
 
-  Keypoint<Scalar>& getLandmark(KeypointId lm_id);
+    Keypoint<Scalar>& getLandmark(KeypointId lm_id);
 
-  // Const
-  const Keypoint<Scalar>& getLandmark(KeypointId lm_id) const;
+    // Const
+    const Keypoint<Scalar>& getLandmark(KeypointId lm_id) const;
 
-  std::vector<TimeCamId> getHostKfs() const;
+    std::vector<TimeCamId> getHostKfs() const;
 
-  std::vector<const Keypoint<Scalar>*> getLandmarksForHost(
-      const TimeCamId& tcid) const;
+    std::vector<const Keypoint<Scalar>*> getLandmarksForHost(
+        const TimeCamId& tcid) const;
 
-  const std::unordered_map<TimeCamId,
-                           std::map<TimeCamId, std::set<KeypointId>>>&
-  getObservations() const;
+    const std::unordered_map<TimeCamId,
+                             std::map<TimeCamId, std::set<KeypointId>>>&
+    getObservations() const;
 
-  const Eigen::aligned_unordered_map<KeypointId, Keypoint<Scalar>>&
-  getLandmarks() const;
+    const Eigen::aligned_unordered_map<KeypointId, Keypoint<Scalar>>&
+    getLandmarks() const;
 
-  bool landmarkExists(int lm_id) const;
+    bool landmarkExists(int lm_id) const;
 
-  size_t numLandmarks() const;
+    size_t numLandmarks() const;
 
-  int numObservations() const;
+    int numObservations() const;
 
-  int numObservations(KeypointId lm_id) const;
+    int numObservations(KeypointId lm_id) const;
 
-  // Return the number of landmarks hosted by tid_a that are observed by
-  // tid_b. Inspects observations.at(tid_a).at(tid_b); returns 0 if either
-  // lookup misses. Used by LocalMapper::ComputeCovisibility.
-  size_t getObservationsCountForPair(const TimeCamId& tid_a,
-                                     const TimeCamId& tid_b) const;
+    // Return the number of landmarks hosted by tid_a that are observed by
+    // tid_b. Inspects observations.at(tid_a).at(tid_b); returns 0 if either
+    // lookup misses. Used by LocalMapper::ComputeCovisibility.
+    size_t getObservationsCountForPair(const TimeCamId& tid_a,
+                                       const TimeCamId& tid_b) const;
 
-  // Return the number of observations at tid that reference landmarks NOT
-  // hosted by tid. Iterates over every entry in observations whose key is
-  // not tid and sums the sizes of its obs-sub-map row for tid.
-  // Used by LocalMapper::SelectKeyframeToCull to compute total(a).
-  size_t getNonLandmarkObservationsCountForKeyFrame(
-      const TimeCamId& tid) const;
+    // Return the number of observations at tid that reference landmarks NOT
+    // hosted by tid. Iterates over every entry in observations whose key is
+    // not tid and sums the sizes of its obs-sub-map row for tid.
+    // Used by LocalMapper::SelectKeyframeToCull to compute total(a).
+    size_t getNonLandmarkObservationsCountForKeyFrame(
+        const TimeCamId& tid) const;
 
-  void removeLandmark(KeypointId lm_id);
+    void removeLandmark(KeypointId lm_id);
 
-  void removeObservations(KeypointId lm_id, const std::set<TimeCamId>& obs);
+    void removeObservations(KeypointId lm_id, const std::set<TimeCamId>& obs);
 
-  inline void backup() {
-    for (auto& kv : kpts) kv.second.backup();
-  }
+    void EnableCovisibilityTracking(bool enable);
 
-  inline void restore() {
-    for (auto& kv : kpts) kv.second.restore();
-  }
+    const CovisMatrix& GetCovisibility() const;
 
- private:
-  using MapIter =
-      typename Eigen::aligned_unordered_map<KeypointId,
-                                            Keypoint<Scalar>>::iterator;
-  MapIter removeLandmarkHelper(MapIter it);
-  typename Keypoint<Scalar>::MapIter removeLandmarkObservationHelper(
-      MapIter it, typename Keypoint<Scalar>::MapIter it2);
+    const ObservedByFrameMap& GetObservedByFrame() const;
 
-  Eigen::aligned_unordered_map<KeypointId, Keypoint<Scalar>> kpts;
+    const ObserverFrameMap& GetObserverFrames(KeypointId lm_id) const;
 
-  std::unordered_map<TimeCamId, std::map<TimeCamId, std::set<KeypointId>>>
-      observations;
+    inline void backup() {
+        for (auto& kv : kpts) kv.second.backup();
+    }
 
-  static constexpr int min_num_obs = 2;
+    inline void restore() {
+        for (auto& kv : kpts) kv.second.restore();
+    }
+
+private:
+    using MapIter =
+        typename Eigen::aligned_unordered_map<KeypointId,
+                                              Keypoint<Scalar>>::iterator;
+    MapIter removeLandmarkHelper(MapIter it);
+    typename Keypoint<Scalar>::MapIter removeLandmarkObservationHelper(
+        MapIter it, typename Keypoint<Scalar>::MapIter it2);
+
+    void CovisAddObserver(KeypointId lm_id, const TimeCamId& tcid);
+
+    void CovisRemoveObserver(KeypointId lm_id, const TimeCamId& tcid);
+
+    void CovisRemoveLandmark(KeypointId lm_id);
+
+    void CovisDecrementPair(FrameId a, FrameId b);
+
+    void CovisDecrementDirected(FrameId from, FrameId to);
+
+    Eigen::aligned_unordered_map<KeypointId, Keypoint<Scalar>> kpts;
+
+    std::unordered_map<TimeCamId, std::map<TimeCamId, std::set<KeypointId>>>
+        observations;
+
+    ObservedByFrameMap mpObservedByFrame;
+    ObserverIndex mpObserverFrames;
+    CovisMatrix mpCovisibility;
+    bool mpCovisEnabled = false;
+
+    static constexpr int min_num_obs = 2;
 };
 
 }  // namespace basalt

@@ -62,6 +62,15 @@
 "config.mapper_lm_lambda_min" = 1e-32
 "config.mapper_lm_lambda_max" = 1e3
 
+"config.local_mapper_max_local_map_size" = 30
+"config.local_mapper_min_local_map_size" = 8
+"config.local_mapper_min_redundant_observers" = 3
+"config.local_mapper_cull_redundancy_thresh" = 0.9
+"config.local_mapper_min_observed_for_cull" = 30
+"config.local_mapper_max_cull_per_pass" = 2
+"config.local_mapper_opt_iterations" = 5
+"config.local_mapper_filter_outlier_threshold" = 3.0
+
 # which executable to run
 [batch_run]
 executable = "basalt_vio"

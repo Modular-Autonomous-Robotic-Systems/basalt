@@ -23,7 +23,8 @@ public:
     using PoseUpdateCallback = std::function<void(
         const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>&)>;
 
-    LocalMapper(const Calibration<double>& calib, const VioConfig& config);
+    LocalMapper(const Calibration<double>& calib, const VioConfig& config,
+                const Logger::Ptr& logger = nullptr);
     ~LocalMapper();
 
     // ── Lifecycle ───────────────────────────────────────────────────
@@ -31,10 +32,12 @@ public:
     void Stop();
     void SetMarginalisationDataInputQueue(
         tbb::concurrent_bounded_queue<MargData::Ptr>* queue);
+    void SetKFInputQueue(tbb::concurrent_bounded_queue<Keyframe::Ptr>* queue);
     void SetVIOPoseUpdateCallback(PoseUpdateCallback cb);
 
     // ── Pipeline (public for testability) ───────────────────────────
     void MapLocally();  // thread entry point
+    void IngestKeyframe(Keyframe::Ptr& kf);
     void IngestMargData(MargData::Ptr& data);
     void MatchLocal();
     void build_tracks();  // shadows NfrMapper
@@ -54,10 +57,23 @@ public:
         out_vis_queue = nullptr;
 
     // ── Config ──────────────────────────────────────────────────────
-    size_t mpMaxLocalMapSize = 50;
-    double mpCullCovisibilityThresh = 0.5;
-    int mpOptIterations = 5;
-    double mpFilterOutlierThreshold = 3.0;
+
+    // The eight members up to mpFilterOutlierThreshold carry no initialiser
+    // because LocalMapper::LocalMapper assigns each from the local_mapper_*
+    // field of the VioConfig it is handed. VioConfig::VioConfig holds the
+    // defaults.
+    size_t mpMaxLocalMapSize;
+    size_t mpMinLocalMapSize;
+    size_t mpMinRedundantObservers;  // ORB-SLAM3 thObs
+    double mpCullRedundancyThresh;   // ORB-SLAM3 redundant_th, monocular
+    size_t mpMinObservedForCull;     // anchors below this are exempt
+    size_t mpMaxCullPerPass;         // bound the blast radius
+    int mpOptIterations;
+    double mpFilterOutlierThreshold;
+    int mpFilterMinObs = 2;
+    double mpMaxInvDist = 2.0;
+    double mpMaxCosParallax = 0.9998;
+    size_t mpLocalMatchNeighbours = 5;
 
     // ── State exposed for tests and introspection ───────────────────
     std::set<int64_t> mpNewKeyframesForTracking;
@@ -77,14 +93,27 @@ public:
 
     std::atomic<bool> mpStopLocalMapping{false};
     std::atomic<bool> mpIsMargDataInputQueueSet{false};
+    std::atomic<bool> mpIsKFInputQueueSet{false};
     std::thread mpLocalMappingThread;
 
 private:
     tbb::concurrent_bounded_queue<MargData::Ptr>* mpMargInputQueue = nullptr;
+    tbb::concurrent_bounded_queue<Keyframe::Ptr>* mpKFInputQueue = nullptr;
     PoseUpdateCallback mpVioPoseUpdateCallback;
 
     // Helpers
+    void PruneFactorsWithUnknownKeyframes(size_t relBegin, size_t rpBegin);
     bool SelectKeyframesToCull(std::vector<int64_t>& keyframesToCull);
+
+    // Deprected
+    ObservedByFrameMap BuildObservedSets() const;
+
+    // Deprecated
+    CovisMatrix BuildCovisibilityMatrix(const ObservedByFrameMap& seen) const;
+
+    double RedundancyScore(int64_t kf, const ObservedByFrameMap& seen,
+                           const std::set<int64_t>& alive,
+                           size_t& nObservedOut) const;
     int64_t FindBestRehostKf(int64_t culled_kf, TrackId lm_id,
                              const std::set<int64_t>& candidates);
     void RehostLandmark(TrackId lm_id, int64_t culled_kf, int64_t new_host_kf);

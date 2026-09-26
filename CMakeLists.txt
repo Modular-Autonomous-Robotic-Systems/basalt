@@ -350,6 +350,7 @@ target_sources(basalt
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/utils/format.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/utils/imu_types.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/utils/keypoints.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/utils/logger.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/utils/nfr.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/utils/sim_utils.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/basalt/utils/system_utils.h
@@ -383,6 +384,7 @@ target_sources(basalt
     ${CMAKE_CURRENT_SOURCE_DIR}/src/linearization/linearization_rel_sc.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/optical_flow/optical_flow.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/keypoints.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/logger.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/system_utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/time_utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/vio_config.cpp

@@ -527,6 +527,27 @@ gravity-alignment acting on IMU X (up) → SLAM Z, not by the camera-IMU extrins
 
 ---
 
+## 5e. Standard NED/FRD mounting (SITL/ArduPilot) hits the degenerate branch of `FromTwoVectors`, so the world's horizontal axes carry no fixed meaning (2026-09-19)
+
+The worked example in §5d is specific to EuRoC's unusual mounting, where the IMU's X axis points up. That makes the stationary `accel` vector sit at roughly 90° to `Vec3::UnitZ()` in `T_w_i_init.setQuaternion(FromTwoVectors(imuData->accel, Vec3::UnitZ()))` (`sqrt_keypoint_vio.cpp:267-268`), a well-conditioned input. The `djinn start sitl2` stack has the opposite, and worse-conditioned, geometry: the body frame is standard NED/FRD (X-forward, Y-right, Z-**down**, confirmed in `ap_dds_imu_stream.md`), so a level, stationary vehicle reads `accel ≈ (0, 0, −g)`, almost exactly **antiparallel** to the `(0, 0, 1)` target. `FromTwoVectors`'s rotation axis is `normalize(accel × UnitZ) ≈ normalize(accel_y, −accel_x, 0)`, so near this antiparallel limit the axis direction, and therefore which combination of body-X/body-Y ends up rotated into world-X/world-Y, is set by whichever residual horizontal component (accelerometer noise, order of a few mg) the very first sample happens to carry. Z is unaffected by this, the rotation magnitude (~180°, flipping down to up) is well-conditioned regardless.
+
+Confirmed empirically from four independent `Setting up filter` events captured in `/ws/log.log` and `/ws/log2.log` (each prints the full `T_w_i` matrix). Reading each matrix's first column as "body-forward (X) expressed in world coordinates" and the third as "body-down (Z) expressed in world coordinates":
+
+| Log / `t_ns` | `X_body` in world | `Z_body` in world | Yaw of `X_body` (atan2) |
+|---|---|---|---|
+| `log2.log` / 44142000000 | (0.8748, 0.4844, −0.0017) | (−0.0017, 0.0066, −1.0000) | 28.98° |
+| `log.log` / 48822000000 | (0.2595, 0.9657, 0.0043) | (−0.0043, 0.0057, −1.0000) | 74.98° |
+| `log2.log` / 151056000000 | (0.4642, −0.8857, −0.0040) | (0.0040, 0.0066, −1.0000) | −62.36° |
+| `log2.log` / 463740000000 | (−0.1355, 0.9908, −0.0050) | (0.0050, −0.0043, −1.0000) | 97.80° |
+
+Every `Z_body` column is (≈0, ≈0, −0.9999+) to sub-degree precision across all four, so "world Z = up" is a solid, repeatable invariant. `X_body`'s direction in the world's horizontal plane spans roughly 160° across the four samples with no discernible pattern, so "world X = forward" or "world Y = right" is **not** a property this code establishes, it is an artefact of the first sample's noise.
+
+**Exact closed form (2026-09-19, sharpens the above).** Decomposing each matrix as intrinsic ZYX Euler angles (roll about X, then pitch about Y, then yaw about Z, `R = Rz(yaw)·Ry(pitch)·Rx(roll)`, the same convention used throughout `airsim_camera_extrinsics.md`) gives roll ≈ 180°, pitch ≈ 0° on every one of the four samples, with only yaw varying (74.98°, 28.98°, −62.36°, 97.80° respectively, matching a direct Euler decomposition to within a fraction of a degree). This is not four coincidences, it is an algebraic identity. A rotation by exactly 180° about any horizontal axis `n = (cos α, sin α, 0)` has the closed form `R = Rz(2α)·Rx(180°)` (proof: Rodrigues' formula gives `R = 2nnᵀ − I` for a π rotation, which expands to exactly this product). Since `FromTwoVectors(accel, UnitZ())` in the level-at-start case computes a rotation whose angle is forced to ≈180° (the antiparallel condition) about a horizontal axis `n` whose direction `α` is set by the first sample's residual noise, **`T_w_i_init`'s rotation is structurally `Rz(2α)·Rx(180°)` every time**: roll = 180° and pitch = 0° are mathematical necessities of this degenerate branch, not measured or run-dependent, and yaw = 2α is the one genuinely free parameter, fixed by the azimuth of a sub-mg noise vector.
+
+**This yaw does not align with, approximate, or offset toward compass north, or toward the vehicle's own heading, in any way.** `FromTwoVectors` takes only the accelerometer reading and the fixed target `(0,0,1)` as input, there is no magnetometer, no compass, no heading reference anywhere in this computation, and no code path from a spawn heading or a GPS course into it. Reading a `74.98°` yaw as "the offset needed to match north" mistakes an accelerometer-noise artefact for a deliberate calibration; the correct reading is that this yaw is unpredictable and run-to-run meaningless, exactly the point the empirical table above establishes. Consequence: the visualiser's world-origin triad (see `visualiser_pipeline.md`) reliably shows blue (Z) pointing up, but red (X) and green (Y) point in an essentially arbitrary, run-dependent horizontal direction, not a fixed "forward"/"right" relative to the vehicle. This does not affect GT alignment correctness, since the existing per-run first-pose alignment (§3, §5b) always aligns against that same run's own arbitrary `T_w_i_init`, but it does mean no code or human should read the visualiser's horizontal axes, or any fixed offset from them, as a stable compass-like convention across runs. A fix, if wanted, would seed yaw from something better-conditioned than a near-vertical accelerometer sample (e.g. a compass/magnetometer, or the known spawn heading), left as an open item, not implemented here.
+
+---
+
 ## 6. Verification
 
 After applying first-pose alignment, the trajectories should overlap at t=0 and diverge only due to SLAM drift. To validate:
@@ -574,3 +595,44 @@ After applying first-pose alignment, the trajectories should overlap at t=0 and 
 | `context/gt_slam_alignment.md` | This file — cross-dataset analysis |
 | `context/euroc_coordinate_frames.md` | EuRoC frame notation reference |
 | `context/tumvi_coordinate_frames.md` | TUM-VI frame notation reference |
+
+---
+
+## 8. What frame a *new* GT source must be supplied in (2026-09-19)
+
+Question asked directly: what body-frame convention must externally supplied ground truth use, e.g. to compare against a live SITL flight, given Basalt's `T_w_i` output? Not "front-right-up", as one might guess from ROS's usual body convention.
+
+The body-frame axis convention is fixed by whichever IMU Basalt is actually integrating, not by any Basalt-internal choice, since no rotation is applied between the subscribed IMU topic and the estimator (`context/ap_dds_imu_stream.md` §"The orientation field, and why it is unused"). On the `djinn start sitl2` stack that IMU is ArduPilot's AP_DDS `/ap/imu/experimental/data`, confirmed NED (X-forward, Y-right, Z-down) by both `frame_id: base_link_ned` and a stationary specific force of `(−0.06, −0.01, −9.87)`. So GT orientation must be expressed in the **same NED body axes**, not FRU and not the FLU that Project AirSim's own (unused, bridged) IMU topic would give.
+
+This connects directly to `/ws/context/project-airsim-architecture.md` §C.10/§C.5: Project AirSim's ROS 2 C++ bridge publishes `/actual_pose` in **NWU** (negate Y, negate Z from native NED, a 180° rotation about X), not NED and not true ENU. That conversion is an involution, so recovering NED from a bridged `/actual_pose` sample is the same negate-Y/negate-Z operation applied a second time. Feeding `/actual_pose` into Basalt as GT without this correction would silently hand it the FLU-family convention this section's sibling document (`airsim_camera_extrinsics.md` §"The one path on which the frame is not NED") already flags as the one place in the stack that is not NED, applied to the wrong topic besides.
+
+The world-frame requirement from §3/§5b above still applies unchanged: GT's world origin and orientation need not match Basalt's gravity-aligned world, first-pose SE(3) alignment handles that. Only the per-sample body-axis convention and the "T_world_IMU, not T_world_camera" requirement are load-bearing for a new GT source.
+
+A live ROS ground-truth subscription now exists in `BasaltSLAMNode`, selected by the `gt_pose_topic_name` and `gt_pose_type_name` parameters and described in §10. The offline EuRoC/TUM-VI-format CSV path of §5 remains the other source feeding the `GtPose` queue the visualiser consumes. Correction, 2026-09-25. This paragraph previously stated, as of 2026-09-19, that no live subscription existed (then confirmed in `context/vio_optical_flow_instrumentation.md`) and that a live feed would be new wiring. That wiring was added on 2026-09-25 by `/ws/ros_ws/plans/gt_ingestion.md`.
+
+Full three-way frame contract, this SLAM world/body convention, what `/tf` actually publishes today (a defect, not just a convention, `T_i_w` mislabelled `"camera"`), what `/ap/tf`'s `AP_DDS_External_Odom` requires (`"odom"`/`"base_link"`, un-inverted FLU, REP-105 no-reset semantics), the single recurring NED↔FLU/NWU transform found at four sites, and per-source target frames for Project AirSim `/actual_pose` (NWU), ArduPilot's own ENU pose, and WGS-84 GPS, worked out in [`/ws/context/slam-ardupilot-tf-frame-contract.md`](/ws/context/slam-ardupilot-tf-frame-contract.md).
+
+## 9. VO (no IMU) never gravity-aligns at all, `T_w_i_init` stays identity (2026-09-19)
+
+Everything in §5c–§5e above is specific to the VIO path. In VO (`SlamMode::VO`, `eSLAMType::VSLAM`, which is `BasaltSLAMNode`'s **default** `slam_type`, `node.cpp:29`, VIO requires explicitly configuring `"VISLAM"`), no gravity alignment happens at all.
+
+`Controller::initialize` always calls the two-argument `vio_estimator_->initialize(bg, ba)` in this app, because `BasaltSLAM::InitialiseSlam` (`slam.cpp:58-59`) always passes `t_ns=0`, `T_w_i=Sophus::SE3d()` (identity), `vel_w_i=Zero`, which is exactly the condition `controller.cpp:174` tests to route to that overload, for both VO and VIO alike (`vio_estimator_` is the polymorphic base, selected by `use_imu` at construction, `controller.cpp:165-170`). For VIO that overload defers to `FromTwoVectors` on the first IMU sample (§5c). For VO, `SqrtKeypointVoEstimator::initialize(bg, ba)` (`sqrt_keypoint_vo.cpp:121-171`) does no such thing, it only sets up threading state (`add_pose=false`, `prev_frame=nullptr`, etc.) and never touches `T_w_i_init`. `T_w_i_init` is a plain `SE3` member (`sqrt_keypoint_vo.h:244`) with no other assignment anywhere on the VO path, so it keeps Sophus's default constructor value, identity, for the estimator's whole life (confirmed by `getT_w_i_init()` at `sqrt_keypoint_vo.h:201-203` simply casting that never-touched member).
+
+Consequence: VO's world frame is identity relative to the body/calibration frame at t=0, whatever physical orientation the vehicle happened to have when tracking started, with **zero correction toward gravity**. If the vehicle is level at start, as is normal, world Z equals body Z, which on this NED-calibrated platform is **down**, not up. VO's world "up" axis is not up, it is an uncorrected artefact of the calibration's body-frame convention. There is no equivalent of the §5e yaw-arbitrariness table for VO because there is no rotation at all to characterise, `T_w_i_init` is exactly `I` every run, not approximately, not variably.
+
+## 10. Live ground truth ingestion and world seeding (2026-09-25)
+
+Change record: `/ws/ros_ws/plans/gt_ingestion.md`. Every live ground truth source is converted by `GeodeticConverter` (`ros_ws/src/slam/include/slam/utils/frame_conversion.hpp`) into one canonical form, an ENU world with an FRD body. FRD is the NED body axes of §8, so the orientation compares directly with `T_w_i`. The conversion is `R = W · R_src · B`, `p = W · p_src`, with `W` the world map to ENU and `B = diag(1, −1, −1)` for sources whose body is FLU.
+
+| Type | Source world, body | W | B |
+|------|--------------------|---|---|
+| enu (`/ap/pose/filtered`) | ENU, FLU | I | F |
+| ned | NED, FRD | `[[0,1,0],[1,0,0],[0,0,−1]]` | I |
+| nwu (`/actual_pose`) | NWU, FLU | `[[0,−1,0],[1,0,0],[0,0,1]]` | F |
+| frd | FRD, FRD (D assumed along gravity) | as ned | I |
+| gps (`/ap/navsat` + AP_DDS Imu) | WGS-84, NED/FRD attitude | as ned | I |
+| geopose (`/ap/geopose/filtered`) | WGS-84, ENU/FLU | I | F |
+
+`/ap/pose/filtered` is ENU world with FLU body because AP_DDS composes a 90 degree yaw after its NED to ENU quaternion swap (`AP_DDS_Client.cpp:469-477`). The AP_DDS Imu quaternion is written with permuted fields, see `ap_dds_imu_stream.md`. A standalone test on 2026-09-25 confirmed that the AP_DDS ENU/FLU pose, the AirSim NWU/FLU pose, the permuted IMU quaternion and GeoPose all reduce to the same ENU/FRD pose as the NED conversion.
+
+The first ground truth sample now defines the SLAM world whenever a ground truth type is configured, which replaces the per-run first-pose alignment of §3 for the live path. `Controller::TrackMonocular` drops frames, draining `imu_data_queue`, until one carries ground truth. VIO then left multiplies its `FromTwoVectors` attitude by `Rz(yaw_gt − yaw_acc)`, which fixes world Z so the gravity alignment of §5c survives while the arbitrary heading of §5e becomes the ground truth heading, and sets the translation to the ground truth position. VO (§9) takes the whole ground truth pose as `T_w_i_init`, since it has no gravity reference of its own and the ground truth attitude is its only source of up. With `gt_pose_type_name` `none` nothing changes, and VO keeps the identity start of §9. The visualiser draws aligned ground truth without the `slam_first` product (`Controller::IsGroundTruthAligned`). Each frame writes a `gt_eval.csv` row, `t_ns, p_w_i, q_w_i, p_gt, q_gt`, with blank cells for an absent pose and quaternions in Eigen `(x, y, z, w)` order.
