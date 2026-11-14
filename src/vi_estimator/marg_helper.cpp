@@ -257,7 +257,8 @@ void MargHelper<Scalar_>::marginalizeHelperSqToSqrt(
 template <class Scalar_>
 void MargHelper<Scalar_>::marginalizeHelperSqrtToSqrt(
     MatX& Q2Jp, VecX& Q2r, const std::set<int>& idx_to_keep,
-    const std::set<int>& idx_to_marg, MatX& marg_sqrt_H, VecX& marg_sqrt_b) {
+    const std::set<int>& idx_to_marg, MatX& marg_sqrt_H, VecX& marg_sqrt_b,
+    MatX* elim_J, VecX* elim_r, std::vector<Eigen::Index>* elim_pivot_row) {
   Eigen::Index keep_size = idx_to_keep.size();
   Eigen::Index marg_size = idx_to_marg.size();
 
@@ -293,6 +294,8 @@ void MargHelper<Scalar_>::marginalizeHelperSqrtToSqrt(
   Eigen::Index marg_rank = 0;
   Eigen::Index total_rank = 0;
 
+  if (elim_pivot_row) elim_pivot_row->assign(marg_size, -1);
+
   {
     const Scalar rank_threshold =
         std::sqrt(std::numeric_limits<Scalar>::epsilon());
@@ -314,6 +317,8 @@ void MargHelper<Scalar_>::marginalizeHelperSqrtToSqrt(
 
       if (std::abs(beta) > rank_threshold) {
         Q2Jp.coeffRef(total_rank, k) = beta;
+        if (elim_pivot_row && k < marg_size)
+          (*elim_pivot_row)[k] = total_rank;
 
         Q2Jp.bottomRightCorner(remainingRows, remainingCols)
             .applyHouseholderOnTheLeft(Q2Jp.col(k).tail(remainingRows - 1),
@@ -341,6 +346,9 @@ void MargHelper<Scalar_>::marginalizeHelperSqrtToSqrt(
 
   marg_sqrt_H = Q2Jp.block(marg_rank, marg_size, keep_valid_rows, keep_size);
   marg_sqrt_b = Q2r.segment(marg_rank, keep_valid_rows);
+
+  if (elim_J) *elim_J = Q2Jp.topRows(marg_rank);
+  if (elim_r) *elim_r = Q2r.head(marg_rank);
 
   Q2Jp.resize(0, 0);
   Q2r.resize(0);

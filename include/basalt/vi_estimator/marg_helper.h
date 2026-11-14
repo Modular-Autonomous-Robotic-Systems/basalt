@@ -37,6 +37,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <Eigen/Dense>
 #include <set>
+#include <vector>
 
 namespace basalt {
 
@@ -59,10 +60,14 @@ class MargHelper {
                                         const std::set<int>& idx_to_marg,
                                         MatX& marg_sqrt_H, VecX& marg_sqrt_b);
 
-  // Modifies Q2Jp and Q2r as a side effect.
-  static void marginalizeHelperSqrtToSqrt(MatX& Q2Jp, VecX& Q2r,
-                                          const std::set<int>& idx_to_keep,
-                                          const std::set<int>& idx_to_marg,
-                                          MatX& marg_sqrt_H, VecX& marg_sqrt_b);
+  // Modifies Q2Jp and Q2r as a side effect. When elim_J is given, it also
+  // returns the rows that eliminate the marginalised columns, in the column
+  // order marginalised then kept, with the row of each marginalised column's
+  // pivot in elim_pivot_row, or -1 for a column without a pivot.
+  static void marginalizeHelperSqrtToSqrt(
+      MatX& Q2Jp, VecX& Q2r, const std::set<int>& idx_to_keep,
+      const std::set<int>& idx_to_marg, MatX& marg_sqrt_H, VecX& marg_sqrt_b,
+      MatX* elim_J = nullptr, VecX* elim_r = nullptr,
+      std::vector<Eigen::Index>* elim_pivot_row = nullptr);
 };
 }  // namespace basalt

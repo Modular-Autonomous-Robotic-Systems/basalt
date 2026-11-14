@@ -1018,6 +1018,106 @@ The partition is built from three disjoint sets computed at `:708-718`. A state 
 
 Two further VIO-specific concerns arise. Inertial factors spanning states inside the marginalised subproblem must be included in the system before elimination, which is done by populating a second `ImuLinData` at `:846` and `:969` exactly as during optimisation, since omitting them would discard the very information the prior exists to preserve. And `frame_states.at(last_state_to_marg).setLinTrue()` (`:1044`) is the moment at which the newest retained state has its linearisation point frozen, implementing the First-Estimate Jacobians condition of §3.1.3. After the complement is formed the prior is re-centred by `marg_data.b -= marg_data.H * delta`, so that the next optimisation evaluates it around a zero increment.
 
+### 3.3 Gravity and Scale in the Initialisation Period
+
+Basalt fixes the direction of gravity once from the first accelerometer samples (§3.2.2) and never represents metric scale as a variable, so both are carried implicitly by every position, velocity and landmark depth and by the marginalisation prior. On a vertical take off the first seconds cannot resolve them, and the error is absorbed by the accelerometer bias and frozen into the prior (`context/takeoff_bias_divergence.md`). The initialisation period, enabled by `vio_gs_enable` and lasting until `vio_gs_duration_s` seconds after the first frame of confirmed motion, adds the gravity direction and the log scale to the sliding window as one explicit global block, coupled into both residual families, and folds the block back into the state when the period ends. It requires `vio_linearization_type` `ABS_QR` and `vio_sqrt_marg`, which the constructor asserts. Confirmed motion is the first frame on which the stationary flag is false and, with `vio_stationary_enable_start_latch`, the start latch has closed, so the period cannot end on the ground and a vehicle that never moves never folds. This section summarises the formulation, and `plans/gravity_scale_optimisation.md` §2 carries every derivation step by step. Note, 2026-11-12. This paragraph previously stated that the period lasted `vio_gs_duration_s` seconds from the first state, which `plans/gravity_scale_timer_from_motion.md` changed so that the duration counts flight time only.
+
+#### 3.3.1 Variables
+
+Within one frame the stored world $D$ is related to the metric, gravity aligned world $M$ by a similarity without translation,
+
+$$\mathbf{x}^M = s\,\mathbf{R}_{wg}^\top \mathbf{x}^D,$$
+
+$$s = e^{\sigma},$$
+
+$$\mathbf{g}_D = \mathbf{R}_{wg}\,\mathbf{g}.$$
+
+Only the direction of $\mathbf{g}_D$ is a variable. It is a point $\mathbf{d}$ of the unit sphere, held as a linearisation point $\bar{\mathbf{d}}$, a $3\times 2$ basis $\bar{\mathbf{B}}$ of its tangent plane and a two dimensional increment $\boldsymbol{\delta}_\theta$,
+
+$$\mathbf{d} = \text{Exp}\big(\bar{\mathbf{B}}\,\boldsymbol{\delta}_\theta\big)\,\bar{\mathbf{d}},$$
+
+$$\mathbf{g}_D = |\mathbf{g}|\,\mathbf{d},$$
+
+$$\sigma = \bar{\sigma} + \delta\sigma.$$
+
+The block tangent $[\delta\theta_1, \delta\theta_2, \delta\sigma]^\top$ sits at offset 0 of every order map under the key `kGravityScaleStateId` $= -1$, which keeps the prior's prefix layout valid. `GravityScaleStateWithLin` (`include/basalt/utils/imu_types.h`) implements these semantics with first estimate Jacobians. While unfrozen, an increment moves $\bar{\mathbf{d}}$, $\bar{\mathbf{B}}$ and $\bar{\sigma}$ themselves, and once frozen it accumulates in an offset, exactly as `PoseStateWithLin` does.
+
+#### 3.3.2 Residuals
+
+The scale enters the visual residual only through the IMU to IMU relative translation. With $\mathcal{S}_s\big((\mathbf{R}, \mathbf{t})\big) = (\mathbf{R}, s\,\mathbf{t})$,
+
+$$\mathbf{T}_{t,h}(s) = \mathbf{T}_{i,c_t}^{-1}\ \mathcal{S}_s\big(\mathbf{T}_{ti,hi}\big)\ \mathbf{T}_{i,c_h},$$
+
+$$\mathbf{D}_s = \begin{bmatrix}s\,\mathbf{I}_3 & \mathbf{0}\\ \mathbf{0} & \mathbf{I}_3\end{bmatrix},$$
+
+and the Jacobians of the relative pose increment $\boldsymbol{\xi}$ of §2.2.5 become
+
+$$\frac{\partial\boldsymbol{\xi}}{\partial[\delta\mathbf{p}_h; \delta\boldsymbol{\varphi}_h]} = \text{Adj}\big(\mathbf{T}_{i,c_t}^{-1}\,\mathcal{S}_s(\mathbf{T}_{ti,hi})\big)\,\mathbf{D}_s\begin{bmatrix} \mathbf{R}_h^\top & \mathbf{0}\\ \mathbf{0} & \mathbf{R}_h^\top\end{bmatrix},$$
+
+$$\frac{\partial\boldsymbol{\xi}}{\partial[\delta\mathbf{p}_t; \delta\boldsymbol{\varphi}_t]} = -\text{Adj}\big(\mathbf{T}_{i,c_t}^{-1}\big)\,\mathbf{D}_s\begin{bmatrix} \mathbf{R}_t^\top & \mathbf{0}\\ \mathbf{0} & \mathbf{R}_t^\top\end{bmatrix},$$
+
+$$\frac{\partial\boldsymbol{\xi}}{\partial\sigma} = \begin{bmatrix}s\,\mathbf{R}_{i,c_t}^\top \mathbf{t}_{ti,hi}\\ \mathbf{0}\end{bmatrix}.$$
+
+The block diagonal factor of $\mathbf{R}_h^\top$ is the matrix `RR` of `computeRelPose`, which converts the world frame increments of `PoseState::incPose` into the body frame perturbation of the Adjoint identity. Gravity cancels from the visual residual, so the reprojection function `linearizePoint` is unchanged, and `computeRelPoseGS` (`include/basalt/utils/ba_utils.h`) supplies the three Jacobians, which `LandmarkBlockAbsDynamic::linearizeLandmark` composes with `d_res_d_xi` into one extra column.
+
+The inertial residual takes the gravity and scale form of ORB-SLAM3's `EdgeInertialGS` in Basalt's conventions,
+
+$$\mathbf{r}_p = \mathbf{R}_0^\top\Big(s\,(\mathbf{p}_1 - \mathbf{p}_0 - \mathbf{v}_0\Delta t) - \frac{1}{2}\mathbf{g}_D\Delta t^2\Big) - \Delta\hat{\mathbf{p}},$$
+
+$$\mathbf{r}_v = \mathbf{R}_0^\top\big(s\,(\mathbf{v}_1 - \mathbf{v}_0) - \mathbf{g}_D\Delta t\big) - \Delta\hat{\mathbf{v}},$$
+
+with the rotation residual unchanged. Its block Jacobians are
+
+$$\frac{\partial\mathbf{r}_p}{\partial\boldsymbol{\delta}_\theta} = \frac{1}{2}\Delta t^2\,\mathbf{R}_0^\top [\bar{\mathbf{g}}_D]_\times \bar{\mathbf{B}},$$
+
+$$\frac{\partial\mathbf{r}_v}{\partial\boldsymbol{\delta}_\theta} = \Delta t\,\mathbf{R}_0^\top [\bar{\mathbf{g}}_D]_\times \bar{\mathbf{B}},$$
+
+$$\frac{\partial\mathbf{r}_p}{\partial\sigma} = s\,\mathbf{R}_0^\top(\mathbf{p}_1 - \mathbf{p}_0 - \mathbf{v}_0\Delta t),$$
+
+$$\frac{\partial\mathbf{r}_v}{\partial\sigma} = s\,\mathbf{R}_0^\top(\mathbf{v}_1 - \mathbf{v}_0),$$
+
+and every state Jacobian of §3.1.2 that multiplies a position or velocity gains the factor $s$. `IntegratedImuMeasurement::residualGS` evaluates these, and at $\mathbf{g}_D = \mathbf{g}$, $s = 1$ it reduces term by term to `residual`. `ImuBlockGS` (`include/basalt/linearization/imu_block.hpp`) holds the $15\times 3$ block Jacobian beside the unchanged $15\times 30$ `Jp`, and `LinearizationGSAbsQR` (`include/basalt/linearization/linearization_abs_qr.hpp`) installs these blocks and overrides `linearizeRelPoses`.
+
+#### 3.3.3 Gauge freedom and its projection
+
+The block adds three directions along which the cost is exactly flat. Scaling every position and velocity by $k$ while dividing $s$ by $k$ changes no residual, and neither does rotating the estimator world about a horizontal axis $\mathbf{a}$ while rotating $\mathbf{d}$ with it. Their tangent vectors, evaluated at the linearisation points, are
+
+$$\mathbf{n}_\sigma = \big[\,\delta\mathbf{p}_i = \mathbf{p}_i,\ \delta\mathbf{v}_i = \mathbf{v}_i,\ \delta\sigma = -1\,\big],$$
+
+$$\mathbf{n}_{\mathbf{a}} = \big[\,\delta\boldsymbol{\varphi}_i = \mathbf{a},\ \delta\mathbf{p}_i = \mathbf{a}\times \mathbf{p}_i,\ \delta\mathbf{v}_i = \mathbf{a}\times \mathbf{v}_i,\ \boldsymbol{\delta}_\theta = \bar{\mathbf{B}}^\top \mathbf{a}\,\big],$$
+
+for $\mathbf{a} \in \{\mathbf{e}_x, \mathbf{e}_y\}$. A fixation or a gauge prior cannot remove them without either reproducing today's frozen scale or conditioning badly at take off, so they are removed by projection, as DSO does for its own gauge. With $\mathbf{N}$ the matrix of the three vectors,
+
+$$\mathbf{P} = \mathbf{I} - \mathbf{N}\,(\mathbf{N}^\top \mathbf{N})^{-1} \mathbf{N}^\top,$$
+
+`optimize` solves the damped system with $\mathbf{P} \mathbf{H} \mathbf{P}$ and $\mathbf{P} \mathbf{b}$ and then projects the step itself. The step projection is essential, because the Levenberg–Marquardt damping alone leaves a gauge component in the solution. The system projection is a safeguard against the zero velocity term, round off, mapper pose updates that move linearisation points, and evaluation point errors. `ComputeGaugeProjector` builds $\mathbf{N}$ in unscaled increment coordinates, which is correct only while the Jacobi column scaling of `optimize` stays disabled. With `vio_gs_jump_sigma_rw` or `vio_gs_jump_tilt_rw_deg` positive, a random walk residual on the block's step within the frame, $\frac{1}{2}\sum_i w_i^2 a_i^2$ with $\mathbf{a}$ the block increment accumulated over the accepted iterations and $1/w_i$ the intensity times the square root of the frame interval, is added to $\mathbf{H}$ and $\mathbf{b}$ before the projection and to `error_total`, `l_diff` and `after_error_total`. It shrinks the step in proportion to how little the data determine it, which keeps uninformed steps below the readvance thresholds of §3.3.4, and is not marginalised (`plans/gravity_scale_optimisation_2.md` §3.4). It applies only in the delayed phase of §3.3.4, since the block is held in the coarse phase. Note, 2026-11-13. This sentence previously named the swap interval of dynamic marginalisation, which was removed.
+
+In the coarse phase of §3.3.4 `optimize` masks all three block coordinates, zeroing their rows and columns of $\mathbf{H}$, setting their diagonal to one and zeroing their entries of $\mathbf{b}$, and skips the projector, because a fully held block leaves no gauge direction of its own and projecting would remove the frames' physical scaling and tilt from the step. The window is then Basalt's estimator at the current gravity direction and scale, and only the coarse optimisation moves the block. Note, 2026-11-13. This paragraph and the one before it previously described the tilt hold `vio_gs_optimise_gravity_dir`, with its scale only projector $\mathbf{I} - \mathbf{n}_\sigma \mathbf{n}_\sigma^\top / (\mathbf{n}_\sigma^\top \mathbf{n}_\sigma)$, and the update cadence `vio_gs_update_every_n_frames`, which freed the block on every $N$-th frame of motion, both removed by `plans/delayed_marginalisation.md` Change 12.
+
+Two optional priors bound the tilt and the accelerometer bias (`plans/gravity_and_bias_step_priors.md`). `vio_gravity_prior_std_deg` (default 0, off) adds a roll and pitch prior to the first state of the initial prior, the same construction as its yaw prior on index 5, on the world frame rotation indices 3 and 4 of the left perturbation $\mathbf{R} \leftarrow \text{Exp}(\delta\boldsymbol{\varphi})\,\mathbf{R}$. In the period its rows penalise the first state's tilt relative to the block's gravity direction, $\sqrt{w_g}(\delta\boldsymbol{\varphi}_{0,xy} - \boldsymbol{\delta}_\theta)$, which annihilates both tilt gauge vectors. The same prior enters every coarse optimisation as a prior on the block towards the initial gravity direction. Note, 2026-11-14. This paragraph previously also described `vio_ba_step_prior_std`, first a frame local residual on the accelerometer bias of every window state and from 2026-11-13 the prior on the accelerometer bias increment of a coarse optimisation, which `plans/delayed_marginalisation.md` Change 17 removed because DM-VIO's coarse initialiser has no bias prior.
+
+#### 3.3.4 Delayed marginalisation
+
+A prior linearised at one scale freezes that scale, because the inertial position and velocity rows contain the product of the scale and a velocity difference. The period keeps one square root prior and a delayed store of the last $d$ = `vio_gs_dm_delay` marginalisations after DM-VIO, from which the prior is rebuilt with every inertial factor of those steps relinearised at the current block (`plans/delayed_marginalisation.md`). A stored step holds the marginalisation's order and columns, the landmark eliminated visual rows compressed and scale free, the inertial factors that left, and the first estimates and offsets of every departing coordinate. Steps beyond the delay are marginalised into a delayed prior $B$ with the scale free inertial rows, the rotation rows and bias random walk rows, or all rows with the scale column zeroed for a factor whose whitened scale column is at most `vio_gs_visual_prior_scale_tol`, enabled by `vio_gs_visual_prior_inertial`. A readvance marginalises the stored steps into $B$ in order with the inertial factors at the current block (`DelayedMargJob::Forward`), and its result replaces the main prior between two calls of `optimize`. The store is kept for the whole period.
+
+The period has two phases. In the coarse phase, until the store first holds $d$ steps, the block is held in the window, and at every new keyframe once more than five are known a worker runs the coarse IMU initialiser of DM-VIO. It holds the last 100 keyframe poses, joins consecutive keyframes by one preintegrated factor that the store composes once from the per frame factors as they arrive, and estimates the gravity tilt, the scale applied to the held positions, one gyroscope and accelerometer bias and the keyframe velocities by Levenberg–Marquardt, gated on the marginal variance of the log scale at the solution against `vio_gs_dm_coarse_scale_var`. The same job readvances the prior at the corrected values, after a smoothing pass when the scale was estimated, and the VIO thread installs the correction by the re-centring of §3.3.5 together with that prior at the next marginalisation, waiting for the job if it has not finished. The optimisation stops after a quarter of the frame period and then installs nothing. Note, 2026-11-14. This passage previously described a coarse optimisation every `vio_gs_dm_coarse_every` marginalisations after the vehicle started moving, first after Mur-Artal and Tardós with the velocities eliminated over three nodes, then with nodes 10 frames apart, the inverse scale on the inertial side and common bias increments, followed by a separate readvance (`plans/delayed_marginalisation.md` §2.3.11). In the delayed phase the block is free in the window, a readvance with one backward smoothing pass over the departed states starts at once, and further readvances fire whenever the block has moved by `vio_gs_dm_thresh_scale` in scale or `vio_gs_dm_thresh_tilt_deg` in tilt from the prior's anchor. Jobs run in a worker with `vio_gs_dm_async`, and the local mapper's pose updates are dropped during the period with `vio_gs_dm_hold_pose_updates`. `UpdateDelayedMarg`, `MakeDelayedJob`, `InstallDelayedJob` and `InstallCoarseJob` in `src/vi_estimator/sqrt_keypoint_vio.cpp` and `include/basalt/vi_estimator/delayed_marginalisation.h` implement this.
+
+Note, 2026-11-13. This section previously described the dynamic marginalisation of VI-DSO, three priors $M_\text{curr}$, $M_\text{half}$ and $M_\text{visual}$ swapped whenever the scale left an interval of half width a multiple of $\ln d_\text{min}$ with $d_\text{min}$ = `vio_gs_dmin`, which discarded the scale dependent inertial rows at every swap and was replaced by delayed marginalisation.
+
+#### 3.3.5 Per frame re-centring and the end of the period
+
+At the end of every `optimize` the estimated correction is applied to the whole estimator, so that the stored states stay metric and gravity aligned. With
+
+$$\mathbf{Q} = \text{FromTwoVectors}(\mathbf{d}, \hat{\mathbf{g}}),$$
+
+$$s_c = e^{\sigma_c},$$
+
+every linearisation point and offset maps by $\mathbf{R} \leftarrow \mathbf{Q} \mathbf{R}$, $\mathbf{p} \leftarrow s_c\,\mathbf{Q} \mathbf{p}$ and $\mathbf{v} \leftarrow s_c\,\mathbf{Q} \mathbf{v}$ (`TransformBySim3`), each prior's frame columns are multiplied by $\mathbf{Q}^\top / s_c$ or $\mathbf{Q}^\top$ with its residual unchanged, and the block's linearisation point maps by $\bar{\mathbf{d}} \leftarrow \mathbf{Q}\,\bar{\mathbf{d}}$, $\bar{\mathbf{B}} \leftarrow \mathbf{Q}\,\bar{\mathbf{B}}$ and $\bar{\sigma} \leftarrow \bar{\sigma} - \sigma_c$ (`TransformLin`). This is an exact change of variables, after which $\mathbf{d} = \hat{\mathbf{g}}$ and $\sigma = 0$ while the priors keep the block's information. Landmarks need no change, because their inverse distances live in metric camera frames. `RecentreGravityScale` performs the step and appends $(\mathbf{Q}, s_c)$ to the correction log. When the period ends, `FoldGravityScale` conditions $M_\text{curr}$ on the block's current value, deletes the block's columns and clears the mode, and the estimator continues exactly as it does outside the period.
+
+#### 3.3.6 Synchronisation with the local mapper
+
+`GravityScaleCorrectionLog` holds the cumulative correction $C_e$ of every epoch $e$, one per re-centring, and `Between(a, b)` returns the similarity $(\mathbf{Q}_b \mathbf{Q}_a^\top, s_b / s_a)$ that carries a quantity from epoch $a$ to epoch $b$. Keyframes and marginalisation packets are stamped with the epoch in which they were produced, and pose updates from the mapper carry the mapper's epoch. At the start of every cycle `LocalMapper::CatchUpGravityScale` brings the map to the latest epoch, mapping poses by $(\mathbf{Q} \mathbf{R}, s\,\mathbf{Q} \mathbf{p})$, dividing inverse distances by $s$, scaling relative pose factors and their information, and rotating roll pitch measurements, the last preserved only to first order. Items ingested in the cycle are brought to the map's epoch before use, and the estimator carries mapper updates to its own latest epoch. A packet produced in the period is conditioned on the block rather than marginalised over it, because marginalising would leave its information matrix singular along the frame parts of the three gauge directions, which `NfrMapper::extractNonlinearFactors` rejects.
+
 ---
 
 ## 4. IMU Preintegration

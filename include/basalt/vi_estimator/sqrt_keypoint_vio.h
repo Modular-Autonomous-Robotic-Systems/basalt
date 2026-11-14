@@ -35,11 +35,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
 #include <basalt/imu/preintegration.h>
+#include <basalt/vi_estimator/delayed_marginalisation.h>
 #include <basalt/vi_estimator/sqrt_ba_base.h>
 #include <basalt/vi_estimator/vio_estimator.h>
 
 #include <basalt/utils/logger.h>
 #include <deque>
+#include <future>
 #include <mutex>
 #include <thread>
 
@@ -137,6 +139,26 @@ public:
     void marginalize(const std::map<int64_t, int>& num_points_connected,
                      const std::unordered_set<KeypointId>& lost_landmaks);
     void optimize();
+    void LinearizeMargGS(const AbsOrderMap& aom,
+                         const std::set<int64_t>& kfs_to_marg,
+                         const std::unordered_set<KeypointId>& lost_landmaks,
+                         int64_t last_state_to_marg, MatX& Q2Jp_curr,
+                         VecX& Q2r_curr, MatX& Q2Jp_store, VecX& Q2r_store);
+    void MarginalizeGS(MatX& Q2Jp_curr, VecX& Q2r_curr,
+                       const std::set<int>& idx_to_keep,
+                       const std::set<int>& idx_to_marg);
+    void RecentrePriorsGS();
+    void RecentreGravityScale();
+    void FoldGravityScale();
+    void StripGsFromMargData(MargData& m) const;
+    MatX ComputeGaugeProjector(const AbsOrderMap& aom) const;
+    void SetInitialPriorOrder(int64_t t_ns);
+    void LogGravityScale(int swapEvent);
+    void UpdateDelayedMarg(DelayedMargStep<Scalar>&& step);
+    std::shared_ptr<DelayedMargJob<Scalar>> MakeDelayedJob(bool coarse) const;
+    int InstallDelayedJob(DelayedMargJob<Scalar>& job);
+    bool InstallCoarseJob(const DelayedMargJob<Scalar>& job);
+    void StopDelayedMarg();
 
     void debug_finalize() override;
 
@@ -241,6 +263,36 @@ private:
     bool take_kf;
     // Raised where the keyframe is committed, cleared by PublishKeyframe.
     bool mpIsCurrentFrameKF = false;
+
+    struct GsAnchor {
+        Vec3 dir;
+        Eigen::Matrix<Scalar, 3, 2> basis;
+        Scalar sigma = 0;
+        bool set = false;
+
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    };
+    void AnchorGs(GsAnchor& anchor);
+
+    bool mpGsActive = false;
+    int64_t mpGsStartNs = -1;
+    GsAnchor mpAnchorCurr;
+    int mpGsSwapEvent = 0;
+    Scalar mpGsStepSigma = 0;
+    Scalar mpGsStepTiltDeg = 0;
+    Scalar mpGsJumpCost = 0;
+    int mpGsVisualImuFull = 0;
+    // Delayed marginalisation, plans/delayed_marginalisation.md. mpDm is the
+    // store, kept for the whole period. The block is held in the window while
+    // mpDmCoarse is set, until the store first holds vio_gs_dm_delay steps.
+    std::unique_ptr<DelayedMarginalisation<Scalar>> mpDm;
+    std::future<std::shared_ptr<DelayedMargJob<Scalar>>> mpDmFuture;
+    bool mpDmCoarse = true;
+    bool mpDmForceReplace = false;
+    int64_t mpDmLastCoarseKeyframe = -1;
+    double mpDmStoreSeconds = 0;
+    int mpGsVisualImuRot = 0;
+    Scalar mpGsVisualImuScaleCol = 0;
     int frames_after_kf;
     std::set<int64_t> kf_ids;
 

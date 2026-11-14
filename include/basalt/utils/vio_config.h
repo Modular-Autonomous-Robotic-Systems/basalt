@@ -124,6 +124,44 @@ struct VioConfig {
     // 3 frames on platforms that only rest before take-off.
     bool vio_stationary_enable_start_latch;
     int vio_stationary_latch_frames;
+    // Optimise gravity direction and metric scale until vio_gs_duration_s
+    // seconds after the first frame of confirmed motion, then fold them into
+    // the state. Requires
+    // vio_linearization_type ABS_QR and vio_sqrt_marg.
+    bool vio_gs_enable;
+    double vio_gs_duration_s;
+    // Linearise the delayed prior with the scale free rows of the inertial
+    // factors, plans/gravity_scale_optimisation_2.md Change A.
+    bool vio_gs_visual_prior_inertial;
+    // Largest whitened scale column with which an inertial factor enters
+    // the delayed prior with all of its rows.
+    double vio_gs_visual_prior_scale_tol;
+    // Random walk intensities of the per frame gravity and scale step, per
+    // square root second, zero disables, plans/gravity_scale_optimisation_2.md
+    // Change B.
+    double vio_gs_jump_sigma_rw;
+    double vio_gs_jump_tilt_rw_deg;
+    // Delayed marginalisation, plans/delayed_marginalisation.md. The store
+    // keeps the last vio_gs_dm_delay marginalisations. Until it first holds
+    // that many, the block is held in the window and a coarse inertial
+    // optimisation runs at every new keyframe. Then
+    // the block is free and the prior is readvanced at the current block when
+    // the block moves past either threshold.
+    int vio_gs_dm_delay;
+    double vio_gs_dm_thresh_scale;
+    double vio_gs_dm_thresh_tilt_deg;
+    // Largest marginal variance of the log scale with which a coarse
+    // optimisation updates the scale.
+    double vio_gs_dm_coarse_scale_var;
+    bool vio_gs_dm_smooth;
+    bool vio_gs_dm_async;
+    // Drop the local mapper's pose updates during the period,
+    // plans/delayed_marginalisation.md §2.3.8.
+    bool vio_gs_dm_hold_pose_updates;
+    // Prior on the tilt of gravity relative to its initial estimate, on the
+    // first state in the initial prior and on the block in every coarse
+    // optimisation, degrees, 0 disables.
+    double vio_gravity_prior_std_deg;
 
     bool vio_marg_lost_landmarks;
     double vio_kf_marg_feature_ratio;

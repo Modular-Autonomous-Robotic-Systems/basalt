@@ -190,6 +190,24 @@ public:
                          double maxTransErr, double maxRotErr,
                          double limitTrans, double limitRot);
     void PrintVioPoseUpdate();
+    void AddVioDelayedMarg(int64_t tNs, int steps, int records, int started,
+                           int installed, int coarse, double anchorSigma,
+                           double anchorTiltDeg, double jobSeconds,
+                           int catchupSteps, double catchupSeconds,
+                           double maxPosInc, double storeSeconds,
+                           int coarsePhase, double coarseSigma,
+                           double coarseTiltDeg, double coarseScaleVar,
+                           int coarseScaleFree, double coarseBa,
+                           double coarseCost0, double coarseCost1,
+                           int coarseSpans, double coarseBg,
+                           double coarseMaxVelInc, int coarseIterations,
+                           int coarseTimedOut, double waitSeconds);
+    void AddVioGravityScale(int64_t tNs, int64_t epoch, double sigmaStep,
+                            double tiltStepDeg, double scaleCumulative,
+                            double tiltCumulativeDeg, int swapEvent,
+                            double jumpCost = 0.0, int visualImuFull = 0,
+                            int visualImuRot = 0,
+                            double visualImuScaleCol = 0.0);
 
     void AddVioAssoc(int64_t tNs, int ofObs, int connected0, int unconnected0,
                      double thresh, int framesAfterKf, int lmdbLandmarks,

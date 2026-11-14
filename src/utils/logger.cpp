@@ -371,6 +371,27 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"max_rot_err", "f"}, {"limit_trans", "f"},
               {"limit_rot", "f"}});
 
+    Register("vio_gravity_scale", "[VIO][gravity-scale]",
+             {{"t_ns", "ns"}, {"epoch", "count"}, {"sigma_step", "f"},
+              {"tilt_step_deg", "f"}, {"scale_cumulative", "f"},
+              {"tilt_cumulative_deg", "f"}, {"swap_event", "count"},
+              {"jump_cost", "f"}, {"visual_imu_full", "count"},
+              {"visual_imu_rot", "count"}, {"visual_imu_scale_col", "f"}});
+
+    Register("vio_delayed_marg", "[VIO][delayed-marg]",
+             {{"t_ns", "ns"}, {"steps", "count"}, {"records", "count"},
+              {"started", "count"}, {"installed", "count"},
+              {"coarse", "count"}, {"anchor_sigma", "f"},
+              {"anchor_tilt_deg", "f"}, {"job", "ms"},
+              {"catchup_steps", "count"}, {"catchup", "ms"},
+              {"max_pos_inc", "f"}, {"store", "ms"},
+              {"coarse_phase", "count"}, {"coarse_sigma", "f"},
+              {"coarse_tilt_deg", "f"}, {"coarse_scale_var", "f"},
+              {"coarse_scale_free", "count"}, {"coarse_ba", "f"},
+              {"coarse_cost0", "f"}, {"coarse_cost1", "f"},
+              {"coarse_spans", "count"}, {"coarse_bg", "f"},
+              {"coarse_max_vel_inc", "f"}, {"coarse_iterations", "count"},
+              {"coarse_timed_out", "count"}, {"wait", "ms"}});
 
     Register("vio_assoc", "[VIO][assoc]",
              {{"t_ns", "ns"}, {"of_obs", "count"}, {"connected0", "count"},
@@ -825,6 +846,71 @@ void Logger::AddVioPoseUpdate(int64_t tNs, int pending, int applied,
 
 void Logger::PrintVioPoseUpdate() { Emit("vio_pose_update"); }
 
+void Logger::AddVioGravityScale(int64_t tNs, int64_t epoch, double sigmaStep,
+                                double tiltStepDeg, double scaleCumulative,
+                                double tiltCumulativeDeg, int swapEvent,
+                                double jumpCost, int visualImuFull,
+                                int visualImuRot, double visualImuScaleCol) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_gravity_scale");
+    s.add_int("t_ns", tNs);
+    s.add_int("epoch", epoch);
+    s.add("sigma_step", sigmaStep);
+    s.add("tilt_step_deg", tiltStepDeg);
+    s.add("scale_cumulative", scaleCumulative);
+    s.add("tilt_cumulative_deg", tiltCumulativeDeg);
+    s.add("swap_event", double(swapEvent));
+    s.add("jump_cost", jumpCost);
+    s.add("visual_imu_full", double(visualImuFull));
+    s.add("visual_imu_rot", double(visualImuRot));
+    s.add("visual_imu_scale_col", visualImuScaleCol);
+    s.CommitRow();
+}
+
+void Logger::AddVioDelayedMarg(int64_t tNs, int steps, int records,
+                               int started, int installed, int coarse,
+                               double anchorSigma, double anchorTiltDeg,
+                               double jobSeconds, int catchupSteps,
+                               double catchupSeconds, double maxPosInc,
+                               double storeSeconds, int coarsePhase,
+                               double coarseSigma, double coarseTiltDeg,
+                               double coarseScaleVar, int coarseScaleFree,
+                               double coarseBa, double coarseCost0,
+                               double coarseCost1, int coarseSpans,
+                               double coarseBg, double coarseMaxVelInc,
+                               int coarseIterations, int coarseTimedOut,
+                               double waitSeconds) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_delayed_marg");
+    s.add_int("t_ns", tNs);
+    s.add("steps", double(steps));
+    s.add("records", double(records));
+    s.add("started", double(started));
+    s.add("installed", double(installed));
+    s.add("coarse", double(coarse));
+    s.add("anchor_sigma", anchorSigma);
+    s.add("anchor_tilt_deg", anchorTiltDeg);
+    s.add("job", jobSeconds);
+    s.add("catchup_steps", double(catchupSteps));
+    s.add("catchup", catchupSeconds);
+    s.add("max_pos_inc", maxPosInc);
+    s.add("store", storeSeconds);
+    s.add("coarse_phase", double(coarsePhase));
+    s.add("coarse_sigma", coarseSigma);
+    s.add("coarse_tilt_deg", coarseTiltDeg);
+    s.add("coarse_scale_var", coarseScaleVar);
+    s.add("coarse_scale_free", double(coarseScaleFree));
+    s.add("coarse_ba", coarseBa);
+    s.add("coarse_cost0", coarseCost0);
+    s.add("coarse_cost1", coarseCost1);
+    s.add("coarse_spans", double(coarseSpans));
+    s.add("coarse_bg", coarseBg);
+    s.add("coarse_max_vel_inc", coarseMaxVelInc);
+    s.add("coarse_iterations", double(coarseIterations));
+    s.add("coarse_timed_out", double(coarseTimedOut));
+    s.add("wait", waitSeconds);
+    s.CommitRow();
+}
 
 void Logger::AddVioAssoc(int64_t tNs, int ofObs, int connected0,
                          int unconnected0, double thresh, int framesAfterKf,

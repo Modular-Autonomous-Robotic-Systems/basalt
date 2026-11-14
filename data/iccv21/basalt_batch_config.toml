@@ -54,6 +54,20 @@
 "config.vio_stationary_flow_tol" = 0.8
 "config.vio_stationary_enable_start_latch" = false
 "config.vio_stationary_latch_frames" = 3
+"config.vio_gs_enable" = false
+"config.vio_gs_duration_s" = 10.0
+"config.vio_gs_visual_prior_inertial" = false
+"config.vio_gs_visual_prior_scale_tol" = 1.0
+"config.vio_gs_jump_sigma_rw" = 0.0
+"config.vio_gs_jump_tilt_rw_deg" = 0.0
+"config.vio_gs_dm_delay" = 200
+"config.vio_gs_dm_thresh_scale" = 1.02
+"config.vio_gs_dm_thresh_tilt_deg" = 5.0
+"config.vio_gs_dm_coarse_scale_var" = 1.0
+"config.vio_gs_dm_smooth" = true
+"config.vio_gs_dm_async" = true
+"config.vio_gs_dm_hold_pose_updates" = false
+"config.vio_gravity_prior_std_deg" = 0.0
 "config.vio_marg_lost_landmarks" = true
 "config.vio_kf_marg_feature_ratio" = 0.1
 
