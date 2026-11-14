@@ -186,7 +186,10 @@ public:
                       int unprojectFail, int shortBaseline, int notFinite,
                       int behind, int tooClose, double minTriangDist,
                       double baselineMin, double baselineMax,
-                      double depthMin, double depthSum, double depthMax);
+                      double depthMin, double depthSum, double depthMax,
+                      double cosParallaxMin, double cosParallaxSum,
+                      double cosParallaxMax, int numParallaxSamples,
+                      int lowParallax);
     void PrintVioTriang();
 
     void AddVioLandmarks(int64_t tNs, int lost, int lmdb, bool margLost);

@@ -68,6 +68,7 @@ VioConfig::VioConfig() {
   vio_obs_std_dev = 0.5;
   vio_obs_huber_thresh = 1.0;
   vio_min_triangulation_dist = 0.05;
+  vio_min_triangulation_parallax_deg = 0.0;
   //  vio_outlier_threshold = 3.0;
   //  vio_filter_iteration = 4;
   vio_max_iterations = 7;
@@ -192,6 +193,7 @@ void serialize(Archive& ar, basalt::VioConfig& config) {
   ar(CEREAL_NVP(config.vio_obs_std_dev));
   ar(CEREAL_NVP(config.vio_obs_huber_thresh));
   ar(CEREAL_NVP(config.vio_min_triangulation_dist));
+  ar(CEREAL_NVP(config.vio_min_triangulation_parallax_deg));
 
   ar(CEREAL_NVP(config.vio_enforce_realtime));
 

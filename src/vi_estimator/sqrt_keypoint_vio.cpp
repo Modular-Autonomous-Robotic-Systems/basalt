@@ -651,12 +651,22 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
         // Triangulation rejection tally, mirroring the local mapper's
         // [setup_opt] breakdown so the two front ends can be compared.
         int numNoPriorObs = 0, numUnprojectFail = 0, numShortBaseline = 0;
-        int numNotFinite = 0, numBehind = 0, numTooClose = 0;
+        int numNotFinite = 0, numBehind = 0, numTooClose = 0,
+            numLowParallax = 0;
         Scalar minBaseline = std::numeric_limits<Scalar>::max();
         Scalar maxBaseline = 0;
         Scalar minDepth = std::numeric_limits<Scalar>::max();
         Scalar maxDepth = 0;
         Scalar sumDepth = 0;
+        Scalar minCosParallax = std::numeric_limits<Scalar>::max();
+        Scalar maxCosParallax = -std::numeric_limits<Scalar>::max();
+        Scalar sumCosParallax = 0;
+        int numParallaxSamples = 0;
+        const Scalar minParallaxCos =
+            config.vio_min_triangulation_parallax_deg > 0
+                ? std::cos(Scalar(config.vio_min_triangulation_parallax_deg) *
+                           Scalar(M_PI / 180.0))
+                : Scalar(1);
         for (int lm_id : unconnected_obs0) {
             // Find all observations
             std::map<TimeCamId, KeypointObservation<Scalar>> kp_obs;
@@ -716,8 +726,21 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
                 const Scalar baseline = T_0_1.translation().norm();
                 if (baseline < minBaseline) minBaseline = baseline;
                 if (baseline > maxBaseline) maxBaseline = baseline;
+
+                const Vec3 ray0 = p0_3d.template head<3>().normalized();
+                const Vec3 ray1 =
+                    (T_0_1.so3() * p1_3d.template head<3>()).normalized();
+                const Scalar cosParallax = ray0.dot(ray1);
+                numParallaxSamples++;
+                if (cosParallax < minCosParallax) minCosParallax = cosParallax;
+                if (cosParallax > maxCosParallax) maxCosParallax = cosParallax;
+                sumCosParallax += cosParallax;
+
                 if (T_0_1.translation().squaredNorm() < min_triang_distance2) {
                     numShortBaseline++;
+                if (minParallaxCos < Scalar(1) &&
+                    cosParallax > minParallaxCos) {
+                    numLowParallax++;
                     continue;
                 }
 
@@ -760,13 +783,14 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
         num_points_kf[opt_flow_meas->t_ns] = num_points_added;
 
         mpLogger->AddVioTriang(
-            opt_flow_meas->t_ns, int(unconnected_obs0.size()),
-            num_points_added, numNoPriorObs, numUnprojectFail,
-            numShortBaseline, numNotFinite, numBehind, numTooClose,
-            config.vio_min_triangulation_dist,
+            opt_flow_meas->t_ns, int(unconnected_obs0.size()), num_points_added,
+            numNoPriorObs, numUnprojectFail, numShortBaseline, numNotFinite,
+            numBehind, numTooClose, config.vio_min_triangulation_dist,
             double(maxBaseline > 0 ? minBaseline : Scalar(0)),
-            double(maxBaseline), double(num_points_added ? minDepth : Scalar(0)),
-            double(sumDepth), double(maxDepth));
+            double(maxBaseline),
+            double(num_points_added ? minDepth : Scalar(0)), double(sumDepth),
+            double(maxDepth), double(minCosParallax), double(sumCosParallax),
+            double(maxCosParallax), numParallaxSamples, numLowParallax);
         // mpLogger->PrintVioTriang();
     } else {
         frames_after_kf++;

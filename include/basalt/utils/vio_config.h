@@ -72,6 +72,10 @@ struct VioConfig {
     double vio_obs_std_dev;
     double vio_obs_huber_thresh;
     double vio_min_triangulation_dist;
+    // Minimum parallax angle in degrees required between the two bearings of
+    // a triangulation candidate. Zero leaves the test inactive, reproducing
+    // the behaviour of every configuration written before this field existed.
+    double vio_min_triangulation_parallax_deg;
 
     bool vio_enforce_realtime;
 

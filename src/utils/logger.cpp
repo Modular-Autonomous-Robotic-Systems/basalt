@@ -369,7 +369,9 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"behind", "count"}, {"too_close", "count"},
               {"min_triang_dist", "f"}, {"baseline_m_min", "f"},
               {"baseline_m_max", "f"}, {"depth_m_min", "f"},
-              {"depth_m_mean", "f"}, {"depth_m_max", "f"}});
+              {"depth_m_mean", "f"}, {"depth_m_max", "f"},
+              {"cos_parallax_min", "f"}, {"cos_parallax_mean", "f"},
+              {"cos_parallax_max", "f"}, {"low_parallax", "count"}});
 
     Register("vio_reproj_pre_opt", "[VIO][reproj-pre-opt]",
              {{"t_ns", "ns"}, {"n", "count"}, {"mean_px", "f"},
@@ -796,8 +798,10 @@ void Logger::AddVioTriang(int64_t tNs, int candidates, int added,
                           int shortBaseline, int notFinite, int behind,
                           int tooClose, double minTriangDist,
                           double baselineMin, double baselineMax,
-                          double depthMin, double depthSum,
-                          double depthMax) {
+                          double depthMin, double depthSum, double depthMax,
+                          double cosParallaxMin, double cosParallaxSum,
+                          double cosParallaxMax, int numParallaxSamples,
+                          int lowParallax) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_triang");
     s.add_int("t_ns", tNs);
@@ -815,6 +819,12 @@ void Logger::AddVioTriang(int64_t tNs, int candidates, int added,
     s.add("depth_m_min", depthMin);
     s.add("depth_m_mean", added ? depthSum / double(added) : 0.0);
     s.add("depth_m_max", depthMax);
+    s.add("cos_parallax_min", numParallaxSamples ? cosParallaxMin : 0.0);
+    s.add("cos_parallax_mean", numParallaxSamples
+                                   ? cosParallaxSum / double(numParallaxSamples)
+                                   : 0.0);
+    s.add("cos_parallax_max", numParallaxSamples ? cosParallaxMax : 0.0);
+    s.add("low_parallax", double(lowParallax));
     s.CommitRow();
 }
 
