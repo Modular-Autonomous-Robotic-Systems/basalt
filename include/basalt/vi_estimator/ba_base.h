@@ -35,6 +35,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
 #include <basalt/vi_estimator/landmark_database.h>
+#include <optional>
 
 namespace basalt {
 
@@ -57,7 +58,8 @@ public:
     void computeError(Scalar& error,
                       std::map<int, std::vector<std::pair<TimeCamId, Scalar>>>*
                           outliers = nullptr,
-                      Scalar outlier_threshold = 0) const;
+                      Scalar outlier_threshold = 0,
+                      Scalar relScale = Scalar(1)) const;
 
     void filterOutliers(Scalar outlier_threshold, int min_num_obs);
 
@@ -131,13 +133,18 @@ public:
         for (auto& kv : this->frame_states) kv.second.backup();
         for (auto& kv : this->frame_poses) kv.second.backup();
         this->lmdb.backup();
+        mGsStateBackup = mGsState;
     }
 
     inline void restore() {
         for (auto& kv : this->frame_states) kv.second.restore();
         for (auto& kv : this->frame_poses) kv.second.restore();
         this->lmdb.restore();
+        mGsState = mGsStateBackup;
     }
+
+    std::optional<GravityScaleStateWithLin<Scalar>> mGsState;
+    std::optional<GravityScaleStateWithLin<Scalar>> mGsStateBackup;
 
     // protected:
     PoseStateWithLin<Scalar> getPoseStateWithLin(int64_t t_ns) const {

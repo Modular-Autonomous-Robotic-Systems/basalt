@@ -35,9 +35,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <basalt/controller.h>
 #include <basalt/serialization/headers_serialization.h>
+#include <basalt/utils/filesystem.h>
 
 #include <fstream>
 #include <iostream>
+#include <system_error>
 
 #include "basalt/vi_estimator/vio_estimator.h"
 
@@ -156,8 +158,28 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
     mpAlignToGroundTruth = alignToGroundTruth;
     mpGroundTruthSeeded = false;
 
-    mpLogger =
-        std::make_shared<basalt::Logger>(logDirectory, vio_config_.vio_debug);
+    // Superseded 2026-10-23, collection and CSV creation now follow vio_debug.
+    // mpLogger =
+    //     std::make_shared<basalt::Logger>(logDirectory, vio_config_.vio_debug);
+    mpLogger = vio_config_.vio_debug
+                   ? std::make_shared<basalt::Logger>(logDirectory,
+                                                      vio_config_.vio_debug)
+                   : basalt::Logger::Disabled();
+
+    // Every run's own calibration and configuration travel with its CSVs
+    // under fixed names, so a later comparison never has to guess which
+    // file on disk a given log directory was flown under.
+    if (!logDirectory.empty()) {
+        std::error_code ec;
+        if (!config_path_.empty())
+            basalt::fs::copy_file(
+                config_path_, logDirectory + "/config.json",
+                basalt::fs::copy_options::overwrite_existing, ec);
+        if (!calib_path_.empty())
+            basalt::fs::copy_file(
+                calib_path_, logDirectory + "/calibration.json",
+                basalt::fs::copy_options::overwrite_existing, ec);
+    }
 
     // 1. Create Optical Flow Frontend
     std::cout << "Setting up Optical Flow and VIO" << std::endl;
@@ -193,8 +215,12 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
         std::make_shared<basalt::LocalMapper>(calib_, vio_config_, mpLogger);
     local_mapper_->SetMarginalisationDataInputQueue(&local_map_input_queue_);
     local_mapper_->SetKFInputQueue(&local_map_kf_queue_);
+    local_mapper_->SetGravityScaleCorrectionLog(
+        vio_estimator_->mGsCorrectionLog);
     local_mapper_->SetVIOPoseUpdateCallback(
-        [this](const auto& poses) { vio_estimator_->QueuePoseUpdates(poses); });
+        [this](const auto& poses, int64_t gsEpoch) {
+            vio_estimator_->QueuePoseUpdates(poses, gsEpoch);
+        });
     local_mapper_->Initialise();
 
     if (mpUseProducerConsumerArchitecture) {
@@ -286,7 +312,7 @@ void Controller::GrabIMU(basalt::ImuData<double>::Ptr data) {
                     double(mpImuWindowMaxGapNs) * 1e-9, mpImuNonMonotonic,
                     int(vio_estimator_->imu_data_queue.size()), data->accel,
                     data->gyro);
-                mpLogger->PrintVioImuIngest();
+                // mpLogger->PrintVioImuIngest();
                 mpImuWindowFirstTNs = -1;
                 mpImuWindowMaxGapNs = 0;
             }

@@ -1,0 +1,133 @@
+{
+  "time_reference": "mission",
+  "liftoff_threshold_m": 0.15,
+  "trajectory": {
+    "alignment_mode": "posyaw",
+    "ate": {"enabled": true},
+    "trajectory_3d": {"enabled": true, "color_by_error": true, "width": 1080, "height": 810},
+    "trajectory_3d_gt_overlay": {"enabled": true, "width": 1080, "height": 810},
+    "trajectory_2d": {"enabled": true, "axes_overlayed": false, "width": 1080, "height": 400},
+    "trajectory_error": {"enabled": true, "axes_overlayed": true, "width": 1080, "height": 400},
+    "trajectory_error_xyz": {"enabled": true, "width": 1080, "height": 650},
+    "rpe_rmse": {"enabled": true, "deltas": [5, 10, 20, 30, 50, 75, 100, 150, 200, 300],
+                 "width": 720, "height": 540},
+    "rpe_length": {"enabled": true, "length": [10, 40, 60], "width": 1080, "height": 400},
+    "yaw_offset": {"enabled": true},
+    "drift_proxies": {"enabled": true},
+    "tracking_success": {"enabled": false}
+  },
+  "optical_flow_detection": {
+    "detection_count": {"enabled": true, "width": 1080, "height": 400},
+    "occupancy_grid": {"enabled": false}
+  },
+  "optical_flow_tracking": {
+    "track_length_distribution": {"enabled": true, "bins": 30, "width": 720, "height": 540},
+    "track_survival_curve": {"enabled": true, "width": 720, "height": 540},
+    "death_reason_breakdown": {"enabled": true, "width": 720, "height": 540},
+    "reprojection_error_distribution": {"enabled": true, "type": ["histogram", "time_series"],
+                                         "width": 1080, "height": 450},
+    "inlier_outlier_ratio": {"enabled": true, "width": 1080, "height": 400},
+    "optical_flow_endpoint_error": {"enabled": true, "width": 1080, "height": 450}
+  },
+  "vio_triangulation": {
+    "parallax_angle": {"enabled": true, "unit": "deg", "width": 1080, "height": 450},
+    "baseline_distribution": {"enabled": true, "width": 720, "height": 540},
+    "triangulation_funnel": {"enabled": true, "width": 720, "height": 540}
+  },
+  "vio_optimisation": {
+    "cost_curve": {"enabled": true, "width": 1080, "height": 400},
+    "damping_trace": {"enabled": true, "width": 1080, "height": 400},
+    "accept_reject_ratio": {"enabled": true},
+    "cost_split": {"enabled": true, "width": 1080, "height": 900},
+    "solve_outcome": {"enabled": true, "width": 1080, "height": 400},
+    "marg_size": {"enabled": true, "width": 1080, "height": 400},
+    "marg_eigenspectrum": {"enabled": true, "width": 1080, "height": 400},
+    "marg_nullspace_response": {"enabled": true, "width": 1080, "height": 1250},
+    "pose_update_acceptance": {"enabled": true, "width": 1080, "height": 400},
+    "association_ratio": {"enabled": true, "width": 1080, "height": 400},
+    "landmark_churn": {"enabled": true, "width": 1080, "height": 400},
+    "init_sanity": {"enabled": true},
+    "state_trace": {"enabled": true, "width": 1080, "height": 400},
+    "excitation_covariance": {"enabled": true, "window_s": 1.5, "width": 1080, "height": 400},
+    "stationarity": {"enabled": true, "width": 1080, "height": 400},
+    "mapper_cost_curve": {"enabled": true, "width": 1080, "height": 400},
+    "mapper_damping_accept_reject": {"enabled": true, "width": 1080, "height": 400}
+  },
+  "gravity_scale": {
+    "block_step": {"enabled": true, "width": 1080, "height": 750},
+    "block_cumulative": {"enabled": true, "width": 1080, "height": 750},
+    "swap_events": {"enabled": true, "width": 1080, "height": 400},
+    "visual_prior_admission": {"enabled": true, "width": 1080, "height": 750},
+    "physical_scale_gravity": {"enabled": true, "window_s": 2.0, "min_disp_m": 0.3, "min_speed_mps": 0.3,
+                               "width": 1080, "height": 1000},
+    "bias_components": {"enabled": true, "width": 1080, "height": 1400},
+    "position_jump": {"enabled": true, "width": 1080, "height": 400},
+    "pose_update_gate": {"enabled": true, "width": 1080, "height": 1000},
+    "solver_health": {"enabled": true, "width": 1080, "height": 750},
+    "scalars": {"enabled": true, "median_ratio_window_s": [5, 30], "tilt_at_s": 10}
+  },
+  "delayed_marginalisation": {
+    "events": {"enabled": true, "width": 1080, "height": 400},
+    "job_timing": {"enabled": true, "width": 1080, "height": 1250},
+    "install_lag": {"enabled": true, "width": 1080, "height": 400},
+    "store_timing": {"enabled": true, "width": 1080, "height": 400},
+    "trigger": {"enabled": true, "width": 1080, "height": 750},
+    "store": {"enabled": true, "width": 1080, "height": 750},
+    "coarse_jobs": {"enabled": true, "width": 1080, "height": 2600},
+    "smoothing": {"enabled": true, "width": 1080, "height": 400},
+    "scale_at_events": {"enabled": true, "width": 1080, "height": 400},
+    "job_duration_histogram": {"enabled": true, "bins": 30, "width": 720, "height": 540},
+    "scalars": {"enabled": true}
+  },
+  "stationary_detection": {
+    "metrics": {"enabled": true, "width": 1080, "height": 750},
+    "stage_flags": {"enabled": true, "width": 1080, "height": 400},
+    "vehicle_speed": {"enabled": true, "width": 1080, "height": 400}
+  },
+  "mapping_detection": {
+    "mapper_detection_yield": {"enabled": true, "width": 1080, "height": 400},
+    "mapper_track_length_histogram": {"enabled": true, "width": 720, "height": 540},
+    "map_building_throughput": {"enabled": true, "width": 1080, "height": 400}
+  },
+  "mapping_matching": {
+    "bow_pr_curve": {"enabled": true, "distance_thresh_m": 5.0, "min_time_gap_s": 2.0,
+                      "width": 720, "height": 540},
+    "bow_score_histogram": {"enabled": true, "width": 1080, "height": 500},
+    "bow_raw_retrieval_yield": {"enabled": true, "width": 1080, "height": 400},
+    "pairwise_match_funnel": {"enabled": true, "width": 720, "height": 540},
+    "matching_stage_summary": {"enabled": true, "width": 1080, "height": 400}
+  },
+  "mapping_triangulation": {
+    "mapper_triangulation_funnel": {"enabled": true, "width": 720, "height": 540}
+  },
+  "mapping_optimisation": {
+    "covisibility_graph": {"enabled": false, "width": 720, "height": 540},
+    "culling_redundancy_calibration": {"enabled": true, "width": 720, "height": 540},
+    "keyframe_culling_rate": {"enabled": true},
+    "landmark_filter_attrition": {"enabled": true, "width": 1080, "height": 400},
+    "publish_consistency": {"enabled": true, "width": 1080, "height": 400},
+    "landmark_rehost_funnel": {"enabled": true, "width": 720, "height": 540},
+    "culled_keyframe_summary": {"enabled": true, "width": 1080, "height": 400}
+  },
+  "timing": {
+    "frontend_stage_latency": {"enabled": true, "width": 1080, "height": 650},
+    "vio_stage_latency": {"enabled": true, "width": 1080, "height": 1100},
+    "vio_queue_depth": {"enabled": true, "width": 1080, "height": 400},
+    "vio_solver_stage_latency": {"enabled": true, "width": 1080, "height": 1250},
+    "vio_marg_stage_latency": {"enabled": true, "width": 1080, "height": 750},
+    "mapper_cycle_latency": {"enabled": true, "width": 1080, "height": 2000},
+    "mapper_detection_latency": {"enabled": true, "width": 1080, "height": 400},
+    "mapper_matching_latency": {"enabled": true, "width": 1080, "height": 400},
+    "imu_ingestion_health": {"enabled": true, "width": 1080, "height": 400},
+    "imu_frame_coverage": {"enabled": true, "width": 1080, "height": 400},
+    "tail_latency_percentiles": {"enabled": true, "percentiles": [95, 99]}
+  },
+  "raw_logs": {"enabled": true, "exclude": [], "max_points_per_run": 20000, "height_per_subplot": 160,
+               "width": 1080},
+  "cross_run": {
+    "config_diff": {"enabled": true, "baseline": "first", "width": 1080, "height": 540},
+    "distribution_comparison": {"enabled": true,
+      "metrics": ["reprojection_error_distribution", "parallax_angle", "vio_stage_latency"],
+      "width": 720, "height": 540}
+  }
+}

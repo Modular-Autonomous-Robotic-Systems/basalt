@@ -361,7 +361,7 @@ void matchDescriptors(const std::vector<std::bitset<256>>& corner_descriptors_1,
 
 void findInliersRansac(const KeypointsData& kd1, const KeypointsData& kd2,
                        const double ransac_thresh, const int ransac_min_inliers,
-                       MatchData& md) {
+                       MatchData& md, bool verbose) {
   md.inliers.clear();
 
   opengv::bearingVectors_t bearingVectors1, bearingVectors2;
@@ -407,7 +407,7 @@ void findInliersRansac(const KeypointsData& kd1, const KeypointsData& kd2,
 
   // Sanity check if the number of inliers decreased, but only warn if it is
   // by 3 or more, since some small fluctuation is expected.
-  if (ransac.inliers_.size() + 2 < num_inliers_ransac) {
+  if (verbose && ransac.inliers_.size() + 2 < num_inliers_ransac) {
     std::cout << "Warning: non-linear refinement reduced the relative pose "
                  "ransac inlier count from "
               << num_inliers_ransac << " to " << ransac.inliers_.size() << "."

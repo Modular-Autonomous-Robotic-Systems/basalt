@@ -41,12 +41,16 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <Eigen/Dense>
 #include <atomic>
+#include <cmath>
+#include <basalt/utils/eigen_utils.hpp>
 #include <basalt/utils/sophus_utils.hpp>
 #include <cereal/cereal.hpp>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <sophus/se3.hpp>
+#include <vector>
 
 namespace basalt {
 
@@ -135,6 +139,21 @@ struct PoseVelBiasStateWithLin {
     inline bool isLinearized() const { return linearized; }
     inline const VecN& getDelta() const { return delta; }
     inline int64_t getT_ns() const { return state_linearized.t_ns; }
+
+    // Applies R <- Q R, p <- s Q p, v <- s Q v to the linearisation point and
+    // maps delta by blkdiag(sQ, Q, sQ, I, I), plans/gravity_scale_optimisation.md §2.7.
+    void TransformBySim3(const Sophus::SO3<Scalar>& Q, Scalar s) {
+        const Eigen::Matrix<Scalar, 3, 3> Qm = Q.matrix();
+        state_linearized.T_w_i.so3() = Q * state_linearized.T_w_i.so3();
+        state_linearized.T_w_i.translation() =
+            s * (Qm * state_linearized.T_w_i.translation());
+        state_linearized.vel_w_i = s * (Qm * state_linearized.vel_w_i);
+        delta.template segment<3>(0) = s * (Qm * delta.template segment<3>(0));
+        delta.template segment<3>(3) = Qm * delta.template segment<3>(3);
+        delta.template segment<3>(6) = s * (Qm * delta.template segment<3>(6));
+        state_current = state_linearized;
+        if (linearized) state_current.applyInc(delta);
+    }
 
     inline void backup() {
         backup_delta = delta;
@@ -249,6 +268,19 @@ struct PoseStateWithLin {
     inline const VecN& getDelta() const { return delta; }
     inline int64_t getT_ns() const { return pose_linearized.t_ns; }
 
+    // Applies R <- Q R, p <- s Q p to the linearisation point and maps delta by
+    // blkdiag(sQ, Q), plans/gravity_scale_optimisation.md §2.7.
+    void TransformBySim3(const Sophus::SO3<Scalar>& Q, Scalar s) {
+        const Eigen::Matrix<Scalar, 3, 3> Qm = Q.matrix();
+        pose_linearized.T_w_i.so3() = Q * pose_linearized.T_w_i.so3();
+        pose_linearized.T_w_i.translation() =
+            s * (Qm * pose_linearized.T_w_i.translation());
+        delta.template head<3>() = s * (Qm * delta.template head<3>());
+        delta.template tail<3>() = Qm * delta.template tail<3>();
+        T_w_i_current = pose_linearized.T_w_i;
+        if (linearized) PoseState<Scalar>::incPose(delta, T_w_i_current);
+    }
+
     inline void backup() {
         backup_delta = delta;
         backup_pose_linearized = pose_linearized;
@@ -286,6 +318,124 @@ private:
         ar(linearized);
         ar(pose_linearized.t_ns);
     }
+};
+
+constexpr int64_t kGravityScaleStateId = -1;
+constexpr int GRAVITY_SCALE_SIZE = 3;
+
+// Gravity direction on the unit sphere and log scale with first estimate
+// semantics, plans/gravity_scale_optimisation.md §2.1.3.
+template <class Scalar_>
+struct GravityScaleStateWithLin {
+    using Scalar = Scalar_;
+    using Vec3 = Eigen::Matrix<Scalar, 3, 1>;
+    using Mat32 = Eigen::Matrix<Scalar, 3, 2>;
+    using SO3 = Sophus::SO3<Scalar>;
+
+    Vec3 mDirLin = Vec3(0, 0, -1);
+    Mat32 mBasisLin = (Mat32() << 1, 0, 0, 1, 0, 0).finished();
+    Scalar mSigmaLin = 0;
+    Vec3 mDelta = Vec3::Zero();
+    bool mLinearized = false;
+
+    SO3 DeltaRotation() const {
+        return SO3::exp(mBasisLin * mDelta.template head<2>());
+    }
+    Vec3 GetDir() const { return DeltaRotation() * mDirLin; }
+    Mat32 GetBasis() const { return DeltaRotation().matrix() * mBasisLin; }
+    Scalar GetSigma() const { return mSigmaLin + mDelta[2]; }
+    Scalar GetScale() const { return std::exp(GetSigma()); }
+    Scalar GetScaleLin() const { return std::exp(mSigmaLin); }
+    const Vec3& GetDelta() const { return mDelta; }
+
+    // Minimal rotation carrying the current gravity direction onto that of g.
+    SO3 AlignmentRotation(const Vec3& g) const {
+        return SO3(Eigen::Quaternion<Scalar>::FromTwoVectors(GetDir(),
+                                                             g.normalized()));
+    }
+
+    void ApplyInc(const Vec3& inc) {
+        if (mLinearized) {
+            mDelta += inc;
+            return;
+        }
+        const SO3 R = SO3::exp(mBasisLin * inc.template head<2>());
+        mDirLin = R * mDirLin;
+        mBasisLin = R.matrix() * mBasisLin;
+        mSigmaLin += inc[2];
+    }
+
+    // Maps the linearisation point by the re-centring of §2.7, keeping mDelta.
+    void TransformLin(const SO3& Q, Scalar sigmaShift) {
+        mDirLin = Q * mDirLin;
+        mBasisLin = Q.matrix() * mBasisLin;
+        mSigmaLin -= sigmaShift;
+    }
+
+    // Moves the linearisation point to the given anchor, keeping the current
+    // value, §2.6.8.
+    void Reanchor(const Vec3& dirLin, const Mat32& basisLin, Scalar sigmaLin) {
+        const Vec3 dir = GetDir();
+        const Scalar sigma = GetSigma();
+        const Vec3 axis = dirLin.cross(dir);
+        const Scalar sinAngle = axis.norm();
+        Vec3 w = Vec3::Zero();
+        if (sinAngle > Sophus::Constants<Scalar>::epsilon()) {
+            w = axis * (std::atan2(sinAngle, dirLin.dot(dir)) / sinAngle);
+        }
+        mDirLin = dirLin;
+        mBasisLin = basisLin;
+        mSigmaLin = sigmaLin;
+        mDelta.template head<2>() = basisLin.transpose() * w;
+        mDelta[2] = sigma - sigmaLin;
+        mLinearized = true;
+    }
+
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+
+// Cumulative gravity and scale corrections applied by the VIO estimator, one
+// entry per epoch, shared with the local mapper, §2.9.
+struct GravityScaleCorrectionLog {
+    using Ptr = std::shared_ptr<GravityScaleCorrectionLog>;
+
+    struct Entry {
+        Sophus::SO3d mQ;
+        double mScale = 1.0;
+
+        Sophus::SE3d Apply(const Sophus::SE3d& T) const {
+            return Sophus::SE3d(mQ * T.so3(), mScale * (mQ * T.translation()));
+        }
+
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    };
+
+    void Append(const Sophus::SO3d& Q, double scale) {
+        std::lock_guard<std::mutex> lock(mMtxLog);
+        Entry entry;
+        entry.mQ = Q * mvEntries.back().mQ;
+        entry.mScale = scale * mvEntries.back().mScale;
+        mvEntries.push_back(entry);
+    }
+
+    int64_t LatestEpoch() const {
+        std::lock_guard<std::mutex> lock(mMtxLog);
+        return int64_t(mvEntries.size()) - 1;
+    }
+
+    // Similarity carrying a quantity expressed at epoch `from` to epoch `to`.
+    Entry Between(int64_t from, int64_t to) const {
+        std::lock_guard<std::mutex> lock(mMtxLog);
+        const Entry& a = mvEntries.at(size_t(from));
+        const Entry& b = mvEntries.at(size_t(to));
+        Entry entry;
+        entry.mQ = b.mQ * a.mQ.inverse();
+        entry.mScale = b.mScale / a.mScale;
+        return entry;
+    }
+
+    mutable std::mutex mMtxLog;
+    Eigen::aligned_vector<Entry> mvEntries = Eigen::aligned_vector<Entry>(1);
 };
 
 struct AbsOrderMap {
@@ -335,6 +485,7 @@ struct MargData {
     std::set<int64_t> kfs_all;
     std::set<int64_t> kfs_to_marg;
     bool use_imu;
+    int64_t mGsEpoch = 0;
 
     std::vector<OpticalFlowResult::Ptr> opt_flow_res;
 };
@@ -345,6 +496,7 @@ struct Keyframe {
     int64_t timestamp;
     PoseStateWithLin<double> pose;
     OpticalFlowResult::Ptr opt_flow_res;
+    int64_t mGsEpoch = 0;
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };

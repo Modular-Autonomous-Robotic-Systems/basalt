@@ -89,6 +89,8 @@ class LinearizationAbsQR : public LinearizationBase<Scalar_, POSE_SIZE_> {
       std::unordered_map<TimeCamId, std::vector<const LandmarkBlock<Scalar>*>>;
 
  protected:  //  helper
+  virtual void linearizeRelPoses();
+
   void get_dense_Q2Jp_Q2r_pose_damping(MatX& Q2Jp, size_t start_idx) const;
 
   void get_dense_Q2Jp_Q2r_marg_prior(MatX& Q2Jp, VecX& Q2r,
@@ -136,6 +138,39 @@ class LinearizationAbsQR : public LinearizationBase<Scalar_, POSE_SIZE_> {
 
   size_t num_cameras;
   size_t num_rows_Q2r;
+};
+
+template <typename Scalar_, int POSE_SIZE_>
+class LinearizationGSAbsQR : public LinearizationAbsQR<Scalar_, POSE_SIZE_> {
+ public:
+  using Scalar = Scalar_;
+  static constexpr int POSE_SIZE = POSE_SIZE_;
+  using Base = LinearizationAbsQR<Scalar, POSE_SIZE>;
+  using typename Base::Options;
+
+  LinearizationGSAbsQR(
+      BundleAdjustmentBase<Scalar>* estimator, const AbsOrderMap& aom,
+      const Options& options, const GravityScaleStateWithLin<Scalar>* gs,
+      bool visualScaleFree, const MargLinData<Scalar>* marg_lin_data = nullptr,
+      const ImuLinData<Scalar>* imu_lin_data = nullptr,
+      const std::set<FrameId>* used_frames = nullptr,
+      const std::unordered_set<KeypointId>* lost_landmarks = nullptr,
+      int64_t last_state_to_marg = std::numeric_limits<int64_t>::max(),
+      bool imuScaleFree = false, Scalar imuScaleFreeTol = Scalar(0));
+
+  // Numbers of inertial factors linearised with all rows and with the
+  // rotation rows only.
+  std::pair<int, int> CountImuRowForms() const;
+
+  // Largest whitened scale column norm over the inertial factors.
+  Scalar MaxImuScaleColNorm() const;
+
+ protected:
+  void linearizeRelPoses() override;
+
+ private:
+  const GravityScaleStateWithLin<Scalar>* mpGs;
+  bool mpVisualScaleFree;
 };
 
 }  // namespace basalt

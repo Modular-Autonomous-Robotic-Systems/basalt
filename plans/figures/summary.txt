@@ -1,0 +1,79 @@
+# /ws/log2.log
+
+runs detected             3
+records before first run  4
+
+## Run 1
+
+first log line            217
+initialisation t_ns       44142000000
+frames                    1835
+span                      106.914 s
+keyframes                 612
+pose update rejections    2232
+rejected trans_err median 12.3890 m
+malformed records         0
+truncated by interleaving 656
+inertial ingest records   86
+init                      [VIO] init: skipped_behind=13 accel=  0.016875 -0.0653121   -9.93865 |accel|=9.93888 gyro=0.00830378  0.0033362 0.00210779 |gyro|=0.00919379 bg=0 0 0 ba=0 0 0 g=    0     0 -9.81
+init                      [VIO] init: frame t_ns=151056000000 imu t_ns=151026000000 imu_minus_frame_ns=-30000000 imu_queue=7
+
+of_survival              optical flow track survival            n=1831 min=0.0714286 p50=0.901515 p90=0.949555 max=0.986711 mean=0.840014
+of_flow_px_mean          mean flow magnitude, px per frame      n=1831 min=0.141039 p50=0.775944 p90=2.60459 max=28.2374 mean=1.45273
+of_out                   tracks handed to the estimator         n=1831 min=58 p50=269 p90=329 max=349 mean=256.683
+of_detected              new detections per frame               n=1831 min=5 p50=25 p90=76 max=178 mean=35.894
+imu_integrated           inertial samples integrated per frame  n=1831 min=8 p50=9 p90=10 max=36 mean=9.43474
+imu_coverage             fraction of the frame interval covered n=1831 min=0.882353 p50=1 p90=1 max=1 mean=0.966214
+imu_stretch_ms           zero order hold span, ms               n=1831 min=0 p50=0 p90=6 max=6 mean=1.82851
+assoc_connected_ratio    connected track ratio                  n=1833 min=0 p50=0.563452 p90=0.745387 max=0.839394 mean=0.544123
+assoc_lmdb_landmarks     landmarks in the estimator database    n=1833 min=0 p50=158 p90=241 max=281 mean=155.712
+tri_added                landmarks triangulated per keyframe    n=612 min=0 p50=47 p90=68 max=98 mean=45.0343
+tri_short_baseline       candidates rejected on baseline        n=612 min=33 p50=80 p90=120 max=1078 mean=91.4608
+tri_depth_m_mean         mean triangulated depth, m             n=612 min=0 p50=83341.2 p90=403759 max=9.94346e+07 mean=441424
+tri_baseline_m_max       largest baseline used, m               n=612 min=5.55112e-17 p50=944.392 p90=5844.22 max=9042.99 mean=2188.78
+st_p_norm                position norm, m                       n=1601 min=0 p50=7970.19 p90=34000 max=41483.7 mean=12774.5
+st_v_norm                velocity norm, m/s                     n=1402 min=0 p50=451.42 p90=744.212 max=757.276 mean=413.498
+st_ba_norm               accelerometer bias norm, m/s^2         n=1296 min=0 p50=0.05344 p90=0.197503 max=0.233313 mean=0.0801723
+split_vision             vision cost                            n=1830 min=0 p50=13003.5 p90=47650.2 max=77273.1 mean=19257.4
+split_imu                inertial cost                          n=1830 min=1.34093e-27 p50=54.9528 p90=254.186 max=2395.79 mean=104.703
+split_marg_prior         marginalisation prior cost             n=1830 min=-3.669e+07 p50=-7958.11 p90=-780.922 max=112.786 mean=-291141
+tim_opt_and_marg         optimise and marginalise, ms           n=1777 min=0.001893 p50=9.02266 p90=13.0956 max=21.1203 mean=9.25546
+oft_total                front end total, ms                    n=1833 min=0.794221 p50=1.2884 p90=2.00668 max=3.76868 mean=1.41925
+
+## Run 2
+
+first log line            198540
+initialisation t_ns       151056000000
+frames                    5607
+span                      304.509 s
+keyframes                 1819
+pose update rejections    9498
+rejected trans_err median 0.3867 m
+malformed records         1
+truncated by interleaving 1975
+inertial ingest records   253
+init                      [VIO] init: skipped_behind=5 accel=0.0395748 0.0654174  -9.94736 |accel|=9.94766 gyro=0.00209193 0.00511304 0.00635663 |gyro|=0.00842176 bg=0 0 0 ba=0 0 0 g=    0     0 -9.81
+init                      [VIO] init: frame t_ns=463740000000 imu t_ns=463653000000 imu_minus_frame_ns=-87000000 imu_queue=18
+
+of_survival              optical flow track survival            n=5601 min=0.00442478 p50=0.888462 p90=0.947552 max=0.990164 mean=0.867231
+of_flow_px_mean          mean flow magnitude, px per frame      n=5600 min=0.0642074 p50=1.90764 p90=7.76442 max=28.7378 mean=3.08836
+of_out                   tracks handed to the estimator         n=5600 min=59 p50=277 p90=324 max=368 mean=271.766
+of_detected              new detections per frame               n=5600 min=3 p50=30 p90=57 max=191 mean=34.0084
+imu_integrated           inertial samples integrated per frame  n=5602 min=7 p50=9 p90=9 max=45 mean=9.0523
+imu_coverage             fraction of the frame interval covered n=5601 min=0.882353 p50=0.971429 p90=1 max=1 mean=0.964804
+imu_stretch_ms           zero order hold span, ms               n=5601 min=0 p50=3 p90=6 max=6 mean=1.8661
+assoc_connected_ratio    connected track ratio                  n=5603 min=0 p50=0.740741 p90=0.887789 max=0.966102 mean=0.701693
+assoc_lmdb_landmarks     landmarks in the estimator database    n=5603 min=0 p50=216 p90=276 max=345 mean=204.991
+tri_added                landmarks triangulated per keyframe    n=1819 min=0 p50=56 p90=80 max=174 mean=54.5531
+tri_short_baseline       candidates rejected on baseline        n=1819 min=7 p50=37 p90=170 max=654 mean=69.6679
+tri_depth_m_mean         mean triangulated depth, m             n=1819 min=0 p50=197.674 p90=631.622 max=146422 mean=544.144
+tri_baseline_m_max       largest baseline used, m               n=1819 min=5.55112e-17 p50=30.1976 p90=56.4601 max=98.3838 mean=30.4461
+st_p_norm                position norm, m                       n=4732 min=0 p50=221.956 p90=412.927 max=471.164 mean=235.033
+st_v_norm                velocity norm, m/s                     n=4180 min=0 p50=6.08743 p90=17.5425 max=21.8046 mean=8.14068
+st_ba_norm               accelerometer bias norm, m/s^2         n=3958 min=0 p50=0.15523 p90=2.39445 max=2.50205 mean=0.713964
+split_vision             vision cost                            n=5599 min=0 p50=291.73 p90=1196.1 max=18026.1 mean=564.271
+split_imu                inertial cost                          n=5599 min=2.22817e-26 p50=11.7336 p90=132.955 max=5925.39 mean=74.3288
+split_marg_prior         marginalisation prior cost             n=5599 min=-2.36957e+06 p50=-16802.3 p90=-2692.48 max=2.85604 mean=-56857.6
+tim_opt_and_marg         optimise and marginalise, ms           n=5422 min=0.002104 p50=11.7881 p90=14.2051 max=111.198 mean=11.5602
+oft_total                front end total, ms                    n=5601 min=0.74598 p50=1.21602 p90=1.89494 max=3.90161 mean=1.32929
+

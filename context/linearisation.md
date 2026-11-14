@@ -8,7 +8,7 @@ Date of investigation, 2026-09-02. Companion to `doc/Linearisation.md`, which is
 
 Every shipped `data/*.json` pins `ABS_QR` explicitly, which matches the default rather than overriding it. The only place the default is genuinely varied is `data/iccv21/basalt_batch_config.toml:370-378`, the paper's own ablation sweep, which compares non square root Schur complement, square root Schur complement and square root QR. `REL_SC` appears in no shipped config and only in `test/src/test_linearization.cpp`.
 
-`vio_use_lm` defaults to false at `src/utils/vio_config.cpp:77`, so the outer loop is Gauss-Newton with a diagonal regularisation, not an adaptive trust region.
+`vio_use_lm` defaults to false at `src/utils/vio_config.cpp:78` but is read nowhere in `src/` or `include/` apart from its default and its serialisation, so it is inert. The outer loop in `optimize` is always a Levenberg-Marquardt loop with a Marquardt damped diagonal and an adaptive `lambda` (Nielsen style update on acceptance, doubling on rejection), see [`vio_opt.md`](vio_opt.md) section 10. Correction, 2026-10-30. This paragraph previously stated that a false `vio_use_lm` makes the outer loop Gauss-Newton with a diagonal regularisation and not an adaptive trust region. The adaptive schedule at `src/vi_estimator/sqrt_keypoint_vio.cpp:1955-1960` and `:1985-1986` runs unconditionally, so any conclusion drawn from the flag selecting between the two behaviours is void.
 
 ## Precision actually used
 

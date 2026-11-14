@@ -189,43 +189,7 @@ Scalar LinearizationAbsQR<Scalar, POSE_SIZE>::linearizeProblem(
   pose_damping_diagonal_sqrt = 0;
   marg_scaling = VecX();
 
-  // Linearize relative poses
-  for (const auto& [tcid_h, target_map] : lmdb_.getObservations()) {
-    // if (used_frames && used_frames->count(tcid_h.frame_id) == 0) continue;
-
-    for (const auto& [tcid_t, _] : target_map) {
-      std::pair<TimeCamId, TimeCamId> key(tcid_h, tcid_t);
-      RelPoseLin<Scalar>& rpl = relative_pose_lin.at(key);
-
-      if (tcid_h != tcid_t) {
-        const PoseStateWithLin<Scalar>& state_h =
-            estimator->getPoseStateWithLin(tcid_h.frame_id);
-        const PoseStateWithLin<Scalar>& state_t =
-            estimator->getPoseStateWithLin(tcid_t.frame_id);
-
-        // compute relative pose & Jacobians at linearization point
-        Sophus::SE3<Scalar> T_t_h_sophus =
-            computeRelPose(state_h.getPoseLin(), calib.T_i_c[tcid_h.cam_id],
-                           state_t.getPoseLin(), calib.T_i_c[tcid_t.cam_id],
-                           &rpl.d_rel_d_h, &rpl.d_rel_d_t);
-
-        // if either state is already linearized, then the current state
-        // estimate is different from the linearization point, so recompute
-        // the value (not Jacobian) again based on the current state.
-        if (state_h.isLinearized() || state_t.isLinearized()) {
-          T_t_h_sophus =
-              computeRelPose(state_h.getPose(), calib.T_i_c[tcid_h.cam_id],
-                             state_t.getPose(), calib.T_i_c[tcid_t.cam_id]);
-        }
-
-        rpl.T_t_h = T_t_h_sophus.matrix();
-      } else {
-        rpl.T_t_h.setIdentity();
-        rpl.d_rel_d_h.setZero();
-        rpl.d_rel_d_t.setZero();
-      }
-    }
-  }
+  linearizeRelPoses();
 
   // Linearize landmarks
   size_t num_landmarks = landmark_blocks.size();
@@ -265,6 +229,140 @@ Scalar LinearizationAbsQR<Scalar, POSE_SIZE>::linearizeProblem(
   }
 
   return reduction_res.first;
+}
+
+template <typename Scalar, int POSE_SIZE>
+void LinearizationAbsQR<Scalar, POSE_SIZE>::linearizeRelPoses() {
+  // Linearize relative poses
+  for (const auto& [tcid_h, target_map] : lmdb_.getObservations()) {
+    // if (used_frames && used_frames->count(tcid_h.frame_id) == 0) continue;
+
+    for (const auto& [tcid_t, _] : target_map) {
+      std::pair<TimeCamId, TimeCamId> key(tcid_h, tcid_t);
+      RelPoseLin<Scalar>& rpl = relative_pose_lin.at(key);
+
+      if (tcid_h != tcid_t) {
+        const PoseStateWithLin<Scalar>& state_h =
+            estimator->getPoseStateWithLin(tcid_h.frame_id);
+        const PoseStateWithLin<Scalar>& state_t =
+            estimator->getPoseStateWithLin(tcid_t.frame_id);
+
+        // compute relative pose & Jacobians at linearization point
+        Sophus::SE3<Scalar> T_t_h_sophus =
+            computeRelPose(state_h.getPoseLin(), calib.T_i_c[tcid_h.cam_id],
+                           state_t.getPoseLin(), calib.T_i_c[tcid_t.cam_id],
+                           &rpl.d_rel_d_h, &rpl.d_rel_d_t);
+
+        // if either state is already linearized, then the current state
+        // estimate is different from the linearization point, so recompute
+        // the value (not Jacobian) again based on the current state.
+        if (state_h.isLinearized() || state_t.isLinearized()) {
+          T_t_h_sophus =
+              computeRelPose(state_h.getPose(), calib.T_i_c[tcid_h.cam_id],
+                             state_t.getPose(), calib.T_i_c[tcid_t.cam_id]);
+        }
+
+        rpl.T_t_h = T_t_h_sophus.matrix();
+      } else {
+        rpl.T_t_h.setIdentity();
+        rpl.d_rel_d_h.setZero();
+        rpl.d_rel_d_t.setZero();
+      }
+    }
+  }
+}
+
+template <typename Scalar, int POSE_SIZE>
+LinearizationGSAbsQR<Scalar, POSE_SIZE>::LinearizationGSAbsQR(
+    BundleAdjustmentBase<Scalar>* estimator, const AbsOrderMap& aom,
+    const Options& options, const GravityScaleStateWithLin<Scalar>* gs,
+    bool visualScaleFree, const MargLinData<Scalar>* marg_lin_data,
+    const ImuLinData<Scalar>* imu_lin_data,
+    const std::set<FrameId>* used_frames,
+    const std::unordered_set<KeypointId>* lost_landmarks,
+    int64_t last_state_to_marg, bool imuScaleFree, Scalar imuScaleFreeTol)
+    : Base(estimator, aom, options, marg_lin_data, imu_lin_data, used_frames,
+           lost_landmarks, last_state_to_marg),
+      mpGs(gs),
+      mpVisualScaleFree(visualScaleFree) {
+  BASALT_ASSERT(gs != nullptr);
+  BASALT_ASSERT(aom.abs_order_map.at(kGravityScaleStateId).first == 0);
+
+  this->imu_blocks.clear();
+  if (imu_lin_data) {
+    for (const auto& kv : imu_lin_data->imu_meas) {
+      this->imu_blocks.emplace_back(new ImuBlockGS<Scalar>(
+          kv.second, imu_lin_data, aom, gs, imuScaleFree, imuScaleFreeTol));
+    }
+  }
+}
+
+template <typename Scalar, int POSE_SIZE>
+std::pair<int, int>
+LinearizationGSAbsQR<Scalar, POSE_SIZE>::CountImuRowForms() const {
+  int full = 0;
+  int rot = 0;
+  for (const auto& imu_block : this->imu_blocks) {
+    if (static_cast<const ImuBlockGS<Scalar>*>(imu_block.get())
+            ->UsedFullRows()) {
+      full++;
+    } else {
+      rot++;
+    }
+  }
+  return {full, rot};
+}
+
+template <typename Scalar, int POSE_SIZE>
+Scalar LinearizationGSAbsQR<Scalar, POSE_SIZE>::MaxImuScaleColNorm() const {
+  Scalar max_norm = 0;
+  for (const auto& imu_block : this->imu_blocks) {
+    max_norm = std::max(
+        max_norm,
+        static_cast<const ImuBlockGS<Scalar>*>(imu_block.get())->ScaleColNorm());
+  }
+  return max_norm;
+}
+
+template <typename Scalar, int POSE_SIZE>
+void LinearizationGSAbsQR<Scalar, POSE_SIZE>::linearizeRelPoses() {
+  const Scalar scale_lin = mpGs->GetScaleLin();
+  const Scalar scale = mpGs->GetScale();
+
+  for (const auto& [tcid_h, target_map] : this->lmdb_.getObservations()) {
+    for (const auto& [tcid_t, _] : target_map) {
+      std::pair<TimeCamId, TimeCamId> key(tcid_h, tcid_t);
+      RelPoseLin<Scalar>& rpl = this->relative_pose_lin.at(key);
+
+      if (tcid_h != tcid_t) {
+        const PoseStateWithLin<Scalar>& state_h =
+            this->estimator->getPoseStateWithLin(tcid_h.frame_id);
+        const PoseStateWithLin<Scalar>& state_t =
+            this->estimator->getPoseStateWithLin(tcid_t.frame_id);
+
+        Sophus::SE3<Scalar> T_t_h_sophus = computeRelPoseGS(
+            state_h.getPoseLin(), this->calib.T_i_c[tcid_h.cam_id],
+            state_t.getPoseLin(), this->calib.T_i_c[tcid_t.cam_id], scale_lin,
+            &rpl.d_rel_d_h, &rpl.d_rel_d_t, &rpl.d_rel_d_logscale);
+
+        if (state_h.isLinearized() || state_t.isLinearized() ||
+            mpGs->mLinearized) {
+          T_t_h_sophus = computeRelPoseGS(
+              state_h.getPose(), this->calib.T_i_c[tcid_h.cam_id],
+              state_t.getPose(), this->calib.T_i_c[tcid_t.cam_id], scale);
+        }
+
+        if (mpVisualScaleFree) rpl.d_rel_d_logscale.setZero();
+
+        rpl.T_t_h = T_t_h_sophus.matrix();
+      } else {
+        rpl.T_t_h.setIdentity();
+        rpl.d_rel_d_h.setZero();
+        rpl.d_rel_d_t.setZero();
+        rpl.d_rel_d_logscale.setZero();
+      }
+    }
+  }
 }
 
 template <typename Scalar, int POSE_SIZE>
@@ -701,11 +799,13 @@ void LinearizationAbsQR<Scalar, POSE_SIZE>::add_dense_H_b_imu(MatX& H,
 #ifdef BASALT_INSTANTIATIONS_DOUBLE
 // Scalar=double, POSE_SIZE=6
 template class LinearizationAbsQR<double, 6>;
+template class LinearizationGSAbsQR<double, 6>;
 #endif
 
 #ifdef BASALT_INSTANTIATIONS_FLOAT
 // Scalar=float, POSE_SIZE=6
 template class LinearizationAbsQR<float, 6>;
+template class LinearizationGSAbsQR<float, 6>;
 #endif
 
 }  // namespace basalt

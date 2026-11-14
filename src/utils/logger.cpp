@@ -322,6 +322,10 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
              {{"t_ns", "ns"}, {"pyramid", "ms"}, {"track", "ms"},
               {"detect_add", "ms"}, {"total", "ms"}, {"queue", "count"}});
 
+    Register("of_track_death", "[Optical Flow][track-death]",
+             {{"t_ns", "ns"}, {"track_id", "count"}, {"birth_t_ns", "ns"},
+              {"age_frames", "count"}, {"reason", "enum"}});
+
     Register("vio_imu_ingest", "[VIO][imu-ingest]",
              {{"t_ns", "ns"}, {"n", "count"}, {"stamp_rate_hz", "f"},
               {"wall_rate_hz", "f"}, {"max_gap", "ms"},
@@ -333,7 +337,11 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"imu_queue", "count"}, {"skipped_behind", "count"},
               {"accel", "vec3"}, {"accel_norm", "f"}, {"gyro", "vec3"},
               {"gyro_norm", "f"}, {"bg", "vec3"}, {"ba", "vec3"},
-              {"g", "vec3"}, {"q_w_i", "vec4"}, {"tilt_deg", "f"}});
+              {"g", "vec3"}, {"q_w_i", "vec4"}, {"tilt_deg", "f"},
+              {"yaw_aligned", "flag"}, {"yaw_offset_rad", "f"},
+              {"gt_yaw_rad", "f"}, {"slam_yaw_rad", "f"},
+              {"accel_averaging", "flag"}, {"averaged", "count"},
+              {"accel_mean", "vec3"}, {"accel_mean_norm", "f"}});
 
     Register("vio_imu_frame", "[VIO][imu]",
              {{"t_ns", "ns"}, {"frame_dt", "ms"}, {"integrated", "count"},
@@ -341,13 +349,49 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"first_imu_ns", "ns"}, {"last_imu_ns", "ns"},
               {"coverage", "ratio"}, {"meas_dt", "ms"}, {"stretch", "flag"},
               {"stretch_span", "ms"}, {"imu_queue_in", "count"},
-              {"imu_queue_out", "count"}, {"head_minus_frame", "ms"}});
+              {"imu_queue_out", "count"}, {"head_minus_frame", "ms"},
+              {"accel_mean", "vec3"}, {"gyro_mean", "vec3"},
+              {"accel_deviation_max", "f"}, {"gyro_norm_max", "f"},
+              {"is_stationary", "flag"}});
+
+    Register("vio_stationary", "[VIO][stationary]",
+             {{"t_ns", "ns"}, {"enable_shoe", "flag"}, {"t_shoe", "f"},
+              {"window_samples", "count"}, {"run_length", "count"},
+              {"stage1", "flag"}, {"enable_mahalanobis", "flag"},
+              {"d2", "f"}, {"stage2", "flag"}, {"enable_flow", "flag"},
+              {"flow_mean", "f"}, {"stage3", "flag"},
+              {"is_stationary", "flag"}});
+
+    Register("vo_stationary", "[VO][stationary]",
+             {{"t_ns", "ns"}, {"flow_mean", "f"}, {"is_stationary", "flag"}});
 
     Register("vio_pose_update", "[VIO][pose-update]",
              {{"t_ns", "ns"}, {"pending", "count"}, {"applied", "count"},
               {"rejected", "count"}, {"max_trans_err", "f"},
               {"max_rot_err", "f"}, {"limit_trans", "f"},
               {"limit_rot", "f"}});
+
+    Register("vio_gravity_scale", "[VIO][gravity-scale]",
+             {{"t_ns", "ns"}, {"epoch", "count"}, {"sigma_step", "f"},
+              {"tilt_step_deg", "f"}, {"scale_cumulative", "f"},
+              {"tilt_cumulative_deg", "f"}, {"swap_event", "count"},
+              {"jump_cost", "f"}, {"visual_imu_full", "count"},
+              {"visual_imu_rot", "count"}, {"visual_imu_scale_col", "f"}});
+
+    Register("vio_delayed_marg", "[VIO][delayed-marg]",
+             {{"t_ns", "ns"}, {"steps", "count"}, {"records", "count"},
+              {"started", "count"}, {"installed", "count"},
+              {"coarse", "count"}, {"anchor_sigma", "f"},
+              {"anchor_tilt_deg", "f"}, {"job", "ms"},
+              {"catchup_steps", "count"}, {"catchup", "ms"},
+              {"max_pos_inc", "f"}, {"store", "ms"},
+              {"coarse_phase", "count"}, {"coarse_sigma", "f"},
+              {"coarse_tilt_deg", "f"}, {"coarse_scale_var", "f"},
+              {"coarse_scale_free", "count"}, {"coarse_ba", "f"},
+              {"coarse_cost0", "f"}, {"coarse_cost1", "f"},
+              {"coarse_spans", "count"}, {"coarse_bg", "f"},
+              {"coarse_max_vel_inc", "f"}, {"coarse_iterations", "count"},
+              {"coarse_timed_out", "count"}, {"wait", "ms"}});
 
     Register("vio_assoc", "[VIO][assoc]",
              {{"t_ns", "ns"}, {"of_obs", "count"}, {"connected0", "count"},
@@ -364,7 +408,13 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"behind", "count"}, {"too_close", "count"},
               {"min_triang_dist", "f"}, {"baseline_m_min", "f"},
               {"baseline_m_max", "f"}, {"depth_m_min", "f"},
-              {"depth_m_mean", "f"}, {"depth_m_max", "f"}});
+              {"depth_m_mean", "f"}, {"depth_m_max", "f"},
+              {"cos_parallax_min", "f"}, {"cos_parallax_mean", "f"},
+              {"cos_parallax_max", "f"}, {"low_parallax", "count"}});
+
+    Register("vio_reproj_pre_opt", "[VIO][reproj-pre-opt]",
+             {{"t_ns", "ns"}, {"n", "count"}, {"mean_px", "f"},
+              {"median_px", "f"}, {"p95_px", "f"}, {"max_px", "f"}});
 
     Register("vio_landmarks", "[VIO][landmarks]",
              {{"t_ns", "ns"}, {"lost", "count"}, {"lmdb", "count"},
@@ -408,7 +458,7 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"optimize", "ms"}});
 
     Register("vio_solver_timing", "[VIO][solver-timing]",
-             {{"num_cams", "count"}, {"num_lms", "count"},
+             {{"t_ns", "ns"}, {"num_cams", "count"}, {"num_lms", "count"},
               {"num_obs", "count"}, {"allocateLMB", "ms"},
               {"linearizeProblem", "ms"}, {"performQR", "ms"},
               {"get_dense_H_b", "ms"}, {"solve", "ms"},
@@ -426,7 +476,7 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"last_state_to_marg", "ns"}});
 
     Register("vio_marg_timing", "[VIO][marg-timing]",
-             {{"frame_id", "ns"}, {"measure", "ms"},
+             {{"t_ns", "ns"}, {"measure", "ms"},
               {"marg_linearize", "ms"}, {"marg_helper", "ms"},
               {"marg", "ms"}, {"marg_log", "ms"}, {"marginalize", "ms"}});
 
@@ -452,8 +502,12 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"db_hits", "count"}, {"above_thresh", "count"},
               {"best_score", "f"}, {"thresh", "f"}});
 
+    Register("map_bow_candidate", "[Local Mapper][bow-cand]",
+             {{"t_ns", "ns"}, {"query_kf", "ns"}, {"candidate_kf", "ns"},
+              {"score", "f"}, {"above_thresh", "flag"}});
+
     Register("map_pair_match", "[Local Mapper][match]",
-             {{"kf1", "ns"}, {"kf2", "ns"},
+             {{"t_ns", "ns"}, {"kf1", "ns"}, {"kf2", "ns"},
               {"descriptor_matches", "count"}, {"min_matches", "count"},
               {"ransac_inliers", "count"}, {"stored", "flag"}});
 
@@ -516,30 +570,32 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"lmdb_landmarks", "count"}, {"host_kfs", "count"}});
 
     Register("mapper_linearise", "[Mapper][linearize]",
-             {{"iter", "count"}, {"vision", "e"}, {"rel_error", "e"},
+             {{"t_ns", "ns"}, {"opt_pass", "enum"}, {"iter", "count"},
+              {"vision", "e"}, {"rel_error", "e"},
               {"roll_pitch_error", "e"}, {"total", "e"},
               {"landmarks", "count"}, {"observations", "count"},
               {"rel_pose_factors", "count"},
               {"roll_pitch_factors", "count"}});
 
     Register("mapper_solver_iter", "[Mapper][solver]",
-             {{"iter", "count"}, {"inner", "count"}, {"status", "enum"},
+             {{"t_ns", "ns"}, {"opt_pass", "enum"}, {"iter", "count"},
+              {"inner", "count"}, {"status", "enum"},
               {"lambda", "e"}, {"f_diff", "e"}, {"max_inc", "e"},
               {"vision_error", "e"}, {"rel_error", "e"},
               {"roll_pitch_error", "e"}, {"total", "e"},
               {"converged", "flag"}, {"error_increased", "flag"}});
 
     Register("mapper_iter_summary", "[Mapper][iter]",
-             {{"iter", "count"}, {"iteration", "ms"},
-              {"num_states", "count"}, {"num_poses", "count"},
-              {"inner_steps", "count"}});
+             {{"t_ns", "ns"}, {"opt_pass", "enum"}, {"iter", "count"},
+              {"iteration", "ms"}, {"num_states", "count"},
+              {"num_poses", "count"}, {"inner_steps", "count"}});
 
     Register("mapper_detect", "[Mapper][detect]",
-             {{"frames", "count"}, {"detection", "ms"},
+             {{"t_ns", "ns"}, {"frames", "count"}, {"detection", "ms"},
               {"corners_total", "count"}});
 
     Register("mapper_stereo", "[Mapper][stereo]",
-             {{"pairs", "count"}, {"matches", "count"},
+             {{"t_ns", "ns"}, {"pairs", "count"}, {"matches", "count"},
               {"inliers", "count"}});
 }
 
@@ -621,6 +677,21 @@ void Logger::AddOpticalFlowTiming(int64_t tNs, double pyramid, double track,
 
 void Logger::PrintOpticalFlowTiming() { Emit("of_timing"); }
 
+void Logger::AddOpticalFlowTrackDeath(int64_t tNs, int64_t trackId,
+                                      int64_t birthTNs, int ageFrames,
+                                      int reason) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("of_track_death");
+    s.add_int("t_ns", tNs);
+    s.add_int("track_id", trackId);
+    s.add_int("birth_t_ns", birthTNs);
+    s.add("age_frames", double(ageFrames));
+    s.add("reason", double(reason));
+    s.CommitRow();
+}
+
+void Logger::PrintOpticalFlowTrackDeath() { Emit("of_track_death"); }
+
 // ── Inertial ingestion ───────────────────────────────────────────────
 
 void Logger::AddVioImuIngest(int64_t tNs, int64_t n, double stampRateHz,
@@ -651,7 +722,10 @@ void Logger::AddVioInit(int64_t tNs, int64_t imuTNs, int64_t imuQueue,
                         const Eigen::Vector3d& gyro,
                         const Eigen::Vector3d& bg, const Eigen::Vector3d& ba,
                         const Eigen::Vector3d& g, const Eigen::Vector4d& qWI,
-                        double tiltDeg) {
+                        double tiltDeg, bool yawAligned, double yawOffsetRad,
+                        double gtYawRad, double slamYawRad,
+                        bool accelAveraging, int numAccelAveraged,
+                        const Eigen::Vector3d& accelMean) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_init");
     s.add_int("t_ns", tNs);
@@ -668,6 +742,14 @@ void Logger::AddVioInit(int64_t tNs, int64_t imuTNs, int64_t imuQueue,
     s.add("g", Eigen::VectorXd(g));
     s.add("q_w_i", Eigen::VectorXd(qWI));
     s.add("tilt_deg", tiltDeg);
+    s.add("yaw_aligned", yawAligned ? 1.0 : 0.0);
+    s.add("yaw_offset_rad", yawAligned ? yawOffsetRad : -999.0);
+    s.add("gt_yaw_rad", yawAligned ? gtYawRad : -999.0);
+    s.add("slam_yaw_rad", yawAligned ? slamYawRad : -999.0);
+    s.add("accel_averaging", accelAveraging ? 1.0 : 0.0);
+    s.add_int("averaged", numAccelAveraged);
+    s.add("accel_mean", Eigen::VectorXd(accelMean));
+    s.add("accel_mean_norm", accelMean.norm());
     s.CommitRow();
 }
 
@@ -678,7 +760,11 @@ void Logger::AddVioImuFrame(int64_t tNs, double frameDt, int integrated,
                             int64_t firstImuNs, int64_t lastImuNs,
                             double coverage, double measDt, bool stretch,
                             double stretchSpan, int imuQueueIn,
-                            int imuQueueOut, double headMinusFrame) {
+                            int imuQueueOut, double headMinusFrame,
+                            const Eigen::Vector3d& accelMean,
+                            const Eigen::Vector3d& gyroMean,
+                            double accelDeviationMax, double gyroNormMax,
+                            bool isStationary) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_imu_frame");
     s.add_int("t_ns", tNs);
@@ -695,10 +781,51 @@ void Logger::AddVioImuFrame(int64_t tNs, double frameDt, int integrated,
     s.add("imu_queue_in", double(imuQueueIn));
     s.add("imu_queue_out", double(imuQueueOut));
     s.add("head_minus_frame", headMinusFrame);
+    s.add("accel_mean", Eigen::VectorXd(accelMean));
+    s.add("gyro_mean", Eigen::VectorXd(gyroMean));
+    s.add("accel_deviation_max", accelDeviationMax);
+    s.add("gyro_norm_max", gyroNormMax);
+    s.add("is_stationary", isStationary ? 1.0 : 0.0);
     s.CommitRow();
 }
 
 void Logger::PrintVioImuFrame() { Emit("vio_imu_frame"); }
+
+void Logger::AddVioStationary(int64_t tNs, bool enableShoe, double tShoe,
+                              int windowSamples, int runLength, bool stage1,
+                              bool enableMahalanobis, double d2, bool stage2,
+                              bool enableFlow, double flowMean, bool stage3,
+                              bool isStationary) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_stationary");
+    s.add_int("t_ns", tNs);
+    s.add("enable_shoe", enableShoe ? 1.0 : 0.0);
+    s.add("t_shoe", tShoe);
+    s.add("window_samples", double(windowSamples));
+    s.add("run_length", double(runLength));
+    s.add("stage1", stage1 ? 1.0 : 0.0);
+    s.add("enable_mahalanobis", enableMahalanobis ? 1.0 : 0.0);
+    s.add("d2", d2);
+    s.add("stage2", stage2 ? 1.0 : 0.0);
+    s.add("enable_flow", enableFlow ? 1.0 : 0.0);
+    s.add("flow_mean", flowMean);
+    s.add("stage3", stage3 ? 1.0 : 0.0);
+    s.add("is_stationary", isStationary ? 1.0 : 0.0);
+    s.CommitRow();
+}
+
+void Logger::PrintVioStationary() { Emit("vio_stationary"); }
+
+void Logger::AddVoStationary(int64_t tNs, double flowMean, bool isStationary) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vo_stationary");
+    s.add_int("t_ns", tNs);
+    s.add("flow_mean", flowMean);
+    s.add("is_stationary", isStationary ? 1.0 : 0.0);
+    s.CommitRow();
+}
+
+void Logger::PrintVoStationary() { Emit("vo_stationary"); }
 
 void Logger::AddVioPoseUpdate(int64_t tNs, int pending, int applied,
                               int rejected, double maxTransErr,
@@ -718,6 +845,72 @@ void Logger::AddVioPoseUpdate(int64_t tNs, int pending, int applied,
 }
 
 void Logger::PrintVioPoseUpdate() { Emit("vio_pose_update"); }
+
+void Logger::AddVioGravityScale(int64_t tNs, int64_t epoch, double sigmaStep,
+                                double tiltStepDeg, double scaleCumulative,
+                                double tiltCumulativeDeg, int swapEvent,
+                                double jumpCost, int visualImuFull,
+                                int visualImuRot, double visualImuScaleCol) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_gravity_scale");
+    s.add_int("t_ns", tNs);
+    s.add_int("epoch", epoch);
+    s.add("sigma_step", sigmaStep);
+    s.add("tilt_step_deg", tiltStepDeg);
+    s.add("scale_cumulative", scaleCumulative);
+    s.add("tilt_cumulative_deg", tiltCumulativeDeg);
+    s.add("swap_event", double(swapEvent));
+    s.add("jump_cost", jumpCost);
+    s.add("visual_imu_full", double(visualImuFull));
+    s.add("visual_imu_rot", double(visualImuRot));
+    s.add("visual_imu_scale_col", visualImuScaleCol);
+    s.CommitRow();
+}
+
+void Logger::AddVioDelayedMarg(int64_t tNs, int steps, int records,
+                               int started, int installed, int coarse,
+                               double anchorSigma, double anchorTiltDeg,
+                               double jobSeconds, int catchupSteps,
+                               double catchupSeconds, double maxPosInc,
+                               double storeSeconds, int coarsePhase,
+                               double coarseSigma, double coarseTiltDeg,
+                               double coarseScaleVar, int coarseScaleFree,
+                               double coarseBa, double coarseCost0,
+                               double coarseCost1, int coarseSpans,
+                               double coarseBg, double coarseMaxVelInc,
+                               int coarseIterations, int coarseTimedOut,
+                               double waitSeconds) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_delayed_marg");
+    s.add_int("t_ns", tNs);
+    s.add("steps", double(steps));
+    s.add("records", double(records));
+    s.add("started", double(started));
+    s.add("installed", double(installed));
+    s.add("coarse", double(coarse));
+    s.add("anchor_sigma", anchorSigma);
+    s.add("anchor_tilt_deg", anchorTiltDeg);
+    s.add("job", jobSeconds);
+    s.add("catchup_steps", double(catchupSteps));
+    s.add("catchup", catchupSeconds);
+    s.add("max_pos_inc", maxPosInc);
+    s.add("store", storeSeconds);
+    s.add("coarse_phase", double(coarsePhase));
+    s.add("coarse_sigma", coarseSigma);
+    s.add("coarse_tilt_deg", coarseTiltDeg);
+    s.add("coarse_scale_var", coarseScaleVar);
+    s.add("coarse_scale_free", double(coarseScaleFree));
+    s.add("coarse_ba", coarseBa);
+    s.add("coarse_cost0", coarseCost0);
+    s.add("coarse_cost1", coarseCost1);
+    s.add("coarse_spans", double(coarseSpans));
+    s.add("coarse_bg", coarseBg);
+    s.add("coarse_max_vel_inc", coarseMaxVelInc);
+    s.add("coarse_iterations", double(coarseIterations));
+    s.add("coarse_timed_out", double(coarseTimedOut));
+    s.add("wait", waitSeconds);
+    s.CommitRow();
+}
 
 void Logger::AddVioAssoc(int64_t tNs, int ofObs, int connected0,
                          int unconnected0, double thresh, int framesAfterKf,
@@ -743,13 +936,31 @@ void Logger::AddVioAssoc(int64_t tNs, int ofObs, int connected0,
 
 void Logger::PrintVioAssoc() { Emit("vio_assoc"); }
 
+void Logger::AddVioReprojectionPreOpt(int64_t tNs, int n, double meanPx,
+                                      double medianPx, double p95Px,
+                                      double maxPx) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_reproj_pre_opt");
+    s.add_int("t_ns", tNs);
+    s.add("n", double(n));
+    s.add("mean_px", meanPx);
+    s.add("median_px", medianPx);
+    s.add("p95_px", p95Px);
+    s.add("max_px", maxPx);
+    s.CommitRow();
+}
+
+void Logger::PrintVioReprojectionPreOpt() { Emit("vio_reproj_pre_opt"); }
+
 void Logger::AddVioTriang(int64_t tNs, int candidates, int added,
                           int noPriorObs, int unprojectFail,
                           int shortBaseline, int notFinite, int behind,
                           int tooClose, double minTriangDist,
                           double baselineMin, double baselineMax,
-                          double depthMin, double depthSum,
-                          double depthMax) {
+                          double depthMin, double depthSum, double depthMax,
+                          double cosParallaxMin, double cosParallaxSum,
+                          double cosParallaxMax, int numParallaxSamples,
+                          int lowParallax) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_triang");
     s.add_int("t_ns", tNs);
@@ -767,6 +978,12 @@ void Logger::AddVioTriang(int64_t tNs, int candidates, int added,
     s.add("depth_m_min", depthMin);
     s.add("depth_m_mean", added ? depthSum / double(added) : 0.0);
     s.add("depth_m_max", depthMax);
+    s.add("cos_parallax_min", numParallaxSamples ? cosParallaxMin : 0.0);
+    s.add("cos_parallax_mean", numParallaxSamples
+                                   ? cosParallaxSum / double(numParallaxSamples)
+                                   : 0.0);
+    s.add("cos_parallax_max", numParallaxSamples ? cosParallaxMax : 0.0);
+    s.add("low_parallax", double(lowParallax));
     s.CommitRow();
 }
 
@@ -908,15 +1125,16 @@ void Logger::AddVioSolverSummary(int64_t tNs, int numIt, int numItRejected,
 
 void Logger::PrintVioSolverSummary() { Emit("vio_solver_summary"); }
 
-void Logger::AddVioSolverTiming(int numCams, int numLms, int numObs,
-                                double allocateLmb, double linearizeProblem,
-                                double performQr, double getDenseHB,
-                                double solve, double backSubstitute,
-                                double computeError2, double iteration,
-                                double residentMemory,
+void Logger::AddVioSolverTiming(int64_t tNs, int numCams, int numLms,
+                                int numObs, double allocateLmb,
+                                double linearizeProblem, double performQr,
+                                double getDenseHB, double solve,
+                                double backSubstitute, double computeError2,
+                                double iteration, double residentMemory,
                                 double residentMemoryPeak) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_solver_timing");
+    s.add_int("t_ns", tNs);
     s.add("num_cams", double(numCams));
     s.add("num_lms", double(numLms));
     s.add("num_obs", double(numObs));
@@ -976,13 +1194,13 @@ void Logger::AddVioMargNullspace(int64_t tNs, const Eigen::VectorXd& margNs,
 
 void Logger::PrintVioMargNullspace() { Emit("vio_marg_nullspace"); }
 
-void Logger::AddVioMargTiming(int64_t frameId, double measure,
+void Logger::AddVioMargTiming(int64_t tNs, double measure,
                               double margLinearize, double margHelper,
                               double marg, double margLog,
                               double marginalize) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_marg_timing");
-    s.add_int("frame_id", frameId);
+    s.add_int("t_ns", tNs);
     s.add("measure", measure);
     s.add("marg_linearize", margLinearize);
     s.add("marg_helper", margHelper);
@@ -1050,11 +1268,27 @@ void Logger::AddMapBowQuery(int64_t tNs, int64_t kf, int keypoints,
 
 void Logger::PrintMapBowQuery() { Emit("map_bow_query"); }
 
-void Logger::AddMapPairMatch(int64_t kf1, int64_t kf2, int descriptorMatches,
-                             int minMatches, int ransacInliers,
-                             bool stored) {
+void Logger::AddMapBowCandidate(int64_t tNs, int64_t queryKf,
+                                int64_t candidateKf, double score,
+                                bool aboveThresh) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("map_bow_candidate");
+    s.add_int("t_ns", tNs);
+    s.add_int("query_kf", queryKf);
+    s.add_int("candidate_kf", candidateKf);
+    s.add("score", score);
+    s.add("above_thresh", aboveThresh ? 1.0 : 0.0);
+    s.CommitRow();
+}
+
+void Logger::PrintMapBowCandidate() { Emit("map_bow_candidate"); }
+
+void Logger::AddMapPairMatch(int64_t tNs, int64_t kf1, int64_t kf2,
+                             int descriptorMatches, int minMatches,
+                             int ransacInliers, bool stored) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("map_pair_match");
+    s.add_int("t_ns", tNs);
     s.add_int("kf1", kf1);
     s.add_int("kf2", kf2);
     s.add("descriptor_matches", double(descriptorMatches));
@@ -1245,12 +1479,15 @@ void Logger::PrintMapPublish() { Emit("map_publish"); }
 
 // ── Shared mapping base ───────────────────────────────────────────────
 
-void Logger::AddMapperLinearise(int iter, double vision, double relError,
+void Logger::AddMapperLinearise(int64_t tNs, int optPass, int iter,
+                                double vision, double relError,
                                 double rollPitchError, double total,
                                 int landmarks, int observations,
                                 int relPoseFactors, int rollPitchFactors) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_linearise");
+    s.add_int("t_ns", tNs);
+    s.add("opt_pass", double(optPass));
     s.add("iter", double(iter));
     s.add("vision", vision);
     s.add("rel_error", relError);
@@ -1265,13 +1502,16 @@ void Logger::AddMapperLinearise(int iter, double vision, double relError,
 
 void Logger::PrintMapperLinearise() { Emit("mapper_linearise"); }
 
-void Logger::AddMapperSolverIter(int iter, int inner, int status,
-                                 double lambda, double fDiff, double maxInc,
+void Logger::AddMapperSolverIter(int64_t tNs, int optPass, int iter,
+                                 int inner, int status, double lambda,
+                                 double fDiff, double maxInc,
                                  double visionError, double relError,
                                  double rollPitchError, double total,
                                  bool converged, bool errorIncreased) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_solver_iter");
+    s.add_int("t_ns", tNs);
+    s.add("opt_pass", double(optPass));
     s.add("iter", double(iter));
     s.add("inner", double(inner));
     s.add("status", double(status));
@@ -1289,10 +1529,13 @@ void Logger::AddMapperSolverIter(int iter, int inner, int status,
 
 void Logger::PrintMapperSolverIter() { Emit("mapper_solver_iter"); }
 
-void Logger::AddMapperIterSummary(int iter, double iteration, int numStates,
+void Logger::AddMapperIterSummary(int64_t tNs, int optPass, int iter,
+                                  double iteration, int numStates,
                                   int numPoses, int innerSteps) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_iter_summary");
+    s.add_int("t_ns", tNs);
+    s.add("opt_pass", double(optPass));
     s.add("iter", double(iter));
     s.add("iteration", iteration);
     s.add("num_states", double(numStates));
@@ -1303,9 +1546,11 @@ void Logger::AddMapperIterSummary(int iter, double iteration, int numStates,
 
 void Logger::PrintMapperIterSummary() { Emit("mapper_iter_summary"); }
 
-void Logger::AddMapperDetect(int frames, double detection, int cornersTotal) {
+void Logger::AddMapperDetect(int64_t tNs, int frames, double detection,
+                             int cornersTotal) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_detect");
+    s.add_int("t_ns", tNs);
     s.add("frames", double(frames));
     s.add("detection", detection);
     s.add("corners_total", double(cornersTotal));
@@ -1314,9 +1559,11 @@ void Logger::AddMapperDetect(int frames, double detection, int cornersTotal) {
 
 void Logger::PrintMapperDetect() { Emit("mapper_detect"); }
 
-void Logger::AddMapperStereo(int pairs, int matches, int inliers) {
+void Logger::AddMapperStereo(int64_t tNs, int pairs, int matches,
+                             int inliers) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_stereo");
+    s.add_int("t_ns", tNs);
     s.add("pairs", double(pairs));
     s.add("matches", double(matches));
     s.add("inliers", double(inliers));
@@ -1330,7 +1577,12 @@ void Logger::PrintMapperStereo() { Emit("mapper_stereo"); }
 ExecutionStats& Logger::SolverScratch() { return mpSolverScratch; }
 
 void Logger::FinishVioOptimize() {
-    if (!mpEnabled) return;
+    // Callers fill the scratch unconditionally, so a disabled logger must
+    // still discard it or it grows for the life of the estimator.
+    if (!mpEnabled) {
+        mpSolverScratch = ExecutionStats();
+        return;
+    }
     mpStatsAll.merge_all(mpSolverScratch);
     mpStatsSums.merge_sums(mpSolverScratch);
     mpSolverScratch = ExecutionStats();

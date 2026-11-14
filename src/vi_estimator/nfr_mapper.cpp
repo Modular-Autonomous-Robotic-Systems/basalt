@@ -251,8 +251,10 @@ bool NfrMapper::extractNonlinearFactors(MargData& m) {
     return true;
 }
 
-void NfrMapper::optimize(int num_iterations) {
+void NfrMapper::optimize(int num_iterations, int opt_pass) {
     AbsOrderMap aom;
+    const int64_t invokingTNs =
+        frame_poses.empty() ? 0 : frame_poses.rbegin()->first;
 
     for (const auto& kv : frame_poses) {
         aom.abs_order_map[kv.first] = std::make_pair(aom.total_size, POSE_SIZE);
@@ -299,10 +301,11 @@ void NfrMapper::optimize(int num_iterations) {
         double error_total = rld_error + lopt.rel_error + lopt.roll_pitch_error;
 
         mpLogger->AddMapperLinearise(
-            iter, rld_error, lopt.rel_error, lopt.roll_pitch_error,
-            error_total, int(lmdb.numLandmarks()), int(lmdb.numObservations()),
-            int(rel_pose_factors.size()), int(roll_pitch_factors.size()));
-        mpLogger->PrintMapperLinearise();
+            invokingTNs, opt_pass, iter, rld_error, lopt.rel_error,
+            lopt.roll_pitch_error, error_total, int(lmdb.numLandmarks()),
+            int(lmdb.numObservations()), int(rel_pose_factors.size()),
+            int(roll_pitch_factors.size()));
+        // mpLogger->PrintMapperLinearise();
 
         lopt.accum.iterative_solver = true;
         lopt.accum.print_info = false;
@@ -323,6 +326,13 @@ void NfrMapper::optimize(int num_iterations) {
                     Hdiag_lambda[i] = std::max(Hdiag_lambda[i], min_lambda);
 
                 const Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
+                if (!inc.allFinite()) {
+                    lambda = std::min(max_lambda, lambda_vee * lambda);
+                    lambda_vee *= 2;
+                    max_iter--;
+                    inner++;
+                    continue;
+                }
                 double max_inc = inc.array().abs().maxCoeff();
                 if (max_inc < 1e-5) converged = true;
 
@@ -365,11 +375,11 @@ void NfrMapper::optimize(int num_iterations) {
 
                 if (f_diff < 0) {
                     mpLogger->AddMapperSolverIter(
-                        iter, inner, 1, lambda, f_diff, max_inc,
-                        after_update_vision_error, after_rel_error,
-                        after_roll_pitch_error, after_error_total, converged,
-                        errorIncreased);
-                    mpLogger->PrintMapperSolverIter();
+                        invokingTNs, opt_pass, iter, inner, 1, lambda,
+                        f_diff, max_inc, after_update_vision_error,
+                        after_rel_error, after_roll_pitch_error,
+                        after_error_total, converged, errorIncreased);
+                    // mpLogger->PrintMapperSolverIter();
 
                     lambda = std::min(max_lambda, lambda_vee * lambda);
                     lambda_vee *= 2;
@@ -377,11 +387,11 @@ void NfrMapper::optimize(int num_iterations) {
                     restore();
                 } else {
                     mpLogger->AddMapperSolverIter(
-                        iter, inner, 0, lambda, f_diff, max_inc,
-                        after_update_vision_error, after_rel_error,
-                        after_roll_pitch_error, after_error_total, converged,
-                        errorIncreased);
-                    mpLogger->PrintMapperSolverIter();
+                        invokingTNs, opt_pass, iter, inner, 0, lambda,
+                        f_diff, max_inc, after_update_vision_error,
+                        after_rel_error, after_roll_pitch_error,
+                        after_error_total, converged, errorIncreased);
+                    // mpLogger->PrintMapperSolverIter();
 
                     lambda = std::max(min_lambda, lambda / 3);
                     lambda_vee = 2;
@@ -398,6 +408,7 @@ void NfrMapper::optimize(int num_iterations) {
                 Hdiag_lambda[i] = std::max(Hdiag_lambda[i], min_lambda);
 
             const Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
+            if (!inc.allFinite()) break;
             double max_inc = inc.array().abs().maxCoeff();
             if (max_inc < 1e-5) converged = true;
 
@@ -423,10 +434,10 @@ void NfrMapper::optimize(int num_iterations) {
         auto elapsed =
             std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
 
-        mpLogger->AddMapperIterSummary(iter, double(elapsed.count()) * 1e-6,
-                                       int(frame_states.size()),
-                                       int(frame_poses.size()), inner);
-        mpLogger->PrintMapperIterSummary();
+        mpLogger->AddMapperIterSummary(
+            invokingTNs, opt_pass, iter, double(elapsed.count()) * 1e-6,
+            int(frame_states.size()), int(frame_poses.size()), inner);
+        // mpLogger->PrintMapperIterSummary();
 
         if (converged) break;
 
@@ -522,7 +533,9 @@ void NfrMapper::detect_keypoints() {
         std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
 
     int cornersTotal = 0;
+    int64_t detectTNs = 0;
     for (const int64_t key : keys) {
+        if (key > detectTNs) detectTNs = key;
         for (size_t cam = 0; cam < calib.intrinsics.size(); cam++) {
             const auto it = feature_corners.find(TimeCamId(key, cam));
             if (it != feature_corners.end())
@@ -530,9 +543,9 @@ void NfrMapper::detect_keypoints() {
         }
     }
 
-    mpLogger->AddMapperDetect(int(keys.size()), elapsed1.count() * 1e-6,
-                             cornersTotal);
-    mpLogger->PrintMapperDetect();
+    mpLogger->AddMapperDetect(detectTNs, int(keys.size()),
+                             elapsed1.count() * 1e-6, cornersTotal);
+    // mpLogger->PrintMapperDetect();
 }
 
 void NfrMapper::match_stereo() {
@@ -542,6 +555,10 @@ void NfrMapper::match_stereo() {
     // Essential matrix
     Eigen::Matrix4d E;
     computeEssential(T_0_1, E);
+
+    int64_t stereoTNs = 0;
+    for (const auto& kv : img_data)
+        if (kv.first > stereoTNs) stereoTNs = kv.first;
 
     int num_matches = 0;
     int num_inliers = 0;
@@ -574,8 +591,9 @@ void NfrMapper::match_stereo() {
         }
     }
 
-    mpLogger->AddMapperStereo(int(img_data.size()), num_matches, num_inliers);
-    mpLogger->PrintMapperStereo();
+    mpLogger->AddMapperStereo(stereoTNs, int(img_data.size()), num_matches,
+                             num_inliers);
+    // mpLogger->PrintMapperStereo();
 }
 
 void NfrMapper::match_all() {

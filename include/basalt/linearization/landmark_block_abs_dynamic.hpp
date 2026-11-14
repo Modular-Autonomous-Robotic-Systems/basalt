@@ -55,6 +55,11 @@ class LandmarkBlockAbsDynamic : public LandmarkBlock<Scalar> {
     // if both aom are identical, we don't have to do block-wise operations.
     aom_ = &aom;
 
+    const auto it_gs = aom.abs_order_map.find(kGravityScaleStateId);
+    mpGsScaleCol = it_gs == aom.abs_order_map.end()
+                       ? -1
+                       : it_gs->second.first + GRAVITY_SCALE_SIZE - 1;
+
     pose_lin_vec.clear();
     pose_lin_vec.reserve(lm.obs.size());
     pose_tcid_vec.clear();
@@ -183,6 +188,10 @@ class LandmarkBlockAbsDynamic : public LandmarkBlock<Scalar> {
                     d_res_d_xi * pose_lin_vec[i]->d_rel_d_h;
                 storage.template block<2, 6>(obs_idx, abs_t_idx) +=
                     d_res_d_xi * pose_lin_vec[i]->d_rel_d_t;
+                if (mpGsScaleCol >= 0) {
+                  storage.template block<2, 1>(obs_idx, mpGsScaleCol) +=
+                      d_res_d_xi * pose_lin_vec[i]->d_rel_d_logscale;
+                }
               }
             }
 
@@ -578,6 +587,7 @@ class LandmarkBlockAbsDynamic : public LandmarkBlock<Scalar> {
   Keypoint<Scalar>* lm_ptr = nullptr;
   const Calibration<Scalar>* calib_ = nullptr;
   const AbsOrderMap* aom_ = nullptr;
+  int mpGsScaleCol = -1;
 
   std::map<int64_t, std::set<int>> res_idx_by_abs_pose_;
 };

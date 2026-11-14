@@ -65,3 +65,8 @@ Per the `applyInc` ordering, indices 9-11 are the **gyroscope** bias and 12-14 t
 ## Stale line numbers in the older doc sections
 
 The `sqrt_keypoint_vio.cpp` anchors in `doc/VIO.md` §4 through §9 predate the log-verbosity and deadlock-fix commits and run roughly 70 to 80 lines low. Current anchors are `ProcessFrame:201`, `measure:372`, `marginalize:674`, `optimize:1149`, `optimize_and_marg:1592`. The anchors written into §3 on 2026-08-31 are current; the earlier sections have not been swept.
+
+## Optional roll and pitch rows of the initial prior (added 2026-11-11)
+
+`vio_gravity_prior_std_deg` above 0 sets the diagonal entries 3 and 4 of the initial prior, $1/\sigma_g$ in square root form and $1/\sigma_g^2$ in information form, beside the yaw entry on index 5 (`sqrt_keypoint_vio.cpp`, constructor). `PoseState::incPose` perturbs the attitude on the left in the world frame (`thirdparty/basalt-headers/include/basalt/imu/imu_types.h:98-101`), so indices 3, 4 and 5 are world roll, pitch and yaw. Unlike the position and yaw rows these are physical information, not a gauge choice, since roll and pitch are observable. In the gravity and scale period the padding that inserts the block's three columns also writes $-1/\sigma_g$ at (3, 0) and (4, 1), so the rows read $\sqrt{w_g}(\delta\boldsymbol{\varphi}_{0,xy} - \boldsymbol{\delta}_\theta)$ with $\bar{\mathbf{B}} = [\mathbf{e}_x, \mathbf{e}_y]$ at construction, gauge invariant along both tilt directions of the block (`../plans/gravity_and_bias_step_priors.md` §2.2). `SetInitialPriorOrder` copies them into $M_\text{half}$ and $M_\text{visual}$.
+

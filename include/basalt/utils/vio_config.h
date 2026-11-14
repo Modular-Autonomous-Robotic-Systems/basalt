@@ -72,6 +72,10 @@ struct VioConfig {
     double vio_obs_std_dev;
     double vio_obs_huber_thresh;
     double vio_min_triangulation_dist;
+    // Minimum parallax angle in degrees required between the two bearings of
+    // a triangulation candidate. Zero leaves the test inactive, reproducing
+    // the behaviour of every configuration written before this field existed.
+    double vio_min_triangulation_parallax_deg;
 
     bool vio_enforce_realtime;
 
@@ -85,6 +89,79 @@ struct VioConfig {
     double vio_init_pose_weight;
     double vio_init_ba_weight;
     double vio_init_bg_weight;
+    // Seed the initial attitude from the mean of the inertial samples skipped
+    // before the first frame rather than from the last of them. False
+    // reproduces the single sample seed of every earlier configuration.
+    // Suggested true, which divides the 0.89 degree tilt noise of one sample
+    // by sqrt(N). See plans/vio_drift_analysis.md Phase 3a.
+    bool vio_init_accel_averaging;
+    // Weight 1 / sigma_v of the zero velocity constraint applied to the newest
+    // state while the stationarity test passes. Zero leaves it inactive.
+    // Suggested 100, that is sigma_v = 0.01 m/s for a vehicle on the ground,
+    // three orders below the 1e4 position anchor so it cannot dominate the
+    // conditioning of the dense system. See plans/vio_drift_analysis.md
+    // Phase 3b.
+    double vio_zero_velocity_weight;
+
+    // Independently gated stationary body detector stages, combined by
+    // logical AND into mpIsStationary.
+    bool vio_stationary_enable_shoe;
+    bool vio_stationary_enable_mahalanobis;
+    bool vio_stationary_enable_flow;
+    // Ring buffer span in seconds for the windowed SHOE statistic, and its
+    // chi-squared critical value.
+    double vio_stationary_window_s;
+    double vio_stationary_glrt_tol;
+    // Consecutive clearing windows required before the SHOE stage latches.
+    int vio_stationary_min_consecutive_frames;
+    // Chi-squared(3) critical value for the Mahalanobis stage.
+    double vio_stationary_chisq_tol;
+    // Optical flow magnitude veto threshold in pixels.
+    double vio_stationary_flow_tol;
+    // One-way start latch, plans/stationary_detection.md change 8. Once
+    // vio_stationary_latch_frames consecutive frames are non-stationary, no
+    // later frame is stationary for the rest of the run. Suggested true with
+    // 3 frames on platforms that only rest before take-off.
+    bool vio_stationary_enable_start_latch;
+    int vio_stationary_latch_frames;
+    // Optimise gravity direction and metric scale until vio_gs_duration_s
+    // seconds after the first frame of confirmed motion, then fold them into
+    // the state. Requires
+    // vio_linearization_type ABS_QR and vio_sqrt_marg.
+    bool vio_gs_enable;
+    double vio_gs_duration_s;
+    // Linearise the delayed prior with the scale free rows of the inertial
+    // factors, plans/gravity_scale_optimisation_2.md Change A.
+    bool vio_gs_visual_prior_inertial;
+    // Largest whitened scale column with which an inertial factor enters
+    // the delayed prior with all of its rows.
+    double vio_gs_visual_prior_scale_tol;
+    // Random walk intensities of the per frame gravity and scale step, per
+    // square root second, zero disables, plans/gravity_scale_optimisation_2.md
+    // Change B.
+    double vio_gs_jump_sigma_rw;
+    double vio_gs_jump_tilt_rw_deg;
+    // Delayed marginalisation, plans/delayed_marginalisation.md. The store
+    // keeps the last vio_gs_dm_delay marginalisations. Until it first holds
+    // that many, the block is held in the window and a coarse inertial
+    // optimisation runs at every new keyframe. Then
+    // the block is free and the prior is readvanced at the current block when
+    // the block moves past either threshold.
+    int vio_gs_dm_delay;
+    double vio_gs_dm_thresh_scale;
+    double vio_gs_dm_thresh_tilt_deg;
+    // Largest marginal variance of the log scale with which a coarse
+    // optimisation updates the scale.
+    double vio_gs_dm_coarse_scale_var;
+    bool vio_gs_dm_smooth;
+    bool vio_gs_dm_async;
+    // Drop the local mapper's pose updates during the period,
+    // plans/delayed_marginalisation.md §2.3.8.
+    bool vio_gs_dm_hold_pose_updates;
+    // Prior on the tilt of gravity relative to its initial estimate, on the
+    // first state in the initial prior and on the block in every coarse
+    // optimisation, degrees, 0 disables.
+    double vio_gravity_prior_std_deg;
 
     bool vio_marg_lost_landmarks;
     double vio_kf_marg_feature_ratio;

@@ -68,6 +68,7 @@ VioConfig::VioConfig() {
   vio_obs_std_dev = 0.5;
   vio_obs_huber_thresh = 1.0;
   vio_min_triangulation_dist = 0.05;
+  vio_min_triangulation_parallax_deg = 0.0;
   //  vio_outlier_threshold = 3.0;
   //  vio_filter_iteration = 4;
   vio_max_iterations = 7;
@@ -84,6 +85,33 @@ VioConfig::VioConfig() {
   vio_init_pose_weight = 1e8;
   vio_init_ba_weight = 1e1;
   vio_init_bg_weight = 1e2;
+  vio_init_accel_averaging = false;
+  vio_zero_velocity_weight = 0.0;
+
+  vio_stationary_enable_shoe = true;
+  vio_stationary_enable_mahalanobis = true;
+  vio_stationary_enable_flow = false;
+  vio_stationary_window_s = 0.5;
+  vio_stationary_glrt_tol = 6.6;
+  vio_stationary_min_consecutive_frames = 2;
+  vio_stationary_chisq_tol = 7.81;
+  vio_stationary_flow_tol = 0.8;
+  vio_stationary_enable_start_latch = false;
+  vio_stationary_latch_frames = 3;
+  vio_gs_enable = false;
+  vio_gs_duration_s = 10.0;
+  vio_gs_visual_prior_inertial = false;
+  vio_gs_visual_prior_scale_tol = 1.0;
+  vio_gs_jump_sigma_rw = 0.0;
+  vio_gs_jump_tilt_rw_deg = 0.0;
+  vio_gs_dm_delay = 200;
+  vio_gs_dm_thresh_scale = 1.02;
+  vio_gs_dm_thresh_tilt_deg = 5.0;
+  vio_gs_dm_coarse_scale_var = 1.0;
+  vio_gs_dm_smooth = true;
+  vio_gs_dm_async = true;
+  vio_gs_dm_hold_pose_updates = false;
+  vio_gravity_prior_std_deg = 0.0;
 
   vio_marg_lost_landmarks = true;
 
@@ -192,6 +220,7 @@ void serialize(Archive& ar, basalt::VioConfig& config) {
   ar(CEREAL_NVP(config.vio_obs_std_dev));
   ar(CEREAL_NVP(config.vio_obs_huber_thresh));
   ar(CEREAL_NVP(config.vio_min_triangulation_dist));
+  ar(CEREAL_NVP(config.vio_min_triangulation_parallax_deg));
 
   ar(CEREAL_NVP(config.vio_enforce_realtime));
 
@@ -205,6 +234,33 @@ void serialize(Archive& ar, basalt::VioConfig& config) {
   ar(CEREAL_NVP(config.vio_init_pose_weight));
   ar(CEREAL_NVP(config.vio_init_ba_weight));
   ar(CEREAL_NVP(config.vio_init_bg_weight));
+  ar(CEREAL_NVP(config.vio_init_accel_averaging));
+  ar(CEREAL_NVP(config.vio_zero_velocity_weight));
+
+  ar(CEREAL_NVP(config.vio_stationary_enable_shoe));
+  ar(CEREAL_NVP(config.vio_stationary_enable_mahalanobis));
+  ar(CEREAL_NVP(config.vio_stationary_enable_flow));
+  ar(CEREAL_NVP(config.vio_stationary_window_s));
+  ar(CEREAL_NVP(config.vio_stationary_glrt_tol));
+  ar(CEREAL_NVP(config.vio_stationary_min_consecutive_frames));
+  ar(CEREAL_NVP(config.vio_stationary_chisq_tol));
+  ar(CEREAL_NVP(config.vio_stationary_flow_tol));
+  ar(CEREAL_NVP(config.vio_stationary_enable_start_latch));
+  ar(CEREAL_NVP(config.vio_stationary_latch_frames));
+  ar(CEREAL_NVP(config.vio_gs_enable));
+  ar(CEREAL_NVP(config.vio_gs_duration_s));
+  ar(CEREAL_NVP(config.vio_gs_dm_delay));
+  ar(CEREAL_NVP(config.vio_gs_dm_thresh_scale));
+  ar(CEREAL_NVP(config.vio_gs_dm_thresh_tilt_deg));
+  ar(CEREAL_NVP(config.vio_gs_dm_coarse_scale_var));
+  ar(CEREAL_NVP(config.vio_gs_dm_smooth));
+  ar(CEREAL_NVP(config.vio_gs_dm_async));
+  ar(CEREAL_NVP(config.vio_gs_dm_hold_pose_updates));
+  ar(CEREAL_NVP(config.vio_gs_visual_prior_inertial));
+  ar(CEREAL_NVP(config.vio_gs_visual_prior_scale_tol));
+  ar(CEREAL_NVP(config.vio_gs_jump_sigma_rw));
+  ar(CEREAL_NVP(config.vio_gs_jump_tilt_rw_deg));
+  ar(CEREAL_NVP(config.vio_gravity_prior_std_deg));
 
   ar(CEREAL_NVP(config.vio_marg_lost_landmarks));
   ar(CEREAL_NVP(config.vio_kf_marg_feature_ratio));

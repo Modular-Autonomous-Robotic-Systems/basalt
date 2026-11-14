@@ -76,6 +76,69 @@ void LocalMapper::SetVIOPoseUpdateCallback(PoseUpdateCallback cb) {
     mpVioPoseUpdateCallback = std::move(cb);
 }
 
+void LocalMapper::SetGravityScaleCorrectionLog(
+    GravityScaleCorrectionLog::Ptr log) {
+    mpGsLog = std::move(log);
+}
+
+void LocalMapper::CatchUpGravityScale() {
+    if (!mpGsLog) return;
+
+    const int64_t latest = mpGsLog->LatestEpoch();
+    if (latest == mpMapGsEpoch) return;
+
+    ApplyGravityScaleCorrection(mpGsLog->Between(mpMapGsEpoch, latest));
+    mpMapGsEpoch = latest;
+}
+
+void LocalMapper::ApplyGravityScaleCorrection(
+    const GravityScaleCorrectionLog::Entry& correction) {
+    for (auto& [t_ns, state] : frame_poses) {
+        state = PoseStateWithLin<double>(t_ns, correction.Apply(state.getPose()));
+    }
+
+    for (const auto& kv : lmdb.getLandmarks()) {
+        lmdb.getLandmark(kv.first).inv_dist /= correction.mScale;
+    }
+
+    Sophus::Matrix6d D_inv = Sophus::Matrix6d::Identity();
+    D_inv.topLeftCorner<3, 3>() /= correction.mScale;
+    for (RelPoseFactor& rpf : rel_pose_factors) {
+        rpf.T_i_j.translation() *= correction.mScale;
+        rpf.cov_inv = D_inv * rpf.cov_inv * D_inv;
+    }
+
+    for (RollPitchFactor& rpf : roll_pitch_factors) {
+        rpf.R_w_i_meas = correction.mQ * rpf.R_w_i_meas;
+    }
+}
+
+void LocalMapper::TransformMargDataBySim3(
+    MargData& data, const GravityScaleCorrectionLog::Entry& correction) {
+    const double s = correction.mScale;
+    const Eigen::Matrix3d Q_inv_m = correction.mQ.inverse().matrix();
+
+    for (auto& kv : data.frame_poses) kv.second.TransformBySim3(correction.mQ, s);
+    for (auto& kv : data.frame_states) kv.second.TransformBySim3(correction.mQ, s);
+
+    for (const auto& [id, idx] : data.aom.abs_order_map) {
+        const int col = idx.first;
+        std::vector<std::pair<int, Eigen::Matrix3d>> blocks = {
+            {col, Q_inv_m / s}, {col + 3, Q_inv_m}};
+        if (idx.second == POSE_VEL_BIAS_SIZE) {
+            blocks.emplace_back(col + 6, Q_inv_m / s);
+        }
+
+        for (const auto& [start, M] : blocks) {
+            data.abs_H.middleCols(start, 3) = data.abs_H.middleCols(start, 3) * M;
+            data.abs_H.middleRows(start, 3) =
+                M.transpose() * data.abs_H.middleRows(start, 3);
+            data.abs_b.segment<3>(start) =
+                M.transpose() * data.abs_b.segment<3>(start);
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // MapLocally — thread entry point
 // ═══════════════════════════════════════════════════════════════════
@@ -103,13 +166,14 @@ void LocalMapper::MapLocally() {
         }
         vKeyframes.push_back(kf);
 
-        while (mpKFInputQueue->try_pop(kf)) {
-            if (!kf) {
-                nullReceived = true;
-                break;
-            }
-            vKeyframes.push_back(kf);
-        }
+        // only processing one keyframe at at time
+        // while (mpKFInputQueue->try_pop(kf)) {
+        //     if (!kf) {
+        //         nullReceived = true;
+        //         break;
+        //     }
+        //     vKeyframes.push_back(kf);
+        // }
         auto tStep = std::chrono::high_resolution_clock::now();
         const double queueWaitSeconds =
             std::chrono::duration<double>(tStep - t1).count();
@@ -117,6 +181,8 @@ void LocalMapper::MapLocally() {
         const int numKeyframes = int(vKeyframes.size());
         mpNewKeyframesForTracking.clear();
         mpLatestKeyframesMatches.clear();
+
+        CatchUpGravityScale();
 
         for (Keyframe::Ptr& k : vKeyframes) {
             IngestKeyframe(k);
@@ -200,7 +266,7 @@ void LocalMapper::MapLocally() {
             std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
-        optimize(mpOptIterations);
+        optimize(mpOptIterations, 0);
         tEnd = std::chrono::high_resolution_clock::now();
         const double optimize1Seconds =
             std::chrono::duration<double>(tEnd - tStep).count();
@@ -217,13 +283,13 @@ void LocalMapper::MapLocally() {
         mpLogger->AddMapFilter(cycleTNs, int(nLmBeforeFilter),
                                int(lmdb.numLandmarks()), mpFilterMinObs,
                                mpFilterOutlierThreshold);
-        mpLogger->PrintMapFilter();
+        // mpLogger->PrintMapFilter();
         tEnd = std::chrono::high_resolution_clock::now();
         const double filterOutliersSeconds =
             std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
-        optimize(mpOptIterations);
+        optimize(mpOptIterations, 1);
         tEnd = std::chrono::high_resolution_clock::now();
         const double optimize2Seconds =
             std::chrono::duration<double>(tEnd - tStep).count();
@@ -245,7 +311,7 @@ void LocalMapper::MapLocally() {
                 vis_data->t_ns, int(vis_data->points.size()),
                 int(vis_data->keyframes.size()), int(lmdb.numLandmarks()),
                 int(lmdb.getHostKfs().size()));
-            mpLogger->PrintMapPublish();
+            // mpLogger->PrintMapPublish();
             out_vis_queue->try_push(std::move(vis_data));  // never block mapper
         }
         tEnd = std::chrono::high_resolution_clock::now();
@@ -253,7 +319,9 @@ void LocalMapper::MapLocally() {
             std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
-        if (mpVioPoseUpdateCallback) mpVioPoseUpdateCallback(frame_poses);
+        if (mpVioPoseUpdateCallback) {
+            mpVioPoseUpdateCallback(frame_poses, mpMapGsEpoch);
+        }
         tEnd = std::chrono::high_resolution_clock::now();
         const double poseUpdateCbSeconds =
             std::chrono::duration<double>(tEnd - tStep).count();
@@ -268,7 +336,7 @@ void LocalMapper::MapLocally() {
             setupOptSeconds, cullSeconds, optimize1Seconds,
             filterOutliersSeconds, optimize2Seconds, publishVisSeconds,
             poseUpdateCbSeconds, totalSeconds);
-        mpLogger->PrintMapCycleTiming();
+        // mpLogger->PrintMapCycleTiming();
 
         // If the sentinel arrived mid-drain (alongside real data), we still
         // processed all data above — now shut down cleanly.
@@ -288,7 +356,11 @@ void LocalMapper::IngestKeyframe(Keyframe::Ptr& kf) {
 
     // Rebuilt rather than copied so linearized stays false, which
     // NfrMapper::optimize asserts before applying an increment.
-    frame_poses[t_ns] = PoseStateWithLin<double>(t_ns, kf->pose.getPose());
+    Sophus::SE3d T_w_i = kf->pose.getPose();
+    if (mpGsLog && kf->mGsEpoch != mpMapGsEpoch) {
+        T_w_i = mpGsLog->Between(kf->mGsEpoch, mpMapGsEpoch).Apply(T_w_i);
+    }
+    frame_poses[t_ns] = PoseStateWithLin<double>(t_ns, T_w_i);
     img_data[t_ns] = kf->opt_flow_res->input_images;
     mpNewKeyframesForTracking.emplace(t_ns);
 }
@@ -302,6 +374,12 @@ void LocalMapper::IngestMargData(MargData::Ptr& data) {
     // processMargData's img_data write inert without altering NfrMapper,
     // which the offline mapper still depends on.
     data->opt_flow_res.clear();
+
+    if (mpGsLog && data->mGsEpoch != mpMapGsEpoch) {
+        TransformMargDataBySim3(
+            *data, mpGsLog->Between(data->mGsEpoch, mpMapGsEpoch));
+        data->mGsEpoch = mpMapGsEpoch;
+    }
 
     const size_t relBegin = rel_pose_factors.size();
     const size_t rpBegin = roll_pitch_factors.size();
@@ -372,6 +450,9 @@ void LocalMapper::CollectNewKeyframesAfterMatching() {
 
 void LocalMapper::MatchLocal() {
     int neighbourPairs = 0;
+    const int64_t matchTNs = mpNewKeyframesForTracking.empty()
+                                 ? 0
+                                 : *mpNewKeyframesForTracking.rbegin();
     std::vector<TimeCamId> keys;
     std::unordered_map<TimeCamId, size_t> id_to_key_idx;
 
@@ -410,9 +491,15 @@ void LocalMapper::MatchLocal() {
                 for (const auto& otcid_score : results) {
                     if (otcid_score.first.frame_id == tcid.frame_id) continue;
                     best_score = std::max(best_score, otcid_score.second);
-                    if (otcid_score.second <=
-                        config.mapper_frames_to_match_threshold)
-                        continue;
+                    const bool aboveThresh =
+                        otcid_score.second >
+                        config.mapper_frames_to_match_threshold;
+                    mpLogger->AddMapBowCandidate(tcid.frame_id, tcid.frame_id,
+                                                 otcid_score.first.frame_id,
+                                                 otcid_score.second,
+                                                 aboveThresh);
+                    // mpLogger->PrintMapBowCandidate();
+                    if (!aboveThresh) continue;
                     const auto idx_it = id_to_key_idx.find(otcid_score.first);
                     if (idx_it == id_to_key_idx.end()) continue;
                     ++above;
@@ -428,7 +515,7 @@ void LocalMapper::MatchLocal() {
                     int(kd.corner_descriptors.size()),
                     int(kd.bow_vector.size()), int(results.size()), int(above),
                     best_score, config.mapper_frames_to_match_threshold);
-                mpLogger->PrintMapBowQuery();
+                // mpLogger->PrintMapBowQuery();
             }
         }
     };
@@ -501,14 +588,15 @@ void LocalMapper::MatchLocal() {
                 config.mapper_min_matches) {
                 matched++;
                 findInliersRansac(f1, f2, config.mapper_ransac_threshold,
-                                  config.mapper_min_matches, md);
+                                  config.mapper_min_matches, md,
+                                  mpVioDebugMode);
             }
 
             mpLogger->AddMapPairMatch(
-                id1.frame_id, id2.frame_id, int(md.matches.size()),
+                matchTNs, id1.frame_id, id2.frame_id, int(md.matches.size()),
                 config.mapper_min_matches, int(md.inliers.size()),
                 !md.inliers.empty());
-            mpLogger->PrintMapPairMatch();
+            // mpLogger->PrintMapPairMatch();
 
             if (!md.inliers.empty()) {
                 feature_matches[std::make_pair(id1, id2)] =
@@ -535,14 +623,11 @@ void LocalMapper::MatchLocal() {
         num_inliers += kv.second->inliers.size();
     }
 
-    const int64_t matchTNs = mpNewKeyframesForTracking.empty()
-                                 ? 0
-                                 : *mpNewKeyframesForTracking.rbegin();
     mpLogger->AddMapMatchSummary(
         matchTNs, int(ids_to_match.size()), neighbourPairs,
         int(mpLocalMatchNeighbours), total_matched, num_inliers, num_matches,
         elapsed1.count() * 1e-6, elapsed2.count() * 1e-6);
-    mpLogger->PrintMapMatchSummary();
+    // mpLogger->PrintMapMatchSummary();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -586,7 +671,7 @@ void LocalMapper::build_tracks() {
                            int(mpLatestKeyframesMatches.size()),
                            int(mpNewKeyframesForTracking.size()),
                            int(feature_corners.size()), lenHist);
-    mpLogger->PrintMapTracks();
+    // mpLogger->PrintMapTracks();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -751,7 +836,7 @@ void LocalMapper::setup_opt() {
         int(nNonFinite), int(nObsAdded), int(nLandmarksBefore),
         int(lmdb.numLandmarks()), config.mapper_min_triangulation_dist,
         mpMaxCosParallax, mpMaxInvDist);
-    mpLogger->PrintMapSetupOpt();
+    // mpLogger->PrintMapSetupOpt();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -841,7 +926,7 @@ bool LocalMapper::SelectKeyframesToCull(std::vector<int64_t>& keyframesToCull) {
         mpLogger->AddMapCovis(
             covisTNs, ok, int(seen.size()), int(ref_seen.size()),
             int(lmdb.GetCovisibility().size()), int(ref_covis.size()));
-        mpLogger->PrintMapCovis();
+        // mpLogger->PrintMapCovis();
     }
 
     std::vector<int64_t> ordered;
@@ -918,7 +1003,7 @@ bool LocalMapper::SelectKeyframesToCull(std::vector<int64_t>& keyframesToCull) {
                                int(max_cull), int(mpMinRedundantObservers),
                                int(keyframesToCull.size()), capacityRuleFired,
                                mpCullRedundancyThresh, observersHist);
-    mpLogger->PrintMapCullSelect();
+    // mpLogger->PrintMapCullSelect();
 
     if (mpVioDebugMode) {
         std::cout << "[Local Mapper][cull-select] selected [";
@@ -1002,13 +1087,13 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
         if (!found_obs) {
             mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
                                    int(obs_copy.size()), 0, 3, 1);
-            mpLogger->PrintMapRehost();
+            // mpLogger->PrintMapRehost();
             return;
         }
     } else if (obs_copy.count(new_host_tcid) == 0) {
         mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
                                int(obs_copy.size()), 0, 3, 1);
-        mpLogger->PrintMapRehost();
+        // mpLogger->PrintMapRehost();
         return;
     }
 
@@ -1019,7 +1104,7 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
                                                           pos_3d_new_hom)) {
         mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
                                int(obs_copy.size()), 0, 3, 2);
-        mpLogger->PrintMapRehost();
+        // mpLogger->PrintMapRehost();
         return;
     }
 
@@ -1077,14 +1162,14 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
             triangulated = true;
             mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
                                    int(obs_copy.size()), 0, 2, 0);
-            mpLogger->PrintMapRehost();
+            // mpLogger->PrintMapRehost();
         }
     }
 
     if (!triangulated) {
         mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
                                int(obs_copy.size()), 0, 4, 3);
-        mpLogger->PrintMapRehost();
+        // mpLogger->PrintMapRehost();
         lmdb.removeLandmark(lm_id);
         return;
     }
@@ -1111,7 +1196,7 @@ void LocalMapper::RehostLandmark(TrackId lm_id, int64_t culled_kf,
     mpLogger->AddMapRehost(rehostTNs, lm_id, culled_kf, new_host_kf,
                            int(obs_copy.size()), obs_added, outcome,
                            obs_added == 0 ? 4 : 0);
-    mpLogger->PrintMapRehost();
+    // mpLogger->PrintMapRehost();
 
     if (obs_added == 0) {
         lmdb.removeLandmark(lm_id);
@@ -1172,7 +1257,7 @@ void LocalMapper::CullRedundantKeyframes() {
                 ++nNoHost;
                 mpLogger->AddMapRehost(culled, lm, culled, -1,
                                        int(candidates.size()), 0, 4, 5);
-                mpLogger->PrintMapRehost();
+                // mpLogger->PrintMapRehost();
                 if (lmdb.landmarkExists(lm)) {
                     landmarksToRemove.push_back(lm);
                 }
@@ -1184,7 +1269,7 @@ void LocalMapper::CullRedundantKeyframes() {
                               new_host) != keyframesToCull.end()) {
                     mpLogger->AddMapRehost(culled, lm, culled, new_host, 0, 0,
                                            5, 0);
-                    mpLogger->PrintMapRehost();
+                    // mpLogger->PrintMapRehost();
                 }
                 RehostLandmark(lm, culled, new_host);
             }
@@ -1239,7 +1324,7 @@ void LocalMapper::CullRedundantKeyframes() {
                              int(nNoHost), int(nLmBeforeKf),
                              int(lmdb.numLandmarks()), mapBefore,
                              int(frame_poses.size()));
-        mpLogger->PrintMapCull();
+        // mpLogger->PrintMapCull();
     }
 
     // ─── Step 7 — clear transient per-step data ─────────────────────────
