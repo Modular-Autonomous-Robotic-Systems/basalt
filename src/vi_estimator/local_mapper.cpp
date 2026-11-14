@@ -166,13 +166,14 @@ void LocalMapper::MapLocally() {
         }
         vKeyframes.push_back(kf);
 
-        while (mpKFInputQueue->try_pop(kf)) {
-            if (!kf) {
-                nullReceived = true;
-                break;
-            }
-            vKeyframes.push_back(kf);
-        }
+        // only processing one keyframe at at time
+        // while (mpKFInputQueue->try_pop(kf)) {
+        //     if (!kf) {
+        //         nullReceived = true;
+        //         break;
+        //     }
+        //     vKeyframes.push_back(kf);
+        // }
         auto tStep = std::chrono::high_resolution_clock::now();
         const double queueWaitSeconds =
             std::chrono::duration<double>(tStep - t1).count();
