@@ -322,6 +322,10 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
              {{"t_ns", "ns"}, {"pyramid", "ms"}, {"track", "ms"},
               {"detect_add", "ms"}, {"total", "ms"}, {"queue", "count"}});
 
+    Register("of_track_death", "[Optical Flow][track-death]",
+             {{"t_ns", "ns"}, {"track_id", "count"}, {"birth_t_ns", "ns"},
+              {"age_frames", "count"}, {"reason", "enum"}});
+
     Register("vio_imu_ingest", "[VIO][imu-ingest]",
              {{"t_ns", "ns"}, {"n", "count"}, {"stamp_rate_hz", "f"},
               {"wall_rate_hz", "f"}, {"max_gap", "ms"},
@@ -349,6 +353,7 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"max_rot_err", "f"}, {"limit_trans", "f"},
               {"limit_rot", "f"}});
 
+
     Register("vio_assoc", "[VIO][assoc]",
              {{"t_ns", "ns"}, {"of_obs", "count"}, {"connected0", "count"},
               {"unconnected0", "count"}, {"connected_ratio", "ratio"},
@@ -365,6 +370,10 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"min_triang_dist", "f"}, {"baseline_m_min", "f"},
               {"baseline_m_max", "f"}, {"depth_m_min", "f"},
               {"depth_m_mean", "f"}, {"depth_m_max", "f"}});
+
+    Register("vio_reproj_pre_opt", "[VIO][reproj-pre-opt]",
+             {{"t_ns", "ns"}, {"n", "count"}, {"mean_px", "f"},
+              {"median_px", "f"}, {"p95_px", "f"}, {"max_px", "f"}});
 
     Register("vio_landmarks", "[VIO][landmarks]",
              {{"t_ns", "ns"}, {"lost", "count"}, {"lmdb", "count"},
@@ -408,7 +417,7 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"optimize", "ms"}});
 
     Register("vio_solver_timing", "[VIO][solver-timing]",
-             {{"num_cams", "count"}, {"num_lms", "count"},
+             {{"t_ns", "ns"}, {"num_cams", "count"}, {"num_lms", "count"},
               {"num_obs", "count"}, {"allocateLMB", "ms"},
               {"linearizeProblem", "ms"}, {"performQR", "ms"},
               {"get_dense_H_b", "ms"}, {"solve", "ms"},
@@ -426,7 +435,7 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"last_state_to_marg", "ns"}});
 
     Register("vio_marg_timing", "[VIO][marg-timing]",
-             {{"frame_id", "ns"}, {"measure", "ms"},
+             {{"t_ns", "ns"}, {"measure", "ms"},
               {"marg_linearize", "ms"}, {"marg_helper", "ms"},
               {"marg", "ms"}, {"marg_log", "ms"}, {"marginalize", "ms"}});
 
@@ -452,8 +461,12 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"db_hits", "count"}, {"above_thresh", "count"},
               {"best_score", "f"}, {"thresh", "f"}});
 
+    Register("map_bow_candidate", "[Local Mapper][bow-cand]",
+             {{"t_ns", "ns"}, {"query_kf", "ns"}, {"candidate_kf", "ns"},
+              {"score", "f"}, {"above_thresh", "flag"}});
+
     Register("map_pair_match", "[Local Mapper][match]",
-             {{"kf1", "ns"}, {"kf2", "ns"},
+             {{"t_ns", "ns"}, {"kf1", "ns"}, {"kf2", "ns"},
               {"descriptor_matches", "count"}, {"min_matches", "count"},
               {"ransac_inliers", "count"}, {"stored", "flag"}});
 
@@ -516,30 +529,32 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"lmdb_landmarks", "count"}, {"host_kfs", "count"}});
 
     Register("mapper_linearise", "[Mapper][linearize]",
-             {{"iter", "count"}, {"vision", "e"}, {"rel_error", "e"},
+             {{"t_ns", "ns"}, {"opt_pass", "enum"}, {"iter", "count"},
+              {"vision", "e"}, {"rel_error", "e"},
               {"roll_pitch_error", "e"}, {"total", "e"},
               {"landmarks", "count"}, {"observations", "count"},
               {"rel_pose_factors", "count"},
               {"roll_pitch_factors", "count"}});
 
     Register("mapper_solver_iter", "[Mapper][solver]",
-             {{"iter", "count"}, {"inner", "count"}, {"status", "enum"},
+             {{"t_ns", "ns"}, {"opt_pass", "enum"}, {"iter", "count"},
+              {"inner", "count"}, {"status", "enum"},
               {"lambda", "e"}, {"f_diff", "e"}, {"max_inc", "e"},
               {"vision_error", "e"}, {"rel_error", "e"},
               {"roll_pitch_error", "e"}, {"total", "e"},
               {"converged", "flag"}, {"error_increased", "flag"}});
 
     Register("mapper_iter_summary", "[Mapper][iter]",
-             {{"iter", "count"}, {"iteration", "ms"},
-              {"num_states", "count"}, {"num_poses", "count"},
-              {"inner_steps", "count"}});
+             {{"t_ns", "ns"}, {"opt_pass", "enum"}, {"iter", "count"},
+              {"iteration", "ms"}, {"num_states", "count"},
+              {"num_poses", "count"}, {"inner_steps", "count"}});
 
     Register("mapper_detect", "[Mapper][detect]",
-             {{"frames", "count"}, {"detection", "ms"},
+             {{"t_ns", "ns"}, {"frames", "count"}, {"detection", "ms"},
               {"corners_total", "count"}});
 
     Register("mapper_stereo", "[Mapper][stereo]",
-             {{"pairs", "count"}, {"matches", "count"},
+             {{"t_ns", "ns"}, {"pairs", "count"}, {"matches", "count"},
               {"inliers", "count"}});
 }
 
@@ -621,6 +636,21 @@ void Logger::AddOpticalFlowTiming(int64_t tNs, double pyramid, double track,
 
 void Logger::PrintOpticalFlowTiming() { Emit("of_timing"); }
 
+void Logger::AddOpticalFlowTrackDeath(int64_t tNs, int64_t trackId,
+                                      int64_t birthTNs, int ageFrames,
+                                      int reason) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("of_track_death");
+    s.add_int("t_ns", tNs);
+    s.add_int("track_id", trackId);
+    s.add_int("birth_t_ns", birthTNs);
+    s.add("age_frames", double(ageFrames));
+    s.add("reason", double(reason));
+    s.CommitRow();
+}
+
+void Logger::PrintOpticalFlowTrackDeath() { Emit("of_track_death"); }
+
 // ── Inertial ingestion ───────────────────────────────────────────────
 
 void Logger::AddVioImuIngest(int64_t tNs, int64_t n, double stampRateHz,
@@ -700,6 +730,7 @@ void Logger::AddVioImuFrame(int64_t tNs, double frameDt, int integrated,
 
 void Logger::PrintVioImuFrame() { Emit("vio_imu_frame"); }
 
+
 void Logger::AddVioPoseUpdate(int64_t tNs, int pending, int applied,
                               int rejected, double maxTransErr,
                               double maxRotErr, double limitTrans,
@@ -718,6 +749,7 @@ void Logger::AddVioPoseUpdate(int64_t tNs, int pending, int applied,
 }
 
 void Logger::PrintVioPoseUpdate() { Emit("vio_pose_update"); }
+
 
 void Logger::AddVioAssoc(int64_t tNs, int ofObs, int connected0,
                          int unconnected0, double thresh, int framesAfterKf,
@@ -742,6 +774,22 @@ void Logger::AddVioAssoc(int64_t tNs, int ofObs, int connected0,
 }
 
 void Logger::PrintVioAssoc() { Emit("vio_assoc"); }
+
+void Logger::AddVioReprojectionPreOpt(int64_t tNs, int n, double meanPx,
+                                      double medianPx, double p95Px,
+                                      double maxPx) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_reproj_pre_opt");
+    s.add_int("t_ns", tNs);
+    s.add("n", double(n));
+    s.add("mean_px", meanPx);
+    s.add("median_px", medianPx);
+    s.add("p95_px", p95Px);
+    s.add("max_px", maxPx);
+    s.CommitRow();
+}
+
+void Logger::PrintVioReprojectionPreOpt() { Emit("vio_reproj_pre_opt"); }
 
 void Logger::AddVioTriang(int64_t tNs, int candidates, int added,
                           int noPriorObs, int unprojectFail,
@@ -908,15 +956,16 @@ void Logger::AddVioSolverSummary(int64_t tNs, int numIt, int numItRejected,
 
 void Logger::PrintVioSolverSummary() { Emit("vio_solver_summary"); }
 
-void Logger::AddVioSolverTiming(int numCams, int numLms, int numObs,
-                                double allocateLmb, double linearizeProblem,
-                                double performQr, double getDenseHB,
-                                double solve, double backSubstitute,
-                                double computeError2, double iteration,
-                                double residentMemory,
+void Logger::AddVioSolverTiming(int64_t tNs, int numCams, int numLms,
+                                int numObs, double allocateLmb,
+                                double linearizeProblem, double performQr,
+                                double getDenseHB, double solve,
+                                double backSubstitute, double computeError2,
+                                double iteration, double residentMemory,
                                 double residentMemoryPeak) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_solver_timing");
+    s.add_int("t_ns", tNs);
     s.add("num_cams", double(numCams));
     s.add("num_lms", double(numLms));
     s.add("num_obs", double(numObs));
@@ -976,13 +1025,13 @@ void Logger::AddVioMargNullspace(int64_t tNs, const Eigen::VectorXd& margNs,
 
 void Logger::PrintVioMargNullspace() { Emit("vio_marg_nullspace"); }
 
-void Logger::AddVioMargTiming(int64_t frameId, double measure,
+void Logger::AddVioMargTiming(int64_t tNs, double measure,
                               double margLinearize, double margHelper,
                               double marg, double margLog,
                               double marginalize) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_marg_timing");
-    s.add_int("frame_id", frameId);
+    s.add_int("t_ns", tNs);
     s.add("measure", measure);
     s.add("marg_linearize", margLinearize);
     s.add("marg_helper", margHelper);
@@ -1050,11 +1099,27 @@ void Logger::AddMapBowQuery(int64_t tNs, int64_t kf, int keypoints,
 
 void Logger::PrintMapBowQuery() { Emit("map_bow_query"); }
 
-void Logger::AddMapPairMatch(int64_t kf1, int64_t kf2, int descriptorMatches,
-                             int minMatches, int ransacInliers,
-                             bool stored) {
+void Logger::AddMapBowCandidate(int64_t tNs, int64_t queryKf,
+                                int64_t candidateKf, double score,
+                                bool aboveThresh) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("map_bow_candidate");
+    s.add_int("t_ns", tNs);
+    s.add_int("query_kf", queryKf);
+    s.add_int("candidate_kf", candidateKf);
+    s.add("score", score);
+    s.add("above_thresh", aboveThresh ? 1.0 : 0.0);
+    s.CommitRow();
+}
+
+void Logger::PrintMapBowCandidate() { Emit("map_bow_candidate"); }
+
+void Logger::AddMapPairMatch(int64_t tNs, int64_t kf1, int64_t kf2,
+                             int descriptorMatches, int minMatches,
+                             int ransacInliers, bool stored) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("map_pair_match");
+    s.add_int("t_ns", tNs);
     s.add_int("kf1", kf1);
     s.add_int("kf2", kf2);
     s.add("descriptor_matches", double(descriptorMatches));
@@ -1245,12 +1310,15 @@ void Logger::PrintMapPublish() { Emit("map_publish"); }
 
 // ── Shared mapping base ───────────────────────────────────────────────
 
-void Logger::AddMapperLinearise(int iter, double vision, double relError,
+void Logger::AddMapperLinearise(int64_t tNs, int optPass, int iter,
+                                double vision, double relError,
                                 double rollPitchError, double total,
                                 int landmarks, int observations,
                                 int relPoseFactors, int rollPitchFactors) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_linearise");
+    s.add_int("t_ns", tNs);
+    s.add("opt_pass", double(optPass));
     s.add("iter", double(iter));
     s.add("vision", vision);
     s.add("rel_error", relError);
@@ -1265,13 +1333,16 @@ void Logger::AddMapperLinearise(int iter, double vision, double relError,
 
 void Logger::PrintMapperLinearise() { Emit("mapper_linearise"); }
 
-void Logger::AddMapperSolverIter(int iter, int inner, int status,
-                                 double lambda, double fDiff, double maxInc,
+void Logger::AddMapperSolverIter(int64_t tNs, int optPass, int iter,
+                                 int inner, int status, double lambda,
+                                 double fDiff, double maxInc,
                                  double visionError, double relError,
                                  double rollPitchError, double total,
                                  bool converged, bool errorIncreased) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_solver_iter");
+    s.add_int("t_ns", tNs);
+    s.add("opt_pass", double(optPass));
     s.add("iter", double(iter));
     s.add("inner", double(inner));
     s.add("status", double(status));
@@ -1289,10 +1360,13 @@ void Logger::AddMapperSolverIter(int iter, int inner, int status,
 
 void Logger::PrintMapperSolverIter() { Emit("mapper_solver_iter"); }
 
-void Logger::AddMapperIterSummary(int iter, double iteration, int numStates,
+void Logger::AddMapperIterSummary(int64_t tNs, int optPass, int iter,
+                                  double iteration, int numStates,
                                   int numPoses, int innerSteps) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_iter_summary");
+    s.add_int("t_ns", tNs);
+    s.add("opt_pass", double(optPass));
     s.add("iter", double(iter));
     s.add("iteration", iteration);
     s.add("num_states", double(numStates));
@@ -1303,9 +1377,11 @@ void Logger::AddMapperIterSummary(int iter, double iteration, int numStates,
 
 void Logger::PrintMapperIterSummary() { Emit("mapper_iter_summary"); }
 
-void Logger::AddMapperDetect(int frames, double detection, int cornersTotal) {
+void Logger::AddMapperDetect(int64_t tNs, int frames, double detection,
+                             int cornersTotal) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_detect");
+    s.add_int("t_ns", tNs);
     s.add("frames", double(frames));
     s.add("detection", detection);
     s.add("corners_total", double(cornersTotal));
@@ -1314,9 +1390,11 @@ void Logger::AddMapperDetect(int frames, double detection, int cornersTotal) {
 
 void Logger::PrintMapperDetect() { Emit("mapper_detect"); }
 
-void Logger::AddMapperStereo(int pairs, int matches, int inliers) {
+void Logger::AddMapperStereo(int64_t tNs, int pairs, int matches,
+                             int inliers) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("mapper_stereo");
+    s.add_int("t_ns", tNs);
     s.add("pairs", double(pairs));
     s.add("matches", double(matches));
     s.add("inliers", double(inliers));
@@ -1330,7 +1408,12 @@ void Logger::PrintMapperStereo() { Emit("mapper_stereo"); }
 ExecutionStats& Logger::SolverScratch() { return mpSolverScratch; }
 
 void Logger::FinishVioOptimize() {
-    if (!mpEnabled) return;
+    // Callers fill the scratch unconditionally, so a disabled logger must
+    // still discard it or it grows for the life of the estimator.
+    if (!mpEnabled) {
+        mpSolverScratch = ExecutionStats();
+        return;
+    }
     mpStatsAll.merge_all(mpSolverScratch);
     mpStatsSums.merge_sums(mpSolverScratch);
     mpSolverScratch = ExecutionStats();

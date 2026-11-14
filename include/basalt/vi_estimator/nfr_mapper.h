@@ -177,7 +177,7 @@ public:
 
     bool extractNonlinearFactors(basalt::MargData& m);
 
-    void optimize(int num_iterations = 10);
+    void optimize(int num_iterations = 10, int opt_pass = 0);
 
     Eigen::aligned_map<int64_t, PoseStateWithLin<Scalar>>& getFramePoses();
 

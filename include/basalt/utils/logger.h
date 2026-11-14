@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace basalt {
@@ -98,6 +99,12 @@ struct OpticalFlowTrackStats {
     double mDetectSeconds = 0.0;
     double mTotalSeconds = 0.0;
     double mDtSeconds = 0.0;
+
+    // (track id, reason), reason 0 forward fail, 1 backward fail,
+    // 2 recovery rejected. trackPoints stays const, mutation happens
+    // through this pointer member rather than through `this`.
+    std::mutex mMtxDeaths;
+    std::vector<std::pair<size_t, int>> mvDeaths;
 };
 
 /// Owns one AggregateStats per class of diagnostic record and exposes one
@@ -132,6 +139,11 @@ public:
                               double detectAdd, double total, int queue);
     void PrintOpticalFlowTiming();
 
+    void AddOpticalFlowTrackDeath(int64_t tNs, int64_t trackId,
+                                  int64_t birthTNs, int ageFrames,
+                                  int reason);
+    void PrintOpticalFlowTrackDeath();
+
     // ── Inertial ingestion ──────────────────────────────────────────
     void AddVioImuIngest(int64_t tNs, int64_t n, double stampRateHz,
                          double wallRateHz, double maxGap,
@@ -164,6 +176,11 @@ public:
                      double thresh, int framesAfterKf, int lmdbLandmarks,
                      int kfs, int frameStates, int framePoses, bool takeKf);
     void PrintVioAssoc();
+
+    void AddVioReprojectionPreOpt(int64_t tNs, int n, double meanPx,
+                                  double medianPx, double p95Px,
+                                  double maxPx);
+    void PrintVioReprojectionPreOpt();
 
     void AddVioTriang(int64_t tNs, int candidates, int added, int noPriorObs,
                       int unprojectFail, int shortBaseline, int notFinite,
@@ -213,7 +230,7 @@ public:
     // Mirrors the keys the local ExecutionStats scratch object in
     // SqrtKeypointVioEstimator::optimize holds, so the comma separated file
     // and stats_all.json / stats_sums.json carry the same numbers.
-    void AddVioSolverTiming(int numCams, int numLms, int numObs,
+    void AddVioSolverTiming(int64_t tNs, int numCams, int numLms, int numObs,
                            double allocateLmb, double linearizeProblem,
                            double performQr, double getDenseHB, double solve,
                            double backSubstitute, double computeError2,
@@ -233,7 +250,7 @@ public:
                             double evCondition);
     void PrintVioMargNullspace();
 
-    void AddVioMargTiming(int64_t frameId, double measure,
+    void AddVioMargTiming(int64_t tNs, double measure,
                          double margLinearize, double margHelper,
                          double marg, double margLog, double marginalize);
     void PrintVioMargTiming();
@@ -254,8 +271,13 @@ public:
                        int aboveThresh, double bestScore, double thresh);
     void PrintMapBowQuery();
 
-    void AddMapPairMatch(int64_t kf1, int64_t kf2, int descriptorMatches,
-                        int minMatches, int ransacInliers, bool stored);
+    void AddMapBowCandidate(int64_t tNs, int64_t queryKf, int64_t candidateKf,
+                           double score, bool aboveThresh);
+    void PrintMapBowCandidate();
+
+    void AddMapPairMatch(int64_t tNs, int64_t kf1, int64_t kf2,
+                        int descriptorMatches, int minMatches,
+                        int ransacInliers, bool stored);
     void PrintMapPairMatch();
 
     void AddMapMatchSummary(int64_t tNs, int pairs, int neighbourPairs,
@@ -307,27 +329,30 @@ public:
     void PrintMapPublish();
 
     // ── Shared mapping base ─────────────────────────────────────────
-    void AddMapperLinearise(int iter, double vision, double relError,
-                           double rollPitchError, double total,
-                           int landmarks, int observations,
+    void AddMapperLinearise(int64_t tNs, int optPass, int iter, double vision,
+                           double relError, double rollPitchError,
+                           double total, int landmarks, int observations,
                            int relPoseFactors, int rollPitchFactors);
     void PrintMapperLinearise();
 
-    void AddMapperSolverIter(int iter, int inner, int status, double lambda,
-                            double fDiff, double maxInc, double visionError,
+    void AddMapperSolverIter(int64_t tNs, int optPass, int iter, int inner,
+                            int status, double lambda, double fDiff,
+                            double maxInc, double visionError,
                             double relError, double rollPitchError,
                             double total, bool converged,
                             bool errorIncreased);
     void PrintMapperSolverIter();
 
-    void AddMapperIterSummary(int iter, double iteration, int numStates,
-                             int numPoses, int innerSteps);
+    void AddMapperIterSummary(int64_t tNs, int optPass, int iter,
+                             double iteration, int numStates, int numPoses,
+                             int innerSteps);
     void PrintMapperIterSummary();
 
-    void AddMapperDetect(int frames, double detection, int cornersTotal);
+    void AddMapperDetect(int64_t tNs, int frames, double detection,
+                        int cornersTotal);
     void PrintMapperDetect();
 
-    void AddMapperStereo(int pairs, int matches, int inliers);
+    void AddMapperStereo(int64_t tNs, int pairs, int matches, int inliers);
     void PrintMapperStereo();
 
     // ── Legacy ExecutionStats artefacts, preserved for the batch tools ──

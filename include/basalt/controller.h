@@ -34,9 +34,12 @@ public:
 
     // Initialize mid-flight with specific state. The trailing
     // enableVisualisation flag arms the visualisation taps and is the single
-    // source of truth for whether the GUI is required. Empty logDirectory
-    // disables the comma separated logger sink; the console sink follows
-    // vio_config_.vio_debug regardless.
+    // source of truth for whether the GUI is required. Logger collection and
+    // the comma separated files are enabled only when vio_config_.vio_debug
+    // is true, whereas config.json and calibration.json are copied into any
+    // non-empty logDirectory regardless. This previously read that the
+    // console sink followed vio_debug, changed 2026-10-23 when the console
+    // sink was retired and collection itself was gated.
     void initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
                     const Eigen::Vector3d& vel_w_i, const Eigen::Vector3d& bg,
                     const Eigen::Vector3d& ba,

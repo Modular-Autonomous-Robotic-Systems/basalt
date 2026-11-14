@@ -46,6 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <atomic>
 #include <iostream>
+#include <map>
 #include <sophus/se2.hpp>
 #include <thread>
 
@@ -216,6 +217,21 @@ public:
                                      .norm();
                 trackStats.mFlowSum += d;
                 if (d > trackStats.mFlowMax) trackStats.mFlowMax = d;
+                mpTrackAge[kv.first]++;
+            }
+
+            for (const auto& [id, reason] : trackStats.mvDeaths) {
+                const int64_t birthTNs = mpTrackBirthTNs.count(id)
+                                              ? mpTrackBirthTNs.at(id)
+                                              : curr_t_ns;
+                const int ageFrames =
+                    mpTrackAge.count(id) ? mpTrackAge.at(id) : 0;
+                mpLogger->AddOpticalFlowTrackDeath(curr_t_ns, int64_t(id),
+                                                   birthTNs, ageFrames,
+                                                   reason);
+                // mpLogger->PrintOpticalFlowTrackDeath();
+                mpTrackBirthTNs.erase(id);
+                mpTrackAge.erase(id);
             }
 
             transforms = new_transforms;
@@ -244,13 +260,13 @@ public:
             trackStats.mEpipolarRejected, trackStats.mOut,
             tracked ? trackStats.mFlowSum / double(tracked) : 0.0,
             trackStats.mFlowMax);
-        mpLogger->PrintOpticalFlowFrame();
+        // mpLogger->PrintOpticalFlowFrame();
 
         mpLogger->AddOpticalFlowTiming(
             curr_t_ns, trackStats.mPyramidSeconds, trackStats.mTrackSeconds,
             trackStats.mDetectSeconds, trackStats.mTotalSeconds,
             int(input_queue.size()));
-        mpLogger->PrintOpticalFlowTiming();
+        // mpLogger->PrintOpticalFlowTiming();
 
         frame_counter++;
         return transforms;
@@ -306,12 +322,18 @@ public:
                             if (stats) stats->mTracked++;
                         } else if (stats) {
                             stats->mRecoveryRejected++;
+                            std::lock_guard<std::mutex> lock(stats->mMtxDeaths);
+                            stats->mvDeaths.emplace_back(id, 2);
                         }
                     } else if (stats) {
                         stats->mBackwardFailed++;
+                        std::lock_guard<std::mutex> lock(stats->mMtxDeaths);
+                        stats->mvDeaths.emplace_back(id, 1);
                     }
                 } else if (stats) {
                     stats->mForwardFailed++;
+                    std::lock_guard<std::mutex> lock(stats->mMtxDeaths);
+                    stats->mvDeaths.emplace_back(id, 0);
                 }
             }
         };
@@ -416,6 +438,8 @@ public:
 
             transforms->observations.at(0)[last_keypoint_id] = transform;
             new_poses0[last_keypoint_id] = transform;
+            mpTrackBirthTNs[last_keypoint_id] = transforms->t_ns;
+            mpTrackAge[last_keypoint_id] = 0;
 
             last_keypoint_id++;
         }
@@ -496,6 +520,8 @@ private:
 
     bool mpUseProducerConsumerArchitecture;
     Logger::Ptr mpLogger;
+    std::map<size_t, int64_t> mpTrackBirthTNs;
+    std::map<size_t, int> mpTrackAge;
 };
 
 }  // namespace basalt
