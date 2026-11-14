@@ -66,6 +66,9 @@ struct OpticalFlowResult {
     std::vector<std::map<KeypointId, size_t>> pyramid_levels;
 
     OpticalFlowInput::Ptr input_images;
+
+    double mFlowPxMean = 0.0;
+    double mFlowPxMax = 0.0;
 };
 
 class OpticalFlowBase {

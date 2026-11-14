@@ -78,6 +78,18 @@ SqrtKeypointVioEstimator<Scalar_>::SqrtKeypointVioEstimator(
       mpUseProducerConsumerArchitecture(useProducerConsumerArchitecture) {
     obs_std_dev = Scalar(config.vio_obs_std_dev);
     huber_thresh = Scalar(config.vio_obs_huber_thresh);
+    mpZeroVelocityWeight = Scalar(config.vio_zero_velocity_weight);
+    mpStationaryEnableShoe = config.vio_stationary_enable_shoe;
+    mpStationaryEnableMahalanobis = config.vio_stationary_enable_mahalanobis;
+    mpStationaryEnableFlow = config.vio_stationary_enable_flow;
+    mpStationaryWindowS = Scalar(config.vio_stationary_window_s);
+    mpStationaryGlrtTol = Scalar(config.vio_stationary_glrt_tol);
+    mpStationaryMinConsecutiveFrames =
+        config.vio_stationary_min_consecutive_frames;
+    mpStationaryChiSqTol = Scalar(config.vio_stationary_chisq_tol);
+    mpStationaryFlowTol = config.vio_stationary_flow_tol;
+    mpStationaryEnableStartLatch = config.vio_stationary_enable_start_latch;
+    mpStationaryLatchFrames = config.vio_stationary_latch_frames;
     this->calib = calib_.cast<Scalar>();
     std::cout << "vio debug mode: " << config.vio_debug << std::endl;
 
@@ -251,6 +263,8 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
     typename IntegratedImuMeasurement<Scalar>::Ptr meas;
 
     if (!initialized) {
+        Vec3 accelSum = imuData->accel;
+        int numAccelAveraged = 1;
         while (imuData->t_ns < curr_frame->t_ns) {
             imuData = popFromImuDataQueue();
             if (!imuData) break;
@@ -259,6 +273,8 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
                 this->calib.calib_accel_bias.getCalibrated(imuData->accel);
             imuData->gyro =
                 this->calib.calib_gyro_bias.getCalibrated(imuData->gyro);
+            accelSum += imuData->accel;
+            numAccelAveraged++;
             // std::cout << "Skipping IMU data.." << std::endl;
         }
 
@@ -267,28 +283,44 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
         Vec3 vel_w_i_init;
         vel_w_i_init.setZero();
 
+        // One sample carries 0.1521 m/s^2 of noise per axis, 0.89 degrees of
+        // tilt, which the mean of N reduces by sqrt(N). See
+        // plans/vio_drift_analysis.md section 2.2.3.
+        const Vec3 accelMean = accelSum / Scalar(numAccelAveraged);
+        const Vec3 gravityReference =
+            config.vio_init_accel_averaging ? accelMean : imuData->accel;
         T_w_i_init.setQuaternion(Eigen::Quaternion<Scalar>::FromTwoVectors(
-            imuData->accel, Vec3::UnitZ()));
+            gravityReference, Vec3::UnitZ()));
 
         // Turn the gravity aligned world about Z so body X takes the ground
         // truth heading. Tilt stays with the accelerometer, which the initial
         // bias state is consistent with.
+        const bool yawAligned = mpCurrentGTPose.has_value();
+        double gtYawRad = 0.0;
+        double slamYawRad = 0.0;
+        double yawOffsetRad = 0.0;
         if (mpCurrentGTPose) {
             const Eigen::Matrix<Scalar, 3, 3> rAcc = T_w_i_init.so3().matrix();
             const Eigen::Matrix3d rGt = mpCurrentGTPose->so3().matrix();
-            const Scalar yawOffset =
-                Scalar(std::atan2(rGt(1, 0), rGt(0, 0))) -
-                std::atan2(rAcc(1, 0), rAcc(0, 0));
-            T_w_i_init.so3() =
-                Sophus::SO3<Scalar>::rotZ(yawOffset) * T_w_i_init.so3();
+            slamYawRad = std::atan2(double(rAcc(1, 0)), double(rAcc(0, 0)));
+            gtYawRad = std::atan2(rGt(1, 0), rGt(0, 0));
+            // atan2(sin(x), cos(x)) wraps x to (-pi, pi]. rotZ is periodic in
+            // its argument modulo 2 pi, so the correction applied is
+            // unaffected, but the logged value is only directly comparable
+            // against gt_yaw_rad - slam_yaw_rad, both already atan2 results,
+            // if wrapped the same way.
+            yawOffsetRad = std::atan2(std::sin(gtYawRad - slamYawRad),
+                                      std::cos(gtYawRad - slamYawRad));
+            T_w_i_init.so3() = Sophus::SO3<Scalar>::rotZ(Scalar(yawOffsetRad)) *
+                               T_w_i_init.so3();
             T_w_i_init.translation() =
                 mpCurrentGTPose->translation().template cast<Scalar>();
         }
 
         const Vec3 bodyZInWorld = T_w_i_init.so3() * Vec3::UnitZ();
         const double tiltDeg =
-            std::acos(std::clamp(double(bodyZInWorld.z()), -1.0, 1.0)) *
-            180.0 / M_PI;
+            std::acos(std::clamp(double(bodyZInWorld.z()), -1.0, 1.0)) * 180.0 /
+            M_PI;
 
         last_state_t_ns = curr_frame->t_ns;
         imu_meas[last_state_t_ns] =
@@ -311,7 +343,9 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
             imuData->gyro.template cast<double>(), mpBg.template cast<double>(),
             mpBa.template cast<double>(), g.template cast<double>(),
             T_w_i_init.unit_quaternion().coeffs().template cast<double>(),
-            tiltDeg);
+            tiltDeg, yawAligned, yawOffsetRad, gtYawRad, slamYawRad,
+            config.vio_init_accel_averaging, numAccelAveraged,
+            accelMean.template cast<double>());
         // mpLogger->PrintVioInit();
 
         if (config.vio_debug || config.vio_extended_logging) {
@@ -348,9 +382,29 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
             imuAhead = imuData->t_ns > this->prev_frame->t_ns;
         }
 
+        Vec3 accelSum = Vec3::Zero();
+        Vec3 gyroSum = Vec3::Zero();
+        Scalar accelDeviationMax = Scalar(0);
+        Scalar gyroNormMax = Scalar(0);
         if (imuAhead) {
             while (imuData->t_ns <= curr_frame->t_ns) {
                 meas->integrate(*imuData, this->mpAccelCov, this->mpGyroCov);
+                mvpStationaryWindow.push_back(
+                    {imuData->t_ns, imuData->accel, imuData->gyro});
+                while (!mvpStationaryWindow.empty() &&
+                       double(mvpStationaryWindow.back().t_ns -
+                              mvpStationaryWindow.front().t_ns) *
+                               1e-9 >
+                           double(mpStationaryWindowS))
+                    mvpStationaryWindow.pop_front();
+                accelSum += imuData->accel;
+                gyroSum += imuData->gyro;
+                const Scalar accelDeviation =
+                    std::abs(imuData->accel.norm() - Scalar(9.81));
+                if (accelDeviation > accelDeviationMax)
+                    accelDeviationMax = accelDeviation;
+                const Scalar gyroNorm = imuData->gyro.norm();
+                if (gyroNorm > gyroNormMax) gyroNormMax = gyroNorm;
                 if (firstIntegratedImuTNs < 0)
                     firstIntegratedImuTNs = imuData->t_ns;
                 lastIntegratedImuTNs = imuData->t_ns;
@@ -381,16 +435,87 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
                 ? double(lastIntegratedImuTNs - this->prev_frame->t_ns) /
                       double(frameDtNs)
                 : 0.0;
+        const Vec3 accelMean = numImuIntegrated > 0
+                                   ? Vec3(accelSum / Scalar(numImuIntegrated))
+                                   : Vec3::Zero();
+        const Vec3 gyroMean = numImuIntegrated > 0
+                                  ? Vec3(gyroSum / Scalar(numImuIntegrated))
+                                  : Vec3::Zero();
+        // Superseded 2026-10-19.
+        // mpIsStationary = numImuIntegrated > 0 &&
+        //                 accelDeviationMax < mpStationaryAccelTol &&
+        //                 gyroNormMax < mpStationaryGyroTol;
+
+        Scalar tShoe = Scalar(0);
+        if (!mvpStationaryWindow.empty()) {
+            Vec3 aBar = Vec3::Zero();
+            for (const auto& s : mvpStationaryWindow) aBar += s.accel;
+            aBar /= Scalar(mvpStationaryWindow.size());
+            const Vec3 gDir = aBar.normalized();
+            for (const auto& s : mvpStationaryWindow) {
+                const Vec3 accelResidual = s.accel - Scalar(9.81) * gDir;
+                tShoe +=
+                    accelResidual.cwiseAbs2().cwiseQuotient(mpAccelCov).sum() +
+                    s.gyro.cwiseAbs2().cwiseQuotient(mpGyroCov).sum();
+            }
+            tShoe /= Scalar(mvpStationaryWindow.size());
+        }
+        const bool stage1Clears =
+            !mvpStationaryWindow.empty() && tShoe < mpStationaryGlrtTol;
+        mpStationaryRunLength = stage1Clears ? mpStationaryRunLength + 1 : 0;
+        const bool stage1 =
+            mpStationaryRunLength >= mpStationaryMinConsecutiveFrames;
+
+        // Sigma_v is exactly zero before the first integrate() call this
+        // frame, which would make the solve below singular.
+        Scalar d2 = Scalar(0);
+        bool stage2 = false;
+        if (numImuIntegrated > 0) {
+            const auto& state0 = frame_states.at(last_state_t_ns).getState();
+            const Mat3 Sigma_v = meas->get_cov().template block<3, 3>(6, 6);
+            const Vec3 dv = meas->getDeltaState().vel_w_i;
+            const Scalar predDt = Scalar(meas->get_dt_ns()) * Scalar(1e-9);
+            const Vec3 residual = dv + state0.T_w_i.so3().inverse() *
+                                           (state0.vel_w_i + g * predDt);
+            d2 = residual.transpose() * Sigma_v.ldlt().solve(residual);
+            stage2 = d2 < mpStationaryChiSqTol;
+        }
+
+        const bool stage3 = curr_frame->mFlowPxMean < mpStationaryFlowTol;
+
+        mpIsStationary =
+            (!mpStationaryEnableShoe || stage1) &&
+            (!mpStationaryEnableMahalanobis || stage2) &&
+            (!mpStationaryEnableFlow || stage3) &&
+            (mpStationaryEnableShoe || mpStationaryEnableMahalanobis ||
+             mpStationaryEnableFlow);
+        if (mpStationaryEnableStartLatch) {
+            mpStationaryLatchMisses =
+                mpIsStationary ? 0 : mpStationaryLatchMisses + 1;
+            if (mpStationaryLatchMisses >= mpStationaryLatchFrames)
+                mpStationaryLatchOpen = false;
+            mpIsStationary = mpIsStationary && mpStationaryLatchOpen;
+        }
         mpLogger->AddVioImuFrame(
             curr_frame->t_ns, double(frameDtNs) * 1e-9, numImuIntegrated,
             int(std::round(double(frameDtNs) * 1e-9 *
-                          this->calib.imu_update_rate)),
+                           this->calib.imu_update_rate)),
             numImuSkippedBehind, firstIntegratedImuTNs, lastIntegratedImuTNs,
             coverage, double(meas->get_dt_ns()) * 1e-9, stretchFallbackFired,
             double(stretchSpanNs) * 1e-9, int(imuQueueSizeOnEntry),
             int(this->imu_data_queue.size()),
-            double(imuData ? imuData->t_ns - curr_frame->t_ns : 0) * 1e-9);
+            double(imuData ? imuData->t_ns - curr_frame->t_ns : 0) * 1e-9,
+            accelMean.template cast<double>(), gyroMean.template cast<double>(),
+            double(accelDeviationMax), double(gyroNormMax), mpIsStationary);
         // mpLogger->PrintVioImuFrame();
+
+        mpLogger->AddVioStationary(
+            curr_frame->t_ns, mpStationaryEnableShoe, double(tShoe),
+            int(mvpStationaryWindow.size()), mpStationaryRunLength, stage1,
+            mpStationaryEnableMahalanobis, double(d2), stage2,
+            mpStationaryEnableFlow, curr_frame->mFlowPxMean, stage3,
+            mpIsStationary);
+        // mpLogger->PrintVioStationary();
 
         imuDrainSeconds = tImuDrain.elapsed();
     }
@@ -1535,6 +1660,19 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                     .format("ms");
             }
 
+            // The zero velocity cost enters error_total, l_diff and
+            // after_error_total as well as H and b, so that step acceptance
+            // judges the objective the step was solved for. See
+            // plans/vio_drift_analysis.md Phase 3b, step acceptance.
+            const bool applyZeroVelocity =
+                mpZeroVelocityWeight > 0 && mpIsStationary;
+            const Scalar zeroVelocityW2 =
+                mpZeroVelocityWeight * mpZeroVelocityWeight;
+            if (applyZeroVelocity)
+                error_total += Scalar(0.5) * zeroVelocityW2 *
+                               frame_states.at(last_state_t_ns)
+                                   .getState()
+                                   .vel_w_i.squaredNorm();
             mpLogger->AddVioLinearise(
                 last_state_t_ns, it, double(error_total), double(lambda),
                 int(lmdb.numLandmarks()), int(frame_states.size()),
@@ -1608,6 +1746,19 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
 
                     lqr->get_dense_H_b(H, b);
 
+                    // Zero velocity residual r = w v_w_i on the newest state,
+                    // the only one the per frame stationarity test describes.
+                    // The velocity block sits at offset 6 of the tangent
+                    // ordering [trans, rot, vel, bias_gyro, bias_accel].
+                    if (applyZeroVelocity) {
+                        const int vi =
+                            aom.abs_order_map.at(last_state_t_ns).first + 6;
+                        H.template block<3, 3>(vi, vi).diagonal().array() +=
+                            zeroVelocityW2;
+                        b.template segment<3>(vi) +=
+                            zeroVelocityW2 *
+                            frame_states.at(last_state_t_ns).getState().vel_w_i;
+                    }
                     getDenseHBSeconds = t.reset();
                     mpLogger->SolverScratch()
                         .add("get_dense_H_b", getDenseHBSeconds)
@@ -1657,6 +1808,16 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
 
                     Timer t;
                     l_diff = lqr->backSubstitute(inc);
+                    // Exact model decrease of the zero velocity cost, read
+                    // before the increment is applied.
+                    if (applyZeroVelocity) {
+                        const int vi =
+                            aom.abs_order_map.at(last_state_t_ns).first + 6;
+                        const Vec3 dv = inc.template segment<3>(vi);
+                        const Vec3& v =
+                            frame_states.at(last_state_t_ns).getState().vel_w_i;
+                        l_diff -= zeroVelocityW2 * dv.dot(v + Scalar(0.5) * dv);
+                    }
                     backSubstituteSeconds = t.reset();
                     mpLogger->SolverScratch()
                         .add("backSubstitute", backSubstituteSeconds)
@@ -1718,6 +1879,11 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                 Scalar after_error_total =
                     after_update_vision_and_inertial_error +
                     after_update_marg_prior_error;
+                if (applyZeroVelocity)
+                    after_error_total += Scalar(0.5) * zeroVelocityW2 *
+                                         frame_states.at(last_state_t_ns)
+                                             .getState()
+                                             .vel_w_i.squaredNorm();
 
                 // check cost decrease compared to quadratic model cost
                 Scalar f_diff;

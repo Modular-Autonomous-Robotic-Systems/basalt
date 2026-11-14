@@ -262,6 +262,10 @@ public:
             trackStats.mFlowMax);
         // mpLogger->PrintOpticalFlowFrame();
 
+        transforms->mFlowPxMean =
+            tracked ? trackStats.mFlowSum / double(tracked) : 0.0;
+        transforms->mFlowPxMax = trackStats.mFlowMax;
+
         mpLogger->AddOpticalFlowTiming(
             curr_t_ns, trackStats.mPyramidSeconds, trackStats.mTrackSeconds,
             trackStats.mDetectSeconds, trackStats.mTotalSeconds,

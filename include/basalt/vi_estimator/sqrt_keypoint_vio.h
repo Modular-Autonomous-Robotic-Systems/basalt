@@ -39,6 +39,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <basalt/vi_estimator/vio_estimator.h>
 
 #include <basalt/utils/logger.h>
+#include <deque>
 #include <mutex>
 #include <thread>
 
@@ -64,6 +65,7 @@ public:
 
     using typename SqrtBundleAdjustmentBase<Scalar>::RelLinData;
     using typename SqrtBundleAdjustmentBase<Scalar>::AbsLinData;
+    using typename SqrtBundleAdjustmentBase<Scalar>::Mat3;
 
     using BundleAdjustmentBase<Scalar>::computeError;
     using BundleAdjustmentBase<Scalar>::get_current_points;
@@ -277,6 +279,31 @@ private:
 
     Logger::Ptr mpLogger;
     bool mpUseProducerConsumerArchitecture = false;
+    // Superseded 2026-10-19, replaced by the three-stage detector below.
+    // Scalar mpStationaryAccelTol = Scalar(0.5);
+    // Scalar mpStationaryGyroTol = Scalar(0.05);
+    bool mpIsStationary = false;
+    Scalar mpZeroVelocityWeight = Scalar(0);
+
+    struct ImuSample {
+        int64_t t_ns;
+        Vec3 accel, gyro;
+    };
+    std::deque<ImuSample> mvpStationaryWindow;
+    int mpStationaryRunLength = 0;
+
+    bool mpStationaryEnableShoe = true;
+    bool mpStationaryEnableMahalanobis = true;
+    bool mpStationaryEnableFlow = false;
+    Scalar mpStationaryWindowS = Scalar(0.5);
+    Scalar mpStationaryGlrtTol = Scalar(6.6);
+    int mpStationaryMinConsecutiveFrames = 2;
+    Scalar mpStationaryChiSqTol = Scalar(7.81);
+    double mpStationaryFlowTol = 0.8;
+    bool mpStationaryEnableStartLatch = false;
+    int mpStationaryLatchFrames = 3;
+    int mpStationaryLatchMisses = 0;
+    bool mpStationaryLatchOpen = true;
     typename ImuData<Scalar>::Ptr imuData;
     // Deadline for the blocking pop, so a stack brought up without an inertial
     // publisher fails visibly instead of hanging.

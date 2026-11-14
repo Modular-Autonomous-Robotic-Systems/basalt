@@ -85,6 +85,18 @@ VioConfig::VioConfig() {
   vio_init_pose_weight = 1e8;
   vio_init_ba_weight = 1e1;
   vio_init_bg_weight = 1e2;
+  vio_init_accel_averaging = false;
+  vio_zero_velocity_weight = 0.0;
+
+  vio_stationary_enable_shoe = true;
+  vio_stationary_enable_mahalanobis = true;
+  vio_stationary_enable_flow = false;
+  vio_stationary_window_s = 0.5;
+  vio_stationary_glrt_tol = 6.6;
+  vio_stationary_min_consecutive_frames = 2;
+  vio_stationary_chisq_tol = 7.81;
+  vio_stationary_flow_tol = 0.8;
+  vio_stationary_enable_start_latch = false;
 
   vio_marg_lost_landmarks = true;
 
@@ -207,6 +219,19 @@ void serialize(Archive& ar, basalt::VioConfig& config) {
   ar(CEREAL_NVP(config.vio_init_pose_weight));
   ar(CEREAL_NVP(config.vio_init_ba_weight));
   ar(CEREAL_NVP(config.vio_init_bg_weight));
+  ar(CEREAL_NVP(config.vio_init_accel_averaging));
+  ar(CEREAL_NVP(config.vio_zero_velocity_weight));
+
+  ar(CEREAL_NVP(config.vio_stationary_enable_shoe));
+  ar(CEREAL_NVP(config.vio_stationary_enable_mahalanobis));
+  ar(CEREAL_NVP(config.vio_stationary_enable_flow));
+  ar(CEREAL_NVP(config.vio_stationary_window_s));
+  ar(CEREAL_NVP(config.vio_stationary_glrt_tol));
+  ar(CEREAL_NVP(config.vio_stationary_min_consecutive_frames));
+  ar(CEREAL_NVP(config.vio_stationary_chisq_tol));
+  ar(CEREAL_NVP(config.vio_stationary_flow_tol));
+  ar(CEREAL_NVP(config.vio_stationary_enable_start_latch));
+  ar(CEREAL_NVP(config.vio_stationary_latch_frames));
 
   ar(CEREAL_NVP(config.vio_marg_lost_landmarks));
   ar(CEREAL_NVP(config.vio_kf_marg_feature_ratio));

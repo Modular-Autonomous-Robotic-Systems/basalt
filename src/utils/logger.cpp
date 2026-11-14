@@ -337,7 +337,11 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"imu_queue", "count"}, {"skipped_behind", "count"},
               {"accel", "vec3"}, {"accel_norm", "f"}, {"gyro", "vec3"},
               {"gyro_norm", "f"}, {"bg", "vec3"}, {"ba", "vec3"},
-              {"g", "vec3"}, {"q_w_i", "vec4"}, {"tilt_deg", "f"}});
+              {"g", "vec3"}, {"q_w_i", "vec4"}, {"tilt_deg", "f"},
+              {"yaw_aligned", "flag"}, {"yaw_offset_rad", "f"},
+              {"gt_yaw_rad", "f"}, {"slam_yaw_rad", "f"},
+              {"accel_averaging", "flag"}, {"averaged", "count"},
+              {"accel_mean", "vec3"}, {"accel_mean_norm", "f"}});
 
     Register("vio_imu_frame", "[VIO][imu]",
              {{"t_ns", "ns"}, {"frame_dt", "ms"}, {"integrated", "count"},
@@ -345,7 +349,21 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"first_imu_ns", "ns"}, {"last_imu_ns", "ns"},
               {"coverage", "ratio"}, {"meas_dt", "ms"}, {"stretch", "flag"},
               {"stretch_span", "ms"}, {"imu_queue_in", "count"},
-              {"imu_queue_out", "count"}, {"head_minus_frame", "ms"}});
+              {"imu_queue_out", "count"}, {"head_minus_frame", "ms"},
+              {"accel_mean", "vec3"}, {"gyro_mean", "vec3"},
+              {"accel_deviation_max", "f"}, {"gyro_norm_max", "f"},
+              {"is_stationary", "flag"}});
+
+    Register("vio_stationary", "[VIO][stationary]",
+             {{"t_ns", "ns"}, {"enable_shoe", "flag"}, {"t_shoe", "f"},
+              {"window_samples", "count"}, {"run_length", "count"},
+              {"stage1", "flag"}, {"enable_mahalanobis", "flag"},
+              {"d2", "f"}, {"stage2", "flag"}, {"enable_flow", "flag"},
+              {"flow_mean", "f"}, {"stage3", "flag"},
+              {"is_stationary", "flag"}});
+
+    Register("vo_stationary", "[VO][stationary]",
+             {{"t_ns", "ns"}, {"flow_mean", "f"}, {"is_stationary", "flag"}});
 
     Register("vio_pose_update", "[VIO][pose-update]",
              {{"t_ns", "ns"}, {"pending", "count"}, {"applied", "count"},
@@ -683,7 +701,10 @@ void Logger::AddVioInit(int64_t tNs, int64_t imuTNs, int64_t imuQueue,
                         const Eigen::Vector3d& gyro,
                         const Eigen::Vector3d& bg, const Eigen::Vector3d& ba,
                         const Eigen::Vector3d& g, const Eigen::Vector4d& qWI,
-                        double tiltDeg) {
+                        double tiltDeg, bool yawAligned, double yawOffsetRad,
+                        double gtYawRad, double slamYawRad,
+                        bool accelAveraging, int numAccelAveraged,
+                        const Eigen::Vector3d& accelMean) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_init");
     s.add_int("t_ns", tNs);
@@ -700,6 +721,14 @@ void Logger::AddVioInit(int64_t tNs, int64_t imuTNs, int64_t imuQueue,
     s.add("g", Eigen::VectorXd(g));
     s.add("q_w_i", Eigen::VectorXd(qWI));
     s.add("tilt_deg", tiltDeg);
+    s.add("yaw_aligned", yawAligned ? 1.0 : 0.0);
+    s.add("yaw_offset_rad", yawAligned ? yawOffsetRad : -999.0);
+    s.add("gt_yaw_rad", yawAligned ? gtYawRad : -999.0);
+    s.add("slam_yaw_rad", yawAligned ? slamYawRad : -999.0);
+    s.add("accel_averaging", accelAveraging ? 1.0 : 0.0);
+    s.add_int("averaged", numAccelAveraged);
+    s.add("accel_mean", Eigen::VectorXd(accelMean));
+    s.add("accel_mean_norm", accelMean.norm());
     s.CommitRow();
 }
 
@@ -710,7 +739,11 @@ void Logger::AddVioImuFrame(int64_t tNs, double frameDt, int integrated,
                             int64_t firstImuNs, int64_t lastImuNs,
                             double coverage, double measDt, bool stretch,
                             double stretchSpan, int imuQueueIn,
-                            int imuQueueOut, double headMinusFrame) {
+                            int imuQueueOut, double headMinusFrame,
+                            const Eigen::Vector3d& accelMean,
+                            const Eigen::Vector3d& gyroMean,
+                            double accelDeviationMax, double gyroNormMax,
+                            bool isStationary) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_imu_frame");
     s.add_int("t_ns", tNs);
@@ -727,11 +760,51 @@ void Logger::AddVioImuFrame(int64_t tNs, double frameDt, int integrated,
     s.add("imu_queue_in", double(imuQueueIn));
     s.add("imu_queue_out", double(imuQueueOut));
     s.add("head_minus_frame", headMinusFrame);
+    s.add("accel_mean", Eigen::VectorXd(accelMean));
+    s.add("gyro_mean", Eigen::VectorXd(gyroMean));
+    s.add("accel_deviation_max", accelDeviationMax);
+    s.add("gyro_norm_max", gyroNormMax);
+    s.add("is_stationary", isStationary ? 1.0 : 0.0);
     s.CommitRow();
 }
 
 void Logger::PrintVioImuFrame() { Emit("vio_imu_frame"); }
 
+void Logger::AddVioStationary(int64_t tNs, bool enableShoe, double tShoe,
+                              int windowSamples, int runLength, bool stage1,
+                              bool enableMahalanobis, double d2, bool stage2,
+                              bool enableFlow, double flowMean, bool stage3,
+                              bool isStationary) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_stationary");
+    s.add_int("t_ns", tNs);
+    s.add("enable_shoe", enableShoe ? 1.0 : 0.0);
+    s.add("t_shoe", tShoe);
+    s.add("window_samples", double(windowSamples));
+    s.add("run_length", double(runLength));
+    s.add("stage1", stage1 ? 1.0 : 0.0);
+    s.add("enable_mahalanobis", enableMahalanobis ? 1.0 : 0.0);
+    s.add("d2", d2);
+    s.add("stage2", stage2 ? 1.0 : 0.0);
+    s.add("enable_flow", enableFlow ? 1.0 : 0.0);
+    s.add("flow_mean", flowMean);
+    s.add("stage3", stage3 ? 1.0 : 0.0);
+    s.add("is_stationary", isStationary ? 1.0 : 0.0);
+    s.CommitRow();
+}
+
+void Logger::PrintVioStationary() { Emit("vio_stationary"); }
+
+void Logger::AddVoStationary(int64_t tNs, double flowMean, bool isStationary) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vo_stationary");
+    s.add_int("t_ns", tNs);
+    s.add("flow_mean", flowMean);
+    s.add("is_stationary", isStationary ? 1.0 : 0.0);
+    s.CommitRow();
+}
+
+void Logger::PrintVoStationary() { Emit("vo_stationary"); }
 
 void Logger::AddVioPoseUpdate(int64_t tNs, int pending, int applied,
                               int rejected, double maxTransErr,

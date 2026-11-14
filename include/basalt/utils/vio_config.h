@@ -89,6 +89,41 @@ struct VioConfig {
     double vio_init_pose_weight;
     double vio_init_ba_weight;
     double vio_init_bg_weight;
+    // Seed the initial attitude from the mean of the inertial samples skipped
+    // before the first frame rather than from the last of them. False
+    // reproduces the single sample seed of every earlier configuration.
+    // Suggested true, which divides the 0.89 degree tilt noise of one sample
+    // by sqrt(N). See plans/vio_drift_analysis.md Phase 3a.
+    bool vio_init_accel_averaging;
+    // Weight 1 / sigma_v of the zero velocity constraint applied to the newest
+    // state while the stationarity test passes. Zero leaves it inactive.
+    // Suggested 100, that is sigma_v = 0.01 m/s for a vehicle on the ground,
+    // three orders below the 1e4 position anchor so it cannot dominate the
+    // conditioning of the dense system. See plans/vio_drift_analysis.md
+    // Phase 3b.
+    double vio_zero_velocity_weight;
+
+    // Independently gated stationary body detector stages, combined by
+    // logical AND into mpIsStationary.
+    bool vio_stationary_enable_shoe;
+    bool vio_stationary_enable_mahalanobis;
+    bool vio_stationary_enable_flow;
+    // Ring buffer span in seconds for the windowed SHOE statistic, and its
+    // chi-squared critical value.
+    double vio_stationary_window_s;
+    double vio_stationary_glrt_tol;
+    // Consecutive clearing windows required before the SHOE stage latches.
+    int vio_stationary_min_consecutive_frames;
+    // Chi-squared(3) critical value for the Mahalanobis stage.
+    double vio_stationary_chisq_tol;
+    // Optical flow magnitude veto threshold in pixels.
+    double vio_stationary_flow_tol;
+    // One-way start latch, plans/stationary_detection.md change 8. Once
+    // vio_stationary_latch_frames consecutive frames are non-stationary, no
+    // later frame is stationary for the rest of the run. Suggested true with
+    // 3 frames on platforms that only rest before take-off.
+    bool vio_stationary_enable_start_latch;
+    int vio_stationary_latch_frames;
 
     bool vio_marg_lost_landmarks;
     double vio_kf_marg_feature_ratio;

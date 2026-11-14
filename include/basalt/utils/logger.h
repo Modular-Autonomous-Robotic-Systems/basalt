@@ -157,15 +157,34 @@ public:
                     int64_t skippedBehind, const Eigen::Vector3d& accel,
                     const Eigen::Vector3d& gyro, const Eigen::Vector3d& bg,
                     const Eigen::Vector3d& ba, const Eigen::Vector3d& g,
-                    const Eigen::Vector4d& qWI, double tiltDeg);
+                    const Eigen::Vector4d& qWI, double tiltDeg,
+                    bool yawAligned, double yawOffsetRad, double gtYawRad,
+                    double slamYawRad, bool accelAveraging = false,
+                    int numAccelAveraged = 1,
+                    const Eigen::Vector3d& accelMean = Eigen::Vector3d::Zero());
     void PrintVioInit();
 
     void AddVioImuFrame(int64_t tNs, double frameDt, int integrated,
                         int expected, int skippedBehind, int64_t firstImuNs,
                         int64_t lastImuNs, double coverage, double measDt,
                         bool stretch, double stretchSpan, int imuQueueIn,
-                        int imuQueueOut, double headMinusFrame);
+                        int imuQueueOut, double headMinusFrame,
+                        const Eigen::Vector3d& accelMean,
+                        const Eigen::Vector3d& gyroMean,
+                        double accelDeviationMax, double gyroNormMax,
+                        bool isStationary);
     void PrintVioImuFrame();
+
+    // ── Stationary detector ──────────────────────────────────────────
+    void AddVioStationary(int64_t tNs, bool enableShoe, double tShoe,
+                          int windowSamples, int runLength, bool stage1,
+                          bool enableMahalanobis, double d2, bool stage2,
+                          bool enableFlow, double flowMean, bool stage3,
+                          bool isStationary);
+    void PrintVioStationary();
+
+    void AddVoStationary(int64_t tNs, double flowMean, bool isStationary);
+    void PrintVoStationary();
 
     void AddVioPoseUpdate(int64_t tNs, int pending, int applied, int rejected,
                          double maxTransErr, double maxRotErr,

@@ -794,21 +794,41 @@ The initialisation branch already discards every inertial sample older than the 
         Vec3 vel_w_i_init;
         vel_w_i_init.setZero();
 
-        // The gravity reference is the mean of the discarded samples rather
-        // than the last of them. One sample carries 0.1521 m/s^2 of noise per
-        // axis, which is 0.89 degrees of tilt, and the mean of N reduces that
-        // by sqrt(N). See plans/vio_drift_analysis.md section 2.2.3.
+        // One sample carries 0.1521 m/s^2 of noise per axis, 0.89 degrees of
+        // tilt, which the mean of N reduces by sqrt(N). See
+        // plans/vio_drift_analysis.md section 2.2.3.
+        const Vec3 accelMean = accelSum / Scalar(numAccelAveraged);
+        const Vec3 gravityReference =
+            config.vio_init_accel_averaging ? accelMean : imuData->accel;
         T_w_i_init.setQuaternion(Eigen::Quaternion<Scalar>::FromTwoVectors(
-            accelSum / Scalar(numAccelAveraged), Vec3::UnitZ()));
+            gravityReference, Vec3::UnitZ()));
 ```
 
-and the initialisation record should report what was averaged,
+The averaging is gated by a new configuration field so that it can be switched on and off for an ablation study. In `include/basalt/utils/vio_config.h`, beside `vio_init_bg_weight`,
 
 ```cpp
-            std::cout << "[VIO] init: skipped_behind=" << numImuSkippedBehind
-                      << " averaged=" << numAccelAveraged
-                      << " accel_mean=" << (accelSum / Scalar(numAccelAveraged)).transpose()
+    // Seed the initial attitude from the mean of the inertial samples skipped
+    // before the first frame rather than from the last of them. False
+    // reproduces the single sample seed of every earlier configuration.
+    // Suggested true, which divides the 0.89 degree tilt noise of one sample
+    // by sqrt(N). See plans/vio_drift_analysis.md Phase 3a.
+    bool vio_init_accel_averaging;
 ```
+
+with `vio_init_accel_averaging = false;` in `VioConfig::VioConfig` and `ar(CEREAL_NVP(config.vio_init_accel_averaging));` in `serialize`, both beside `vio_init_bg_weight`.
+
+The `vio_init` record of `Logger::AddVioInit` reports what was averaged, through four trailing parameters whose defaults leave any other caller unchanged, and four columns appended after `slam_yaw_rad` and registered in the `vio_init` registry of `src/utils/logger.cpp`,
+
+```cpp
+    s.add("accel_averaging", accelAveraging ? 1.0 : 0.0);
+    s.add_int("averaged", numAccelAveraged);
+    s.add("accel_mean", Eigen::VectorXd(accelMean));
+    s.add("accel_mean_norm", accelMean.norm());
+```
+
+The mean is accumulated and logged whether or not the gate is set, so a run with averaging disabled still records the reference that averaging would have produced. The existing `accel` and `accel_norm` columns keep their meaning, the single sample at or after the first frame.
+
+Note, 2026-10-03. This section previously gave the averaged reference unconditionally and reported it through a `std::cout` record. It is now gated by `vio_init_accel_averaging` for ablation, and reported through `Logger::AddVioInit`, which replaced the console record when the logging system landed.
 
 ##### Justification
 
@@ -818,7 +838,7 @@ The two flights discarded 13 and 5 samples, so the free improvement is a factor 
 
 ##### Implementation
 
-One function, no interface change, no configuration change, no effect on any other caller. `numAccelAveraged` starts at one and `accelSum` at the sample already held, because that sample is not re popped by the loop.
+One branch of `ProcessFrame`, one configuration field and four appended log columns. `numAccelAveraged` starts at one and `accelSum` at the sample already held, because that sample is not re popped by the loop. The field defaults to false in the constructor and in all eight configuration sources, the seven `data/*config*.json` files and `data/iccv21/basalt_batch_config.toml`, so no existing run changes until a configuration opts in. Note, 2026-10-03. This paragraph previously read "no interface change, no configuration change", which held only before the ablation gate was added.
 
 ##### Interpretation
 
@@ -835,38 +855,52 @@ A zero velocity residual on the newest state, active only while a stationarity t
 ```cpp
                     lqr->get_dense_H_b(H, b);
 
-                    // Zero velocity constraint. Only the most recent state is
-                    // constrained, because the stationarity test is evaluated
-                    // on the inertial samples of the current frame alone.
-                    if (mpZeroVelocityWeight > 0 && mpIsStationary) {
-                        const auto& idx =
-                            aom.abs_order_map.at(last_state_t_ns);
-                        const int vi = idx.first + 6;
-                        const Scalar w2 = mpZeroVelocityWeight *
-                                          mpZeroVelocityWeight;
-                        H.template block<3, 3>(vi, vi).diagonal().array() += w2;
+                    // Zero velocity residual r = w v_w_i on the newest state,
+                    // the only one the per frame stationarity test describes.
+                    // The velocity block sits at offset 6 of the tangent
+                    // ordering [trans, rot, vel, bias_gyro, bias_accel].
+                    if (applyZeroVelocity) {
+                        const int vi =
+                            aom.abs_order_map.at(last_state_t_ns).first + 6;
+                        H.template block<3, 3>(vi, vi).diagonal().array() +=
+                            zeroVelocityW2;
                         b.template segment<3>(vi) +=
-                            w2 * frame_states.at(last_state_t_ns)
-                                     .getState()
-                                     .vel_w_i;
+                            zeroVelocityW2 * frame_states.at(last_state_t_ns)
+                                                 .getState()
+                                                 .vel_w_i;
                     }
 ```
 
-The velocity block sits at offset six within a `POSE_VEL_BIAS_SIZE` entry, by the tangent ordering `[trans, rot, vel, bias_gyro, bias_accel]` of `PoseVelBiasState::applyInc`, which is the authoritative statement and the same ordering the transposition of section 1.3 turns on.
+The gate `applyZeroVelocity = mpZeroVelocityWeight > 0 && mpIsStationary` and the squared weight `zeroVelocityW2` are computed once per outer iteration of `optimize`, because the same term must also enter the step acceptance test, as derived in the section on step acceptance below.
 
-The stationarity test is evaluated once per frame in `ProcessFrame`, over the samples integrated for that frame in the loop at `sqrt_keypoint_vio.cpp:336-349`,
+The weight is held on `class SqrtKeypointVioEstimator` beside the stationarity members in `include/basalt/vi_estimator/sqrt_keypoint_vio.h`, as `Scalar mpZeroVelocityWeight = Scalar(0);`, and set in the constructor from `config.vio_zero_velocity_weight`. In `include/basalt/utils/vio_config.h`, beside `vio_init_accel_averaging`,
 
 ```cpp
-    // A frame is stationary when the specific force magnitude sits close to
-    // gravity and the angular rate is small, over every sample of the frame.
-    // Thresholds are several times the per sample noise of 0.1521 m/s^2 and
-    // 7.518e-3 rad/s implied by the calibration.
-    mpIsStationary = numImuIntegrated > 0 &&
-                     accelDeviationMax < mpStationaryAccelTol &&
-                     gyroNormMax < mpStationaryGyroTol;
+    // Weight 1 / sigma_v of the zero velocity constraint applied to the newest
+    // state while the stationarity test passes. Zero leaves it inactive.
+    // Suggested 100, that is sigma_v = 0.01 m/s for a vehicle on the ground,
+    // three orders below the 1e4 position anchor so it cannot dominate the
+    // conditioning of the dense system. See plans/vio_drift_analysis.md
+    // Phase 3b.
+    double vio_zero_velocity_weight;
 ```
 
-with `mpStationaryAccelTol = 0.5` m/s^2, `mpStationaryGyroTol = 0.05` rad/s and `mpZeroVelocityWeight` defaulting to zero so the mechanism is inactive until a configuration enables it. Exposing the weight as `vio_zero_velocity_weight` follows the recipe of Phase 2, including the obligation to add the key to all eight configuration sources.
+with `vio_zero_velocity_weight = 0.0;` in `VioConfig::VioConfig` and `ar(CEREAL_NVP(config.vio_zero_velocity_weight));` in `serialize`. All eight configuration sources carry `"config.vio_zero_velocity_weight": 0.0`, and the value to set when enabling the constraint is `100`. The suggestion lives in the header comment, because the cereal parser is built with `kParseFullPrecisionFlag | kParseNanAndInfFlag` and without `kParseCommentsFlag`, and `scripts/analysis/metrics.py` reads the same files with Python `json`, so a comment in a configuration file would abort both.
+
+The velocity block sits at offset six within a `POSE_VEL_BIAS_SIZE` entry, by the tangent ordering `[trans, rot, vel, bias_gyro, bias_accel]` of `PoseVelBiasState::applyInc`, which is the authoritative statement and the same ordering the transposition of section 1.3 turns on.
+
+The stationarity test is evaluated once per frame in `ProcessFrame`, over the samples integrated for that frame in the loop at `sqrt_keypoint_vio.cpp:386-416`, and is a three-stage detector rather than the single-frame specific-force-and-angular-rate test this plan originally described. Note, 2026-10-19. The single-frame test shown in earlier revisions of this plan, comparing `accelDeviationMax`/`gyroNormMax` against `mpStationaryAccelTol`/`mpStationaryGyroTol`, measured 93 to 99% of its flagged-stationary frames as truly moving across all eight logged experiments, since specific force and angular rate alone cannot distinguish true rest from constant velocity cruise. `plans/stationary_detection.md` replaces it with a growing window SHOE statistic (`tShoe` against `mpStationaryGlrtTol`, persisted over `mpStationaryMinConsecutiveFrames` windows), a chi-squared Mahalanobis test on `IntegratedImuMeasurement::predictState`'s predicted velocity (`d2` against `mpStationaryChiSqTol`), and an optical flow magnitude veto (`curr_frame->mFlowPxMean` against `mpStationaryFlowTol`), ANDed together and each independently gated by a `VioConfig` boolean,
+
+```cpp
+        mpIsStationary =
+            (!mpStationaryEnableShoe || stage1) &&
+            (!mpStationaryEnableMahalanobis || stage2) &&
+            (!mpStationaryEnableFlow || stage3) &&
+            (mpStationaryEnableShoe || mpStationaryEnableMahalanobis ||
+             mpStationaryEnableFlow);
+```
+
+with `mpZeroVelocityWeight` still defaulting to zero so the constraint below is inactive until a configuration enables it. Exposing the weight as `vio_zero_velocity_weight` follows the recipe of Phase 2, including the obligation to add the key to all eight configuration sources, a precedent `plans/stationary_detection.md` itself follows for the eight new detector fields.
 
 ##### Justification
 
@@ -874,11 +908,255 @@ Section 2.2.3 and root cause R3. This does not remove the confound, and the plan
 
 The weight is chosen rather than guessed. Treating the constraint as a measurement of standard deviation `sigma_v`, the weight is `1 / sigma_v`. A vehicle on the ground is stationary to well under a centimetre per second, so `sigma_v = 0.01` and `w = 100` is defensible and sits three orders of magnitude below the `1e4` of the position anchor, so it does not dominate the conditioning of the dense system.
 
-The thresholds deserve a check against the data. The two flights show a stationary specific force magnitude of 9.94 and a gyroscope norm of 0.0084 to 0.0092 rad/s, against thresholds of 0.5 and 0.05, so the test will latch true on the ground with ample margin. During the climb the specific force reaches 11.7 and during the spline the gyroscope reaches 0.32 rad/s, both far outside, so a false positive in flight is implausible.
+Note, 2026-10-19. The paragraph above checked this plan's original single-frame thresholds, 0.5 m/s^2 and 0.05 rad/s, against the two SITL flights available at the time and found ample margin on the ground and no plausible in-flight false positive. `context/stationary_detection.md` section 3 later measured those same defaults against all eight logged experiments and found a 0.549 false positive rate, the two-flight check above was not wrong about those two flights, it simply did not have enough data to see the tuning defect a wider campaign exposed. `plans/stationary_detection.md` section 9 redoes this check for the new detector's own thresholds across all eight experiments rather than two.
 
 ##### Implementation
 
-Four members on `class SqrtKeypointVioEstimator`, one configuration field, one test in `ProcessFrame` and one block in `optimize`. The test needs the maximum deviation of the specific force magnitude from gravity and the maximum angular rate over the samples integrated for the frame, both accumulated in the existing integration loop at negligible cost. The guard `mpZeroVelocityWeight > 0` preserves backwards compatibility, so no existing configuration changes behaviour and no historical comparison is invalidated.
+Note, 2026-10-19. The stationarity test itself, originally four members, one configuration field and one test in `ProcessFrame`, is now the three-stage detector of `plans/stationary_detection.md`, with its own members and eight configuration fields detailed there. The zero velocity constraint this section is otherwise about is unchanged by that replacement, one block on `H` and `b` in `optimize` together with three additions that keep step acceptance consistent with it. Note, 2026-10-04. This previously read one block in `optimize`, before the step acceptance defect described below was fixed. The accelerometer and gyroscope maxima the original test compared against its thresholds are still accumulated in the integration loop at negligible cost, now purely for the `vio_imu_frame.csv` diagnostic log rather than for the stationarity decision itself. The guard `mpZeroVelocityWeight > 0` preserves backwards compatibility, so no existing configuration changes behaviour and no historical comparison is invalidated.
+
+##### What the constraint adds to the optimisation step
+
+This section derives the two lines of the block in `optimize` from a residual, shows what they do to the step through a Schur complement, and traces how a constraint on velocity alone reaches the position and the accelerometer bias. The notation is reused by the defect analysis that follows.
+
+###### The residual as a measurement
+
+The constraint is a pseudo measurement that the velocity of the newest state is zero, with isotropic standard deviation `sigma_v`. Its whitened residual and cost are
+
+```
+r_z = w v,          w = 1 / sigma_v,          v = vel_w_i of the state at last_state_t_ns
+Z   = 0.5 ||r_z||^2 = 0.5 w^2 ||v||^2
+```
+
+`Z` is the negative log likelihood of `v ~ N(0, sigma_v^2 I)` up to a constant, which is why the weight is `1 / sigma_v` and why `sigma_v = 0.01` m/s gives `w = 100`. The factor of one half matches every other cost in the solver.
+
+###### Its Jacobian and its contribution to H and b
+
+The state is updated in the tangent ordering `[trans, rot, vel, bias_gyro, bias_accel]`, and the velocity part of the update is additive, `vel_w_i += inc.template tail<3>()` in `PoseVelState::applyInc` at `thirdparty/basalt-headers/include/basalt/imu/imu_types.h:143-146`. Let `P` be the `3 x N` selector that picks the three velocity coordinates of the newest state from the full increment, which is the identity at columns `vi .. vi+2` with `vi = aom.abs_order_map.at(last_state_t_ns).first + 6` and zero elsewhere. Then
+
+```
+r_z(x + d) = w (v + P d)          exactly, not to first order
+J_z        = w P
+J_z^T J_z  = w^2 P^T P            a w^2 I_3 block on the velocity diagonal
+J_z^T r_z  = w^2 P^T v            w^2 v in the velocity rows of b
+```
+
+These are the two lines of the block, `H.block<3,3>(vi,vi).diagonal() += w2` and `b.segment<3>(vi) += w2 * vel_w_i`. Under the convention `H d = -b` stated at `src/vi_estimator/ba_base.cpp:424-441`, the undamped step of the augmented system is
+
+```
+(H0 + w^2 P^T P) d = -(g0 + w^2 P^T v)
+```
+
+where `H0` and `g0` are the reduced system returned by `get_dense_H_b`, with landmarks already eliminated.
+
+###### The effect on the velocity, through the Schur complement
+
+Partition the increment into the velocity of the newest state, `d_v`, and everything else, `d_r`, which holds the other states' poses, velocities and biases. Eliminating `d_r` gives the information and gradient that the rest of the problem expresses about `v` alone,
+
+```
+S = H0_vv - H0_vr H0_rr^{-1} H0_rv          marginal information on v from F0
+s = g0_v  - H0_vr H0_rr^{-1} g0_r           marginal gradient on v from F0
+v_hat = v - S^{-1} s                        the velocity F0 alone would choose
+```
+
+Without the constraint the step lands on `v_hat`. With it, the reduced velocity equation is `(S + w^2 I) d_v = -(s + w^2 v)`, and the new velocity simplifies to
+
+```
+v + d_v = (S + w^2 I)^{-1} S v_hat
+```
+
+This is the information weighted mean of two estimates of `v`, the inertial and visual estimate `v_hat` with information `S` and the zero measurement with information `w^2 I`. Along each eigendirection of `S` with eigenvalue `s_i`, the component of `v_hat` is multiplied by `s_i / (s_i + w^2)`. A direction the rest of the problem already knows well, `s_i >> w^2`, is left almost untouched. A direction it barely knows, `s_i << w^2`, is driven to zero. The constraint therefore acts most strongly where the estimator has least to say, which is the property wanted on a stationary vehicle whose velocity is weakly observed.
+
+###### The effect on the other states
+
+The remaining coordinates follow from back substitution,
+
+```
+d_r = -H0_rr^{-1} (g0_r + H0_rv d_v)
+```
+
+so every state correlated with the newest velocity moves with it. The coupling that matters is the velocity row of the inertial residual between the previous state `0` and the newest state `1`, at `thirdparty/basalt-headers/include/basalt/imu/preintegration.h:247-252`,
+
+```
+r_vel = R0^T (v1 - v0 - g dt) - ( dv_meas + J_ba (ba - ba_lin) + J_bg (bg - bg_lin) )
+```
+
+where `J_ba` is the velocity block of `d_state_d_ba_`, approximately `-dt I` for a vehicle that does not rotate, since the preintegrated rotation is then close to the identity. On the ground the constraint pins `v1` near zero, and on the previous frame it pinned `v0` near zero while that state was newest. The residual then reduces to
+
+```
+r_vel ≈ R0^T (-g dt) - dv_meas + dt (ba - ba_lin)
+```
+
+which no longer leaves room for a velocity that grows linearly in time. That is the mechanism of the justification above. Without the constraint, a vertical accelerometer bias error `e` is absorbed by the family `v(t) = e t`, `p(t) = 0.5 e t^2`, which satisfies every inertial factor exactly and is contradicted only by weak visual parallax. With the constraint, each member of that family costs `0.5 w^2 ||e t||^2` on every frame, so the error has to be expressed through the bias term `dt (ba - ba_lin)` or the attitude in `R0` instead.
+
+The constraint does not choose between those two, since both enter `r_vel` through the same combination of tilt and specific force that section 2.2.3 identifies as confounded. What it removes is the third and most damaging outlet, the free drift in velocity and position. That is also why Phase 3b is paired with the parallax gate of Phase 2 rather than claimed to resolve R3 on its own.
+
+###### Which states are constrained, and for how long
+
+Only the newest state is constrained in any one call of `optimize`. When the next frame arrives, the previous state is no longer at `last_state_t_ns` and its constraint is dropped, although the inertial factor still ties it to the newly constrained state. Through the window, one velocity is held near zero directly and the others are held near zero by inertial factors that the stationary vehicle makes nearly rigid. The term never enters `marginalize`, so its information leaves the problem with the frame. The final subsection of the defect analysis below expands on that consequence.
+
+###### A side effect on damping
+
+The damping at `:1692-1695` is computed from `H.diagonal()` after the block has run, `Hdiag_lambda = (H.diagonal() * lambda).cwiseMax(min_lambda)`. On the three velocity coordinates of the newest state it therefore grows by `lambda w^2`. At the SITL value `vio_lm_lambda_initial = 1e-4` and `w = 100` that is an extra `1` on a diagonal already carrying `w^2 = 1e4`, which is negligible. It rises with `lambda` on rejected steps, which compounded the defect described next until it was fixed.
+
+##### Step acceptance must see the constraint, a defect found and fixed
+
+The Levenberg Marquardt loop of `optimize` decides whether to keep each step from three scalars, `error_total`, `l_diff` and `after_error_total`. The zero velocity cost enters all three as well as `H` and `b`, so the step is judged against the same objective it was solved for. This section records why that is necessary. It derives what goes wrong when the term enters the linear system alone, shows that damping cannot resolve it, and gives the fix as applied. Note, 2026-10-04. The first implementation of Phase 3b added the term to `H` and `b` only, which is the defect analysed below. It was dormant at the default weight of zero and was fixed before any configuration enabled the constraint.
+
+###### How the loop accepts a step
+
+The three scalars are produced at these points of `src/vi_estimator/sqrt_keypoint_vio.cpp`, shown here without the zero velocity terms of the fix, with line numbers as of 2026-10-04 after the fix.
+
+```cpp
+// :1550, cost at the linearisation point, vision + inertial + bias + marginalisation prior
+error_total = lqr->linearizeProblem(&numerically_valid);
+
+// :1730, predicted decrease of the quadratic model, summed over landmark,
+// inertial and prior blocks only
+l_diff = lqr->backSubstitute(inc);
+
+// :1800, cost after the step, from computeError, computeMargPriorError and computeImuError
+Scalar after_error_total =
+    after_update_vision_and_inertial_error +
+    after_update_marg_prior_error;
+
+// :1816-1831
+f_diff = error_total - after_error_total;
+relative_decrease = f_diff / l_diff;
+step_is_valid = l_diff > 0;
+step_is_successful = step_is_valid && relative_decrease > 0;
+```
+
+A rejected step is undone by `restore()` and the damping is raised, `lambda = lambda_vee * lambda; lambda_vee *= vee_factor;`, until `lambda > max_lambda` terminates the loop at `:1914`. Every cost in this solver carries a factor of one half, as stated in the model cost derivations of `include/basalt/linearization/imu_block.hpp:210-219` and `BundleAdjustmentBase::computeMargPriorModelCostChange` in `src/vi_estimator/ba_base.cpp:506-531`, so that `F = 0.5 ||r||^2`, `H = J^T J` and `b = J^T r`.
+
+###### The two objectives
+
+Write `F0(x)` for the cost the loop measures, and `Z(x)` for the zero velocity cost on the velocity `v` of the newest state, with `P` the selector of its three velocity coordinates,
+
+```
+F0(x)   = vision + inertial + bias + marginalisation prior
+Z(x)    = 0.5 * w^2 * ||v||^2,          v = P x
+F(x)    = F0(x) + Z(x)                  the objective the constraint intends
+```
+
+Around the current estimate, with `g0 = b` and `H0 = H` as returned by `get_dense_H_b`, the two quadratic models are
+
+```
+L0(d) = F0(x) + d^T g0 + 0.5 d^T H0 d
+LZ(d) = Z(x)  + w^2 d_v^T v + 0.5 w^2 ||d_v||^2,      d_v = P d
+```
+
+The second is exact rather than approximate, because `Z` is quadratic in `v` and `PoseVelState::applyInc` updates the velocity additively, `vel_w_i += inc.template tail<3>()`, at `thirdparty/basalt-headers/include/basalt/imu/imu_types.h:143-146`.
+
+The block in `optimize` adds `w^2 P^T P` to `H` and `w^2 P^T v` to `b`, so the damped solve returns the minimiser of the combined model,
+
+```
+d = -(H0 + w^2 P^T P + Lambda)^{-1} (g0 + w^2 P^T v),
+Lambda = diag( max(lambda * diag(H0 + w^2 P^T P), min_lambda) )
+```
+
+and the predicted decreases of the two parts are
+
+```
+l0(d) = L0(0) - L0(d) = -d^T g0 - 0.5 d^T H0 d
+lZ(d) = LZ(0) - LZ(d) = -w^2 d_v^T (v + 0.5 d_v)
+```
+
+Because `d` minimises the damped sum, `l0 + lZ >= 0.5 d^T Lambda d > 0` for any nonzero step. That guarantee holds for the sum alone. Without the fix, the loop computes `l_diff = l0` and `f_diff = F0(x) - F0(x + d)`. Whenever the constraint pulls the velocity against the direction `F0` prefers, the step buys a decrease in `Z` with an increase in `F0`, `l0` turns negative, `step_is_valid` is false, and the step is rejected although it lowers `F`.
+
+###### Damping cannot rescue the step
+
+Raising `lambda` is the loop's only response to a rejection. For large damping the step tends to a scaled gradient step on the combined model,
+
+```
+d ≈ -Lambda^{-1} (g0 + w^2 P^T v)
+l0 ≈ (g0 + w^2 P^T v)^T Lambda^{-1} g0
+```
+
+Both terms scale as `1 / lambda`, so the sign of `l0` is independent of `lambda`. It is negative whenever `w^2 v^T P Lambda^{-1} g0 < -g0^T Lambda^{-1} g0`, that is whenever the constraint gradient, projected onto `g0`, opposes it and exceeds it. In that regime every damped retry is rejected as well, and the loop runs until `lambda > max_lambda`.
+
+###### A worked example in one dimension
+
+Take one velocity coordinate, with `F0 = 0.5 h (v - v*)^2`, where `v*` is the velocity the inertial and visual terms prefer, and `Z = 0.5 w^2 v^2`. This is the situation Phase 3b exists for, since a vertical accelerometer bias error makes the inertial factors prefer a nonzero `v*` on a stationary vehicle. The combined optimum is `v_aug = h v* / (h + w^2)`. Take `w^2 = 9 h`, `v* = 0.02` m/s, so that `v_aug = 0.002` m/s, and let the newest state start at `v0 = 0.01` m/s, the value propagated by `predictState` at `:582` from a previous state the constraint has partly pulled towards zero.
+
+```
+g0              = h (v0 - v*)               = -0.01 h
+step, lambda=0  d = -(g0 + w^2 v0)/(h + w^2) = -(-0.01h + 0.09h)/(10h) = -0.008
+v1              = v0 + d                    = 0.002 = v_aug
+
+F0(v0) = 0.5 h (0.01)^2  = 5.0e-5 h
+F0(v1) = 0.5 h (0.018)^2 = 1.62e-4 h
+f_diff = l_diff          = -1.12e-4 h          rejected, step_is_valid = false
+
+F(v0)  = 5.0e-5 h  + 0.5 (9h)(0.01)^2  = 5.0e-4 h
+F(v1)  = 1.62e-4 h + 0.5 (9h)(0.002)^2 = 1.8e-4 h
+decrease of F = 3.2e-4 h, ratio to the combined model decrease = 1    the step a correct test accepts
+```
+
+With damping, `diag(H) = 10 h`, so `d(lambda) = -0.08 h / (10 h (1 + lambda)) = -0.008 / (1 + lambda)`. That step is negative for every `lambda`, and so is `l0 = -d g0 - 0.5 h d^2`. Starting from the SITL values `vio_lm_lambda_initial = 1e-4` and `vio_lm_lambda_max = 1e2`, with `initial_vee = vee_factor = 2` at `include/basalt/vi_estimator/sqrt_keypoint_vio.h:272-273`, the rejections drive `lambda` through `2e-4, 8e-4, 6.4e-3, 0.1024, 3.2768, 209.7`. The sixth exceeds `max_lambda` and terminates the loop with the velocity still at `v0 = 0.01` m/s, which is neither the inertial preference nor the constrained optimum.
+
+###### Consequences without the fix
+
+1. The constraint acts only where it agrees with `F0`. A step towards zero velocity survives only if `F0` happens to decrease as well, for example because the same step also reduces vision or prior residuals by more than it costs the inertial term. In the case it is designed for, a bias induced velocity that the inertial factors endorse, it is suppressed.
+2. The velocity stalls at whatever value prediction and earlier accepted steps left it. The outcome therefore depends on the iteration path rather than on the objective, which makes `st_v_norm` hard to interpret and an ablation against `vio_zero_velocity_weight = 0` unrepeatable in its detail.
+3. Each affected frame spends up to six full solves, back substitutions and error evaluations on rejected steps before termination, against the `vio_max_iterations = 7` budget. Pose and landmark updates that would have come from those iterations are lost too.
+4. On steps that are accepted, `relative_decrease = f_diff / l_diff` compares two quantities that omit `Z`, so the damping update at `:1874-1877` is driven by a gain ratio that misdescribes the model actually solved.
+5. The `vio_solver_iter` record shows the symptom directly, as runs of `status = 1` with `l_diff <= 0` on stationary frames, a rising `lambda`, and a `num_it_rejected` that is high on the ground and falls to its usual level after takeoff. That pattern is the check to apply to the first run with the weight set, where its absence confirms the fix.
+
+###### The fix as applied
+
+The test becomes consistent once `Z` is added to all three scalars, with the same gate as the block in `optimize`. Because `LZ` is exact, the constraint contributes a gain ratio of exactly one and leaves the existing ratio of the other terms unchanged. Three insertions suffice, all inside `optimize`, and the `H` and `b` block shares their gate.
+
+After the linearisation block that calls `linearizeProblem` at `:1550` closes, and before `AddVioLinearise`, the gate is computed once per outer iteration and the cost at the linearisation point is added, at `:1579-1591`,
+
+```cpp
+            // The zero velocity cost enters error_total, l_diff and
+            // after_error_total as well as H and b, so that step acceptance
+            // judges the objective the step was solved for. See
+            // plans/vio_drift_analysis.md Phase 3b, step acceptance.
+            const bool applyZeroVelocity =
+                mpZeroVelocityWeight > 0 && mpIsStationary;
+            const Scalar zeroVelocityW2 =
+                mpZeroVelocityWeight * mpZeroVelocityWeight;
+            if (applyZeroVelocity)
+                error_total += Scalar(0.5) * zeroVelocityW2 *
+                               frame_states.at(last_state_t_ns)
+                                   .getState()
+                                   .vel_w_i.squaredNorm();
+```
+
+The `H` and `b` block at `:1671` reads `applyZeroVelocity` and `zeroVelocityW2` rather than recomputing them. After `backSubstitute` at `:1730`, where `inc` has already been negated into the applied step and the state has not yet been incremented, the model decrease `lZ` is added. A rejected step is undone by `restore()` before the inner loop retries, so the velocity read here is always the value at the linearisation point.
+
+```cpp
+                    l_diff = lqr->backSubstitute(inc);
+                    // Exact model decrease of the zero velocity cost, read
+                    // before the increment is applied.
+                    if (applyZeroVelocity) {
+                        const int vi =
+                            aom.abs_order_map.at(last_state_t_ns).first + 6;
+                        const Vec3 dv = inc.template segment<3>(vi);
+                        const Vec3& v = frame_states.at(last_state_t_ns)
+                                            .getState()
+                                            .vel_w_i;
+                        l_diff -= zeroVelocityW2 * dv.dot(v + Scalar(0.5) * dv);
+                    }
+```
+
+After `after_error_total` at `:1800`, where the increment has been applied, the cost at the new estimate is added,
+
+```cpp
+                if (applyZeroVelocity)
+                    after_error_total +=
+                        Scalar(0.5) * zeroVelocityW2 *
+                        frame_states.at(last_state_t_ns)
+                            .getState()
+                            .vel_w_i.squaredNorm();
+```
+
+With these, the worked example yields `l_diff = 4.32e-4 h - 1.12e-4 h = 3.2e-4 h`, equal to `f_diff`, and the step to `v_aug` is accepted at the first attempt with a gain ratio of one. Every insertion is gated by `applyZeroVelocity`, which is false whenever `vio_zero_velocity_weight` is zero, so the disabled path stays bit identical, as does every existing configuration. The `error_total` and `after_error_total` written by `AddVioLinearise` and `AddVioSolverIter` will include `Z` when the constraint is active, which should be remembered when comparing those columns across an ablation. A separate `zero_velocity` column would make that explicit, but it is not required for correctness.
+
+###### A related limitation that is not a defect
+
+`marginalize` builds its own dense system at `:1159` and `:1286` and does not include the constraint. That is consistent with the design, since only the newest state is constrained, and that state is never the one being marginalised in the same frame. Information the constraint contributes therefore persists only through the state values that later inertial factors are linearised about, and not through the marginalisation prior. If the ground interval turns out to need a constraint whose information outlives the frame, the term would have to be carried into `marginalize` as well, which is a design change rather than a fix.
 
 ##### Interpretation
 

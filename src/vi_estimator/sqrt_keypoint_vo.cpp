@@ -193,6 +193,15 @@ SqrtKeypointVoEstimator<Scalar>::ProcessFrame(
         this->imu_data_queue.pop(d);
     }
 
+    // VO has no velocity state, so this gates no residual, pure diagnostic.
+    if (config.vio_stationary_enable_flow) {
+        const bool voStationary =
+            curr_frame->mFlowPxMean < config.vio_stationary_flow_tol;
+        mpLogger->AddVoStationary(curr_frame->t_ns, curr_frame->mFlowPxMean,
+                                  voStationary);
+        // mpLogger->PrintVoStationary();
+    }
+
     if (!initialized) {
         // VO has no gravity reference, so the ground truth attitude is the
         // only source of up.
