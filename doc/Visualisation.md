@@ -114,13 +114,9 @@ while (!pangolin::ShouldQuit()) {
 #### 2.1.3 Coordinate Frames and the Model–View–Projection (MVP) Pipeline
 
 The vertex processing stage described in section 2.1.1 applies three sequential matrix transformations to every input vertex, taking it from a local object frame all the way to normalised device coordinates (NDC) ready for the rasteriser. This chain executes on the GPU for every vertex in every `glDraw*` call that Basalt makes. ** A vertex $\mathbf{X}_\text{local}$ in object-local coordinates is transformed to clip coordinates by:
-$$
-\mathbf{x}_\text{clip} = \mathbf{P}\,\mathbf{V}\,\mathbf{M}\,\tilde{\mathbf{X}}_\text{local}
-$$
+$$\mathbf{x}_\text{clip} = \mathbf{P}\,\mathbf{V}\,\mathbf{M}\,\tilde{\mathbf{X}}_\text{local}$$
 where $\tilde{\mathbf{X}}_\text{local} = [X, Y, Z, 1]^\top$ is the homogeneous representation of a 3D point. After the GPU performs perspective division, the resulting normalised device coordinate lies in the $[-1, 1]^3$ cube:
-$$
-\mathbf{x}_\text{ndc} = \mathbf{x}_\text{clip}\,/\,x_{\text{clip},w}
-$$
+$$\mathbf{x}_\text{ndc} = \mathbf{x}_\text{clip}\,/\,x_{\text{clip},w}$$
 
 The rasteriser maps this cube linearly to integer pixel coordinates within the active viewport. The three matrices $\mathbf{M}$, $\mathbf{V}$, and $\mathbf{P}$ are the three stages of the MVP pipeline. $\mathbf{M} \in SE(3)$** transforms from the object-local frame to the world frame. When rendering a camera frustum at a known SLAM pose, the model matrix is that camera's world-frame transform. Basalt realises this with the matrix stack idiom in `render_camera` (`include/basalt/utils/vis_utils.h:71–76`):
 ```cpp

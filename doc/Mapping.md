@@ -96,11 +96,11 @@ The CF is the Fourier transform of the probability density function, and — cru
 
 **Deriving the Gaussian CF.** For $\mathbf{x} \sim \mathcal{N}(\boldsymbol{\mu}, \mathbf{C})$ we evaluate the expectation by completing the square in the exponent:
 
-$$\phi_{\mathbf{x}}(\boldsymbol{\omega}) = \int \frac{1}{(2\pi)^{n/2}|\mathbf{C}|^{1/2}} \exp\!\left(-\tfrac{1}{2}(\mathbf{x}-\boldsymbol{\mu})^T\mathbf{C}^{-1}(\mathbf{x}-\boldsymbol{\mu}) + i\boldsymbol{\omega}^T\mathbf{x}\right) d\mathbf{x}$$
+$$\phi_{\mathbf{x}}(\boldsymbol{\omega}) = \int \frac{1}{(2\pi)^{n/2}|\mathbf{C}|^{1/2}} \exp\!\left(-\frac{1}{2}(\mathbf{x}-\boldsymbol{\mu})^T\mathbf{C}^{-1}(\mathbf{x}-\boldsymbol{\mu}) + i\boldsymbol{\omega}^T\mathbf{x}\right) d\mathbf{x}$$
 
 Combining the two exponentials and completing the square in $\mathbf{x}$ shifts the integration variable to $\mathbf{z} = \mathbf{x} - \boldsymbol{\mu} - i\mathbf{C}\boldsymbol{\omega}$, leaving a standard Gaussian integral over $\mathbf{z}$ that evaluates to 1. The remaining terms yield the **Gaussian characteristic function**:
 
-$$\phi_{\mathbf{x}}(\boldsymbol{\omega}) = \exp\!\left(i\boldsymbol{\omega}^T\boldsymbol{\mu} - \tfrac{1}{2}\boldsymbol{\omega}^T\mathbf{C}\boldsymbol{\omega}\right)$$
+$$\phi_{\mathbf{x}}(\boldsymbol{\omega}) = \exp\!\left(i\boldsymbol{\omega}^T\boldsymbol{\mu} - \frac{1}{2}\boldsymbol{\omega}^T\mathbf{C}\boldsymbol{\omega}\right)$$
 
 The structure is always the same: a linear phase term $i\boldsymbol{\omega}^T\boldsymbol{\mu}$ encoding the mean, and a quadratic damping term $-\frac{1}{2}\boldsymbol{\omega}^T\mathbf{C}\boldsymbol{\omega}$ encoding the covariance. Any distribution whose CF has this form *must* be Gaussian.
 
@@ -110,7 +110,7 @@ $$\phi_{\mathbf{y}}(\boldsymbol{\nu}) = \mathbb{E}[e^{i\boldsymbol{\nu}^T\mathbf
 
 The key step is recognising that $\boldsymbol{\nu}^T(\mathbf{J}\mathbf{x}) = (\mathbf{J}^T\boldsymbol{\nu})^T\mathbf{x}$, so evaluating the CF of $\mathbf{y}$ at frequency $\boldsymbol{\nu}$ is identical to evaluating the CF of $\mathbf{x}$ at the transformed frequency $\mathbf{J}^T\boldsymbol{\nu}$. Substituting into the Gaussian CF formula:
 
-$$\phi_{\mathbf{y}}(\boldsymbol{\nu}) = \phi_{\mathbf{x}}(\mathbf{J}^T\boldsymbol{\nu}) = \exp\!\left(i\boldsymbol{\nu}^T\mathbf{J}\boldsymbol{\mu} - \tfrac{1}{2}\boldsymbol{\nu}^T\mathbf{J}\mathbf{C}\mathbf{J}^T\boldsymbol{\nu}\right)$$
+$$\phi_{\mathbf{y}}(\boldsymbol{\nu}) = \phi_{\mathbf{x}}(\mathbf{J}^T\boldsymbol{\nu}) = \exp\!\left(i\boldsymbol{\nu}^T\mathbf{J}\boldsymbol{\mu} - \frac{1}{2}\boldsymbol{\nu}^T\mathbf{J}\mathbf{C}\mathbf{J}^T\boldsymbol{\nu}\right)$$
 
 This is exactly the characteristic function of $\mathcal{N}(\mathbf{J}\boldsymbol{\mu},\, \mathbf{J}\mathbf{C}\mathbf{J}^T)$. Therefore:
 
@@ -330,7 +330,7 @@ $$E(\boldsymbol{\Delta}) \approx \boldsymbol{\Delta}^T \mathbf{M} \boldsymbol{\D
 
 where $\mathbf{M}$ is the second-moment matrix, also called the structure tensor. It is symmetric and positive semi-definite, so it admits the eigendecomposition $\mathbf{M} = \mathbf{R}\,\mathrm{diag}(\lambda_1, \lambda_2)\,\mathbf{R}^T$ with $\lambda_1 \geq \lambda_2 \geq 0$. The level sets of $E$ are ellipses whose semi-axes are $\lambda_1^{-1/2}$ and $\lambda_2^{-1/2}$, so over all unit displacement directions the smallest rise in $E$ is exactly $\lambda_2$. The Shi-Tomasi response is therefore
 
-$$R = \min(\lambda_1, \lambda_2) = \tfrac{1}{2}\left[ \left(\textstyle\sum I_x^2 + \sum I_y^2\right) - \sqrt{\left(\textstyle\sum I_x^2 - \sum I_y^2\right)^2 + 4\left(\textstyle\sum I_x I_y\right)^2} \right],$$
+$$R = \min(\lambda_1, \lambda_2) = \frac{1}{2}\left[ \left(\textstyle\sum I_x^2 + \sum I_y^2\right) - \sqrt{\left(\textstyle\sum I_x^2 - \sum I_y^2\right)^2 + 4\left(\textstyle\sum I_x I_y\right)^2} \right],$$
 
 which is the worst-case sensitivity of the patch to displacement in any direction. A large $R$ certifies that the patch changes appreciably however it is moved, which is precisely the property that makes it relocatable.
 
@@ -461,7 +461,7 @@ for (int i = 0; i < 256; i++) {
 
 Two deviations from the reference ORB implementation are visible here and both are deliberate to record. First, the rotation is applied at full precision per keypoint, whereas OpenCV quantises $\theta$ to increments of $2\pi/30$ and precomputes thirty steered pattern tables. `basalt` pays two matrix-vector products and a rounding per bit in exchange for removing a steering quantisation of up to six degrees. Second, and more consequentially, no smoothing is applied to the patch before the tests. Calonder and colleagues established that smoothing is not optional for BRIEF, since each test is effectively the sign of a derivative and an unsmoothed sign is maximally sensitive to sensor noise, and they recommended a Gaussian of standard deviation 2 over a 9 by 9 window. OpenCV's ORB achieves the same end with a 5 by 5 box filter evaluated through an integral image. `basalt` samples the raw 16 bit pixels directly, so every bit rests on a single pixel pair whose steered locations have themselves been displaced by up to half a pixel by rounding.
 
-**Properties and limitations.** The descriptor occupies 32 bytes, against 512 for SIFT, and a comparison costs four XOR and four `POPCNT` operations against a 128 dimensional Euclidean norm. For a mapper holding tens of keyframes at 800 to 1800 features each, that ratio decides whether the descriptor store remains in cache. The Hamming metric is also what makes the threshold `mapper_max_hamming_distance` $= 70$ interpretable. Two independent random 256 bit codes have a Hamming distance distributed as $\mathrm{Binomial}(256, \tfrac{1}{2})$, with mean 128 and standard deviation 8, so the threshold sits 7.25 standard deviations into the lower tail and admits a random pair with probability $1.3 \times 10^{-13}$. The threshold is thus extremely conservative against chance agreement, and any false match that survives it is a genuine appearance ambiguity in the scene rather than a statistical accident.
+**Properties and limitations.** The descriptor occupies 32 bytes, against 512 for SIFT, and a comparison costs four XOR and four `POPCNT` operations against a 128 dimensional Euclidean norm. For a mapper holding tens of keyframes at 800 to 1800 features each, that ratio decides whether the descriptor store remains in cache. The Hamming metric is also what makes the threshold `mapper_max_hamming_distance` $= 70$ interpretable. Two independent random 256 bit codes have a Hamming distance distributed as $\mathrm{Binomial}(256, \frac{1}{2})$, with mean 128 and standard deviation 8, so the threshold sits 7.25 standard deviations into the lower tail and admits a random pair with probability $1.3 \times 10^{-13}$. The threshold is thus extremely conservative against chance agreement, and any false match that survives it is a genuine appearance ambiguity in the scene rather than a statistical accident.
 
 Against those strengths stand three limitations. The descriptor inherits the single-scale detection of Section 3.2.1 and carries no octave, so it is not scale invariant. It is not affine invariant, since steering corrects a planar rotation but not the anisotropic distortion induced by a change in viewing angle on a slanted surface. And the absent smoothing costs real matching accuracy, which is the most tractable of the three to remedy.
 
@@ -481,7 +481,7 @@ scores[v.first] += std::abs(kv.second - v.second) - std::abs(kv.second) - std::a
 results.emplace_back(kv.first, -kv.second / 2.0);
 ```
 
-For non-negative histogram entries the accumulated quantity is $|q_w - d_w| - q_w - d_w = -2\min(q_w, d_w)$, so the reported score is the histogram intersection $\sum_w \min(q_w, d_w)$. Since both vectors are L1 normalised this equals $1 - \tfrac{1}{2}\lVert \mathbf{q} - \mathbf{d} \rVert_1$, which is exactly the L1 score of Gálvez-López and Tardós. `basalt` reproduces the DBoW2 similarity measure over an untrained hash vocabulary, and `add_to_database` (`hash_bow.h:219-227`) maintains the inverted index that keeps the query cost proportional to the number of occupied words rather than to the database size.
+For non-negative histogram entries the accumulated quantity is $|q_w - d_w| - q_w - d_w = -2\min(q_w, d_w)$, so the reported score is the histogram intersection $\sum_w \min(q_w, d_w)$. Since both vectors are L1 normalised this equals $1 - \frac{1}{2}\lVert \mathbf{q} - \mathbf{d} \rVert_1$, which is exactly the L1 score of Gálvez-López and Tardós. `basalt` reproduces the DBoW2 similarity measure over an untrained hash vocabulary, and `add_to_database` (`hash_bow.h:219-227`) maintains the inverted index that keeps the query cost proportional to the number of occupied words rather than to the database size.
 
 #### 3.2.5 Significance — Why This Combination
 

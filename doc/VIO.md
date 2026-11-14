@@ -107,9 +107,7 @@ The detection pipeline is coordinated by `FrameToFrameOpticalFlow::addPoints`, w
 
 As shown in Step 2 of the subsequent frame pipeline ($t > 0$) in the flowchart above, tracking is the core operation of the frontend executed on each incoming image before new features are detected. Given a patch $\mathcal{P}$ of pixel intensities centred on a keypoint in a reference image $I_\text{ref}$, the tracker seeks the 2D displacement $\mathbf{d} = [d_x, d_y]^T$ that minimises the photometric error in the current image $I_\text{cur}$:
 
-$$
-\min_{\mathbf{d}} \sum_{(u,v) \in \mathcal{P}} \left[ I_\text{cur}(u + d_x,\, v + d_y) - I_\text{ref}(u, v) \right]^2.
-$$
+$$\min_{\mathbf{d}} \sum_{(u,v) \in \mathcal{P}} \left[ I_\text{cur}(u + d_x,\, v + d_y) - I_\text{ref}(u, v) \right]^2.$$
 
 This is a non-linear least squares problem solved by Gauss–Newton iteration over the image gradient. In `FrameToFrameOpticalFlow::trackPoints`, tracking is parallelised across keypoints using `tbb::parallel_for`. For each keypoint, `FrameToFrameOpticalFlow::trackPoint` conducts a coarse-to-fine search over an image pyramid of `optical_flow_levels` levels (typically 3–4) constructed by `ManagedImagePyr::setFromImage`. At each pyramid level, `FrameToFrameOpticalFlow::trackPointAtLevel` solves for the optimal $SE(2)$ transformation using `PatchT::residual`. To reject tracking drift and false positives, bidirectional verification is performed: the keypoint is tracked forward from `old_pyramid` to `pyramid` and then tracked backward from `pyramid` to `old_pyramid`. If the squared distance between the original and recovered keypoint position exceeds `optical_flow_max_recovered_dist2`, the track is discarded.
 
@@ -192,24 +190,51 @@ The ray from each camera centre to $X$ pierces that camera's frame at the observ
 
 **Relative pose.** For a landmark hosted in camera $h$ and observed in camera $t$, the relative transformation mapping points from the host camera frame to the target camera frame is
 
-$$
-\mathbf{T}_{t,h} = \mathbf{T}_{i,c_t}^{-1} \cdot \mathbf{T}_{w,i_t}^{-1} \cdot \mathbf{T}_{w,i_h} \cdot \mathbf{T}_{i,c_h}.
-$$
+$$\mathbf{T}_{t,h} = \mathbf{T}_{i,c_t}^{-1} \cdot \mathbf{T}_{w,i_t}^{-1} \cdot \mathbf{T}_{w,i_h} \cdot \mathbf{T}_{i,c_h}.$$
 
-This is computed by `computeRelPose` (`include/basalt/utils/ba_utils.h:41`). The function also returns the $6 \times 6$ Jacobians of $\mathbf{T}_{t,h}$ with respect to the host and target body poses, computed via the Adjoint representation of $SE(3)$:
+This is computed by `computeRelPose` (`include/basalt/utils/ba_utils.h:41`).
 
-$$
-\frac{\partial \mathbf{T}_{t,h}}{\partial \mathbf{T}_{w,i_h}} = \text{Adj}(\mathbf{T}_{i,c_t}^{-1} \cdot \mathbf{T}_{w,i_t}^{-1} \cdot \mathbf{T}_{w,i_h}), \qquad
-\frac{\partial \mathbf{T}_{t,h}}{\partial \mathbf{T}_{w,i_t}} = -\text{Adj}(\mathbf{T}_{i,c_t}^{-1}).
-$$
+**Notation for manifold valued quantities.** $SE(3)$ is a manifold rather than a vector space, so there is no classical derivative of one group element with respect to another, a derivative only has meaning between vector spaces. What each group element does possess is a tangent space, $\mathfrak{se}(3)$, and the exponential map $\text{Exp}(\cdot)$ gives a local, invertible correspondence between a neighbourhood of that tangent space and a neighbourhood of the group element, called a retraction. Every pose in this section is therefore parameterised not by itself but by a tangent vector measured against a fixed linearisation point, $\mathbf{T}_{w,i} \to \mathbf{T}_{w,i} \cdot \text{Exp}(\delta)$ for the host and target IMU poses, with $\delta \in \mathbb{R}^6$, and this is also precisely how Gauss-Newton updates a pose on a manifold, by solving for an increment $\Delta\delta$ in the tangent space and retracting it back onto the manifold through $\text{Exp}$. The quantity `computeRelPose` returns is consequently not a derivative of $\mathbf{T}_{t,h}$ with respect to $\mathbf{T}_{w,i_h}$ or $\mathbf{T}_{w,i_t}$ taken literally, which would not be defined, but the derivative of the tangent vector $\xi$ that parameterises the resulting change in $\mathbf{T}_{t,h}$, $\mathbf{T}_{t,h} \to \text{Exp}(\xi) \cdot \mathbf{T}_{t,h}$, with respect to the tangent vector $\delta_h$ or $\delta_t$ that parameterises the perturbation of the corresponding input pose. The two $6 \times 6$ Jacobians, computed via the Adjoint representation of $SE(3)$, are therefore
+
+$$\frac{\partial \xi}{\partial \delta_h} = \text{Adj}(\mathbf{T}_{i,c_t}^{-1} \cdot \mathbf{T}_{w,i_t}^{-1} \cdot \mathbf{T}_{w,i_h}), \qquad \frac{\partial \xi}{\partial \delta_t} = -\text{Adj}(\mathbf{T}_{i,c_t}^{-1}).$$
+
+**Derivation.** Both Jacobians follow from a single Lie group identity applied to the two factors of $\mathbf{T}_{t,h}$ that vary, $\mathbf{T}_{w,i_h}$ and $\mathbf{T}_{w,i_t}$. For $\mathbf{T} \in SE(3)$ and a tangent vector $\zeta \in \mathfrak{se}(3)$, conjugation by the Adjoint representation satisfies $\mathbf{T} \cdot \text{Exp}(\zeta) = \text{Exp}(\text{Adj}(\mathbf{T})\,\zeta) \cdot \mathbf{T}$. This identity, labelled $(\star)$ below, states that a right multiplied perturbation on $\mathbf{T}$ can be moved through $\mathbf{T}$ to the left, provided the perturbation is itself rotated by $\text{Adj}(\mathbf{T})$.
+
+For the host Jacobian, perturb only $\mathbf{T}_{w,i_h} \to \mathbf{T}_{w,i_h} \cdot \text{Exp}(\delta_h)$ and substitute into the definition of $\mathbf{T}_{t,h}$,
+
+$$\mathbf{T}_{t,h}' = \mathbf{T}_{i,c_t}^{-1} \cdot \mathbf{T}_{w,i_t}^{-1} \cdot \big[\mathbf{T}_{w,i_h} \cdot \text{Exp}(\delta_h)\big] \cdot \mathbf{T}_{i,c_h} = \underbrace{\big(\mathbf{T}_{i,c_t}^{-1} \mathbf{T}_{w,i_t}^{-1} \mathbf{T}_{w,i_h}\big)}_{\text{tmp}} \cdot \text{Exp}(\delta_h) \cdot \mathbf{T}_{i,c_h}.$$
+
+The term $\text{Exp}(\delta_h)$ stands immediately to the right of $\text{tmp}$, so applying $(\star)$ once with $\mathbf{T} = \text{tmp}$ carries it to the far left, $\text{tmp} \cdot \text{Exp}(\delta_h) = \text{Exp}(\text{Adj}(\text{tmp})\,\delta_h) \cdot \text{tmp}$, giving
+
+$$\mathbf{T}_{t,h}' = \text{Exp}\big(\text{Adj}(\text{tmp})\,\delta_h\big) \cdot \text{tmp} \cdot \mathbf{T}_{i,c_h} = \text{Exp}\big(\text{Adj}(\text{tmp})\,\delta_h\big) \cdot \mathbf{T}_{t,h} = \text{Exp}(\xi) \cdot \mathbf{T}_{t,h}, \qquad \xi = \text{Adj}(\text{tmp})\,\delta_h,$$
+
+which identifies $\partial \xi / \partial \delta_h = \text{Adj}(\text{tmp}) = \text{Adj}(\mathbf{T}_{i,c_t}^{-1} \mathbf{T}_{w,i_t}^{-1} \mathbf{T}_{w,i_h})$ as stated above.
+
+For the target Jacobian, perturb only $\mathbf{T}_{w,i_t} \to \mathbf{T}_{w,i_t} \cdot \text{Exp}(\delta_t)$. Its inverse transforms as $(\mathbf{T}_{w,i_t} \cdot \text{Exp}(\delta_t))^{-1} = \text{Exp}(\delta_t)^{-1} \cdot \mathbf{T}_{w,i_t}^{-1} = \text{Exp}(-\delta_t) \cdot \mathbf{T}_{w,i_t}^{-1}$, using $\text{Exp}(\delta)^{-1} = \text{Exp}(-\delta)$. Substituting into $\mathbf{T}_{t,h}$ gives
+
+$$\mathbf{T}_{t,h}' = \mathbf{T}_{i,c_t}^{-1} \cdot \text{Exp}(-\delta_t) \cdot \mathbf{T}_{w,i_t}^{-1} \cdot \mathbf{T}_{w,i_h} \cdot \mathbf{T}_{i,c_h}.$$
+
+The term $\text{Exp}(-\delta_t)$ now stands to the right of $\mathbf{T}_{i,c_t}^{-1}$ alone, so applying $(\star)$ with $\mathbf{T} = \mathbf{T}_{i,c_t}^{-1}$ gives $\mathbf{T}_{i,c_t}^{-1} \cdot \text{Exp}(-\delta_t) = \text{Exp}(-\text{Adj}(\mathbf{T}_{i,c_t}^{-1})\,\delta_t) \cdot \mathbf{T}_{i,c_t}^{-1}$, so that
+
+$$\mathbf{T}_{t,h}' = \text{Exp}\big(-\text{Adj}(\mathbf{T}_{i,c_t}^{-1})\,\delta_t\big) \cdot \mathbf{T}_{i,c_t}^{-1} \mathbf{T}_{w,i_t}^{-1} \mathbf{T}_{w,i_h} \mathbf{T}_{i,c_h} = \text{Exp}(\xi) \cdot \mathbf{T}_{t,h}, \qquad \xi = -\text{Adj}(\mathbf{T}_{i,c_t}^{-1})\,\delta_t,$$
+
+which identifies $\partial \xi / \partial \delta_t = -\text{Adj}(\mathbf{T}_{i,c_t}^{-1})$ as stated above. The target Jacobian reduces to a fixed rotation of the extrinsic Adjoint because $\mathbf{T}_{w,i_t}^{-1}$ meets only the single factor $\mathbf{T}_{i,c_t}^{-1}$ on its way out to the left, while the minus sign is a direct consequence of differentiating through the matrix inverse that $\mathbf{T}_{w,i_t}$ appears under.
+
+Because each pose is perturbed independently with the other held fixed, the two Jacobians are the partial derivatives of the same tangent vector $\xi$ with respect to each of the two inputs, and the first order change in $\xi$ when both poses move simultaneously is their sum, $\xi \approx \text{Adj}(\text{tmp})\,\delta_h - \text{Adj}(\mathbf{T}_{i,c_t}^{-1})\,\delta_t$, the usual multivariable chain rule statement for a function of two arguments. These two matrices are exactly `d_rel_d_h` and `d_rel_d_t` as returned by `computeRelPose`.
+
+**Relation to the Gauss-Newton normal equations.** Neither $\xi$ nor $\delta_h$ nor $\delta_t$ is the quantity the optimiser ultimately needs, the reprojection residual is. `linearizePoint` (`include/basalt/utils/ba_utils.h:80`) computes $\mathbf{r} = \pi(\mathbf{T}_{t,h} \cdot \mathbf{p}_h) - \mathbf{z}$ together with $\partial \mathbf{r} / \partial \xi$, using the same left perturbation convention for $\mathbf{T}_{t,h}$ as above, so that the two results compose directly by the chain rule,
+
+$$\frac{\partial \mathbf{r}}{\partial \delta_h} = \frac{\partial \mathbf{r}}{\partial \xi} \cdot \frac{\partial \xi}{\partial \delta_h}, \qquad \frac{\partial \mathbf{r}}{\partial \delta_t} = \frac{\partial \mathbf{r}}{\partial \xi} \cdot \frac{\partial \xi}{\partial \delta_t}.$$
+
+Each is a $2 \times 6$ matrix, and together they form the host and target pose column blocks of the row that this one observation contributes to the Gauss-Newton Jacobian $\mathbf{J}$. Every observation of every landmark contributes such a row, built up by chaining the per-step tangent space derivatives of each intermediate manifold valued quantity the residual passes through, and the full normal equations $\mathbf{J}^\top \mathbf{J}\, \Delta\boldsymbol{\delta} = -\mathbf{J}^\top \mathbf{r}$ are assembled from all of them and solved for the stacked tangent increment $\Delta\boldsymbol{\delta}$, which is retracted onto each pose through $\text{Exp}$ at the end of the iteration.
+
+Note, 2026-11-02, this formula matches `computeRelPose` (`include/basalt/utils/ba_utils.h:41`) only in the leading term. The implementation multiplies by an additional rotation only block built from `T_w_i_h.so3().inverse()` or `T_w_i_t.so3().inverse()`, which the perturbation convention used above does not produce. That extra factor reflects the specific pose increment parameterisation used by Basalt's optimiser, likely a world frame expressed translation component, and remains an open discrepancy between this document and the code pending further investigation.
 
 #### 2.2.2 Camera Projection Model
 
 A camera projects a 3D point $\mathbf{p} = [x, y, z]^T$ in its local frame to a 2D image coordinate $\mathbf{z} \in \mathbb{R}^2$ via a projection function $\pi(\cdot)$:
 
-$$
-\mathbf{z} = \pi(\mathbf{p}).
-$$
+$$\mathbf{z} = \pi(\mathbf{p}).$$
 
 Basalt supports multiple camera models through a compile-time variant (`Calibration<Scalar>::intrinsics`), including the pinhole, equidistant (Kannala–Brandt), and double-sphere (Usenko et al., 2018) models. The projection function and its Jacobian $\mathbf{J}_\pi = \partial \pi / \partial \mathbf{p} \in \mathbb{R}^{2 \times 3}$ are provided by each model's `project` method. The inverse operation — mapping a 2D point to a unit bearing vector — is provided by `unproject` and is used during triangulation and landmark initialisation.
 
@@ -217,21 +242,15 @@ Basalt supports multiple camera models through a compile-time variant (`Calibrat
 
 Each landmark is stored relative to the camera frame of its *host keyframe*. As introduced in §7.1 of the Triangulation section, the landmark is parameterised by a **bearing direction** $\mathbf{d} \in \mathbb{R}^3 \setminus \{\mathbf{0}\}$ and an **inverse distance** $\rho \in \mathbb{R}_{>0}$ from the host camera. Given a true 3D point $\mathbf{p}_h = [X,Y,Z]^T \in \mathbb{R}^3$ in the host camera frame, the direction/distance decomposition underlying the parameterisation is
 
-$$
-\mathbf{d} = \frac{\mathbf{p}_h}{|\mathbf{p}_h|}, \qquad \rho = \frac{1}{|\mathbf{p}_h|},
-$$
+$$\mathbf{d} = \frac{\mathbf{p}_h}{|\mathbf{p}_h|}, \qquad \rho = \frac{1}{|\mathbf{p}_h|},$$
 
 To give the direction a minimal 2-parameter representation, Basalt uses **stereographic projection** (Civera et al., 2008):
 
-$$
-\theta = \pi_\text{st}(\mathbf{d}) = \left[\frac{d_x}{(|\mathbf{d}| + d_z)},\; \frac{d_y}{(|\mathbf{d}| + d_z)}\right]^T \in \mathbb{R}^2,
-$$
+$$\theta = \pi_\text{st}(\mathbf{d}) = \left[\frac{d_x}{(|\mathbf{d}| + d_z)},\; \frac{d_y}{(|\mathbf{d}| + d_z)}\right]^T \in \mathbb{R}^2,$$
 
 with inverse
 
-$$
-\pi_\text{st}^{-1}(\theta) = \frac{2}{(1 + \|\theta\|^2)} \begin{bmatrix} \theta_x \\ \theta_y \\ 1 \end{bmatrix} - \begin{bmatrix} 0 \\ 0 \\ 1 \end{bmatrix}.
-$$
+$$\pi_\text{st}^{-1}(\theta) = \frac{2}{(1 + \|\theta\|^2)} \begin{bmatrix} \theta_x \\ \theta_y \\ 1 \end{bmatrix} - \begin{bmatrix} 0 \\ 0 \\ 1 \end{bmatrix}.$$
 
 The $|\mathbf{d}|$ appearing explicitly in $\pi_\text{st}$'s denominator, rather than an assumed unit norm, is what makes the map scale-invariant, $\pi_\text{st}(\lambda\mathbf{d}) = \pi_\text{st}(\mathbf{d})$ for every $\lambda > 0$: scaling $\mathbf{d}$ scales the numerator and $|\mathbf{d}|+d_z$ identically, so the ratio is unchanged. The inverse map $\pi_\text{st}^{-1}$, by contrast, always returns an exact unit vector.
 
@@ -243,59 +262,47 @@ The reprojection residual measures the discrepancy between a predicted and an ob
 
 **Step 1: Unproject to 3D.** Recover the 3D point in the host camera frame:
 
-$$
-\mathbf{p}_h = \frac{1}{\rho_j} \pi_\text{st}^{-1}(\theta_j).
-$$
+$$\mathbf{p}_h = \frac{1}{\rho_j} \pi_\text{st}^{-1}(\theta_j).$$
 
 **Step 2: Transform to target frame.** Apply the relative pose:
 
-$$
-\mathbf{p}_t = \mathbf{T}_{t,h} \cdot \mathbf{p}_h.
-$$
+$$\mathbf{p}_t = \mathbf{T}_{t,h} \cdot \mathbf{p}_h.$$
 
 **Step 3: Project and compute residual.** Project into the target camera and subtract the observation:
 
-$$
-\mathbf{r}_{ij} = \pi(\mathbf{p}_t) - \mathbf{z}_{ij} \in \mathbb{R}^2.
-$$
+$$\mathbf{r}_{ij} = \pi(\mathbf{p}_t) - \mathbf{z}_{ij} \in \mathbb{R}^2.$$
 
 This three-step chain is implemented by `linearizePoint` (`include/basalt/utils/ba_utils.h:82`), which additionally computes the Jacobians by the chain rule. The remainder of this subsection explicitly formulates $\mathbf{r}_{ij}$ as a function of a *local update* of the pose and landmark variables.
 
 The aforementioned Steps 1–2 treat $\mathbf{p}_h$ as an ordinary point of $\mathbb{R}^3$, obtained by dividing the unprojected direction by $\rho_j$. Division by $\rho_j$ is undefined as $\rho_j \to 0$, precisely the regime of a landmark far enough from the host camera to be effectively at infinity, a configuration VIO frontends encounter routinely (distant structure, sky, horizon features). Basalt sidesteps the division entirely by carrying $\mathbf{p}_h$ in unnormalised homogeneous coordinates (Hartley and Zisserman, 2004, §1.1), scaled by $\rho_j$ instead of by the conventional weight 1:
 
-$$
-\tilde{\mathbf{p}}_h = \begin{bmatrix} \pi_\text{st}^{-1}(\theta_j) \\[2pt] \rho_j \end{bmatrix} \in \mathbb{R}^4, \qquad \mathbf{p}_h = \frac{\tilde{\mathbf{p}}_h[1{:}3]}{\tilde{\mathbf{p}}_h[4]}.
-$$
+$$\tilde{\mathbf{p}}_h = \begin{bmatrix} \pi_\text{st}^{-1}(\theta_j) \\[2pt] \rho_j \end{bmatrix} \in \mathbb{R}^4, \qquad \mathbf{p}_h = \frac{\tilde{\mathbf{p}}_h[1{:}3]}{\tilde{\mathbf{p}}_h[4]}.$$
 
-Applying the $SE(3)$ transform to this representative in its $4\times 4$ homogeneous matrix form, $\mathbf{T}_{t,h} = \begin{bmatrix} \mathbf{R}_{t,h} & \mathbf{t}_{t,h} \\ \mathbf{0}^T & 1 \end{bmatrix}$, gives $\tilde{\mathbf{p}}_t = \mathbf{T}_{t,h}\, \tilde{\mathbf{p}}_h = [\mathbf{R}_{t,h}\,\pi_\text{st}^{-1}(\theta_j) + \rho_j \mathbf{t}_{t,h};\ \rho_j]$, which is exactly $\rho_j\, \mathbf{p}_t$ in homogeneous form, so $\tilde{\mathbf{p}}_t[1{:}3]/\tilde{\mathbf{p}}_t[4] = \mathbf{p}_t$ recovers Step 2 unchanged. Every camera projection model in `basalt-headers` (double-sphere, pinhole, Kannala–Brandt, unified) is, by construction, invariant to a positive rescaling of its 3D argument (a consequence of the projection being defined purely by a ray direction), so $\pi(\tilde{\mathbf{p}}_t[1{:}3]) = \pi(\rho_j \mathbf{p}_t) = \pi(\mathbf{p}_t)$ identically. Passing $\tilde{\mathbf{p}}_t[1{:}3]$ directly into $\pi$ therefore reproduces Step 3 exactly, without ever dividing by $\rho_j$, and the same expression remains well defined at $\rho_j = 0$. `linearizePoint` carries out steps 1–3 in exactly this homogeneous form: `p_h_3d = [StereographicParam::unproject(...); kpt_pos.inv_dist]` and `p_t_3d = T_t_h * p_h_3d` are $\tilde{\mathbf{p}}_h$ and $\tilde{\mathbf{p}}_t$ above.
+Applying the $SE(3)$ transform to this representative in its $4\times 4$ homogeneous matrix form, 
+$\mathbf{T}_{t,h} = \begin{bmatrix} \mathbf{R}_{t,h} & \mathbf{t}_{t,h} \\ \mathbf{0}^T & 1 \end{bmatrix}$
+gives
+$\tilde{\mathbf{p}}_t = \mathbf{T}_{t,h}\, \tilde{\mathbf{p}}_h = [\mathbf{R}_{t,h}\,\pi_\text{st}^{-1}(\theta_j) + \rho_j \mathbf{t}_{t,h};\ \rho_j]$
+which is exactly $\rho_j\, \mathbf{p}_t$ in homogeneous form, so $\tilde{\mathbf{p}}_t[1{:}3]/\tilde{\mathbf{p}}_t[4] = \mathbf{p}_t$ recovers Step 2 unchanged. Every camera projection model in `basalt-headers` (double-sphere, pinhole, Kannala–Brandt, unified) is, by construction, invariant to a positive rescaling of its 3D argument (a consequence of the projection being defined purely by a ray direction), so $\pi(\tilde{\mathbf{p}}_t[1{:}3]) = \pi(\rho_j \mathbf{p}_t) = \pi(\mathbf{p}_t)$ identically. Passing $\tilde{\mathbf{p}}_t[1{:}3]$ directly into $\pi$ therefore reproduces Step 3 exactly, without ever dividing by $\rho_j$, and the same expression remains well defined at $\rho_j = 0$. `linearizePoint` carries out steps 1–3 in exactly this homogeneous form: `p_h_3d = [StereographicParam::unproject(...); kpt_pos.inv_dist]` and `p_t_3d = T_t_h * p_h_3d` are $\tilde{\mathbf{p}}_h$ and $\tilde{\mathbf{p}}_t$ above.
 
 Gauss–Newton iteration (§2.2.7, `doc/Marginalisation.md` §2.1) requires the derivative of $\mathbf{r}_{ij}$ with respect to a local update of $\mathbf{T}_{t,h}$ and $\mathbf{l}_j$ about the current linearisation point $(\bar{\mathbf{T}}_{t,h}, \bar{\mathbf{l}}_j)$, not with respect to these quantities directly: $SE(3)$ is a manifold rather than a vector space, so "$\partial \mathbf{r}/\partial \mathbf{T}_{t,h}$" is not otherwise defined, and $\theta_j$ enters $\tilde{\mathbf{p}}_h$ through the nonlinear stereographic chart. Two local update rules are used, one per variable group.
 
 The relative pose is updated multiplicatively, by composing a minimal $\mathbb{R}^6$ perturbation on the left through the $SE(3)$ exponential map:
 
-$$
-\mathbf{T}_{t,h}(\boldsymbol{\xi}) = \exp(\boldsymbol{\xi}) \cdot \bar{\mathbf{T}}_{t,h}, \qquad \boldsymbol{\xi} = [\boldsymbol{\upsilon}^T,\, \boldsymbol{\omega}^T]^T \in \mathbb{R}^6.
-$$
+$$\mathbf{T}_{t,h}(\boldsymbol{\xi}) = \exp(\boldsymbol{\xi}) \cdot \bar{\mathbf{T}}_{t,h}, \qquad \boldsymbol{\xi} = [\boldsymbol{\upsilon}^T,\, \boldsymbol{\omega}^T]^T \in \mathbb{R}^6.$$
 
 The landmark is updated additively, since $\mathbf{l}_j = [\theta_j^T, \rho_j]^T$ already lives in the flat space $\mathbb{R}^3$:
 
-$$
-\mathbf{l}_j(\delta\mathbf{l}) = \bar{\mathbf{l}}_j + \delta\mathbf{l}, \qquad \delta\mathbf{l} = [\delta\theta^T,\, \delta\rho]^T \in \mathbb{R}^3.
-$$
+$$\mathbf{l}_j(\delta\mathbf{l}) = \bar{\mathbf{l}}_j + \delta\mathbf{l}, \qquad \delta\mathbf{l} = [\delta\theta^T,\, \delta\rho]^T \in \mathbb{R}^3.$$
 
 Substituting both updates into the homogeneous chain of Steps 1–3 gives the residual as an explicit function of $(\boldsymbol{\xi}, \delta\mathbf{l})$,
 
-$$
-\mathbf{r}_{ij}(\boldsymbol{\xi}, \delta\mathbf{l}) = \pi\Big(\big[\exp(\boldsymbol{\xi}) \cdot \bar{\mathbf{T}}_{t,h} \cdot \tilde{\mathbf{p}}_h(\bar{\mathbf{l}}_j + \delta\mathbf{l})\big][1{:}3]\Big) - \mathbf{z}_{ij},
-$$
+$$\mathbf{r}_{ij}(\boldsymbol{\xi}, \delta\mathbf{l}) = \pi\Big(\big[\exp(\boldsymbol{\xi}) \cdot \bar{\mathbf{T}}_{t,h} \cdot \tilde{\mathbf{p}}_h(\bar{\mathbf{l}}_j + \delta\mathbf{l})\big][1{:}3]\Big) - \mathbf{z}_{ij},$$
 
 and §2.2.5 differentiates exactly this expression at $(\boldsymbol{\xi}, \delta\mathbf{l}) = (\mathbf{0}, \mathbf{0})$, first with respect to $\boldsymbol{\xi}$ holding $\delta\mathbf{l} = \mathbf{0}$, then with respect to $\delta\mathbf{l}$ holding $\boldsymbol{\xi} = \mathbf{0}$, and combines the two partial results into the total first-order (Gauss–Newton) Jacobian, following the general product/chain-rule pattern of `doc/Marginalisation.md` §2.1.
 
 The Lie algebra $\mathfrak{se}(3)$ consists of $4\times 4$ matrices $\hat{\boldsymbol{\xi}} = \begin{bmatrix} [\boldsymbol{\omega}]_\times & \boldsymbol{\upsilon} \\ \mathbf{0}^T & 0 \end{bmatrix}$ for $\boldsymbol{\xi} = [\boldsymbol{\upsilon}^T,\boldsymbol{\omega}^T]^T \in \mathbb{R}^6$, where $[\boldsymbol{\omega}]_\times$ is the skew-symmetric matrix satisfying $[\boldsymbol{\omega}]_\times \mathbf{v} = \boldsymbol{\omega} \times \mathbf{v}$ for all $\mathbf{v} \in \mathbb{R}^3$. The exponential map $\exp: \mathfrak{se}(3) \to SE(3)$ recovers a rigid transform from $\boldsymbol{\xi}$ and, near $\boldsymbol{\xi} = \mathbf{0}$, admits the first-order (matrix) expansion $\exp(\boldsymbol{\xi}) = \mathbf{I}_4 + \hat{\boldsymbol{\xi}} + O(\|\boldsymbol{\xi}\|^2)$. For any homogeneous 4-vector $\tilde{\mathbf{p}} = [\mathbf{X}^T,\, w]^T$ (an ordinary point has $w=1$; a landmark's host representative has $w = \rho_j$, per above), left action by $\exp(\boldsymbol{\xi})$ therefore satisfies, to first order,
 
-$$
-\exp(\boldsymbol{\xi}) \cdot \tilde{\mathbf{p}} = (\mathbf{I}_4 + \hat{\boldsymbol{\xi}})\, \tilde{\mathbf{p}} + O(\|\boldsymbol{\xi}\|^2) = \begin{bmatrix} \mathbf{X} + \boldsymbol{\omega} \times \mathbf{X} + w\, \boldsymbol{\upsilon} \\ w \end{bmatrix} + O(\|\boldsymbol{\xi}\|^2).
-$$
+$$\exp(\boldsymbol{\xi}) \cdot \tilde{\mathbf{p}} = (\mathbf{I}_4 + \hat{\boldsymbol{\xi}})\, \tilde{\mathbf{p}} + O(\|\boldsymbol{\xi}\|^2) = \begin{bmatrix} \mathbf{X} + \boldsymbol{\omega} \times \mathbf{X} + w\, \boldsymbol{\upsilon} \\ w \end{bmatrix} + O(\|\boldsymbol{\xi}\|^2).$$
 
 This single identity, evaluated at $\tilde{\mathbf{p}} = \bar{\mathbf{T}}_{t,h}\, \tilde{\mathbf{p}}_h = \tilde{\mathbf{p}}_t$, is the exact tool §2.2.5 uses to differentiate the pose part of the residual; the same Adjoint mechanics underlie the $\partial \mathbf{T}_{t,h}/\partial \mathbf{T}_{w,i_h}$, $\partial \mathbf{T}_{t,h}/\partial \mathbf{T}_{w,i_t}$ formulas already stated in §2.2.1.
 
@@ -305,62 +312,48 @@ The residual $\mathbf{r}_{ij}(\boldsymbol{\xi}, \delta\mathbf{l})$ derived in §
 
 Differentiating with respect to the relative-pose perturbation $\boldsymbol{\xi}$, with $\delta\mathbf{l} = \mathbf{0}$, only the pose term of $\mathbf{r}_{ij}(\boldsymbol{\xi}, \mathbf{0})$ varies with $\boldsymbol{\xi}$ as follows:
 
-$$
-\tilde{\mathbf{p}}_t(\boldsymbol{\xi}) = \exp(\boldsymbol{\xi}) \cdot \bar{\mathbf{T}}_{t,h} \cdot \tilde{\mathbf{p}}_h = \exp(\boldsymbol{\xi}) \cdot \bar{\tilde{\mathbf{p}}}_t.
-$$
+$$\tilde{\mathbf{p}}_t(\boldsymbol{\xi}) = \exp(\boldsymbol{\xi}) \cdot \bar{\mathbf{T}}_{t,h} \cdot \tilde{\mathbf{p}}_h = \exp(\boldsymbol{\xi}) \cdot \bar{\tilde{\mathbf{p}}}_t.$$
 
-Applying the exponential-map identity of §2.2.4 at $\tilde{\mathbf{p}} = \bar{\tilde{\mathbf{p}}}_t = [\mathbf{p}_t^T,\, \rho_j]^T$ (so $\mathbf{X} = \mathbf{p}_t$, $w = \rho_j$) and differentiating termwise with respect to $\boldsymbol{\upsilon}$ and $\boldsymbol{\omega}$ gives
+Applying the exponential-map identity of §2.2.4 at $\tilde{\mathbf{p}} = \bar{\tilde{\mathbf{p}}}_t = [\rho_j\mathbf{p}_t^T,\, \rho_j]^T$ (so $\mathbf{X} = \rho_j\mathbf{p}_t$, $w = \rho_j$, per the homogeneous identity $\tilde{\mathbf{p}}_t = \rho_j\,\mathbf{p}_t$ in homogeneous form already noted in §2.2.4) and differentiating termwise with respect to $\boldsymbol{\upsilon}$ and $\boldsymbol{\omega}$ gives
 
-$$
-\frac{\partial \tilde{\mathbf{p}}_t}{\partial \boldsymbol{\upsilon}}\bigg|_{\boldsymbol{\xi}=\mathbf{0}} = \begin{bmatrix} \rho_j \mathbf{I}_3 \\ \mathbf{0}^T \end{bmatrix}, \qquad
-\frac{\partial \tilde{\mathbf{p}}_t}{\partial \boldsymbol{\omega}}\bigg|_{\boldsymbol{\xi}=\mathbf{0}} = \begin{bmatrix} -[\mathbf{p}_{t}]_\times \\ \mathbf{0}^T \end{bmatrix},
-$$
+$$\frac{\partial \tilde{\mathbf{p}}_t}{\partial \boldsymbol{\upsilon}}\bigg|_{\boldsymbol{\xi}=\mathbf{0}} = \begin{bmatrix} \rho_j \mathbf{I}_3 \\ \mathbf{0}^T \end{bmatrix}, \qquad \frac{\partial \tilde{\mathbf{p}}_t}{\partial \boldsymbol{\omega}}\bigg|_{\boldsymbol{\xi}=\mathbf{0}} = \begin{bmatrix} -\rho_j[\mathbf{p}_{t}]_\times \\ \mathbf{0}^T \end{bmatrix},$$
 
-using $\partial(\boldsymbol{\omega} \times \mathbf{p}_t)/\partial \boldsymbol{\omega} = -[\mathbf{p}_t]_\times$ (the standard identity for the derivative of a cross product with respect to its left argument). Stacking the two blocks gives the full $4\times 6$ Jacobian $\partial \tilde{\mathbf{p}}_t / \partial \boldsymbol{\xi}$. Every camera projection model reads only the first three components of its homogeneous argument (§2.2.4), so $\pi$'s Jacobian $\mathbf{J}_\pi = \partial \pi/\partial \mathbf{p}_t \in \mathbb{R}^{2\times 3}$, already introduced in §2.2.2, contracts only against the top three rows of $\partial \tilde{\mathbf{p}}_t/\partial \boldsymbol{\xi}$; the bottom row (the derivative of the homogeneous weight $w$, which is identically zero here) never contributes. Writing $\partial \mathbf{p}_t/\partial\boldsymbol{\xi} := (\partial \tilde{\mathbf{p}}_t/\partial\boldsymbol{\xi})[1{:}3,:]$ for this top block,
+using $\partial(\boldsymbol{\omega} \times \rho_j\mathbf{p}_t)/\partial \boldsymbol{\omega} = -\rho_j[\mathbf{p}_t]_\times$, the standard identity for the derivative of a cross product with respect to its left argument, applied to $\mathbf{X} = \rho_j\mathbf{p}_t$.
 
-$$
-\frac{\partial \mathbf{p}_t}{\partial \boldsymbol{\xi}} = \begin{bmatrix} \rho_j \mathbf{I}_3 & -[\mathbf{p}_{t}]_\times \end{bmatrix} \in \mathbb{R}^{3 \times 6},
-$$
+(Correction, 2026-10-31: an earlier draft instantiated the exponential-map identity at $\mathbf{X} = \mathbf{p}_t$ rather than $\mathbf{X} = \rho_j\mathbf{p}_t$, giving $\partial\tilde{\mathbf{p}}_t/\partial\boldsymbol{\omega} = -[\mathbf{p}_t]_\times$ with the $\rho_j$ factor dropped. This contradicted the homogeneous identity $\tilde{\mathbf{p}}_t = \rho_j\,\mathbf{p}_t$ already established in §2.2.4, under which the top three components of $\tilde{\mathbf{p}}_t$, i.e. $\mathbf{X}$, equal $\rho_j\mathbf{p}_t$, not $\mathbf{p}_t$. The code in `linearizePoint` (`include/basalt/utils/ba_utils.h:128`) confirms the $\rho_j$ factor: `d_point_d_xi.topRightCorner<3,3>() = -Sophus::SO3<Scalar>::hat(p_t_3d.head<3>())`, where `p_t_3d.head<3>()` is the full homogeneous $\tilde{\mathbf{p}}_t[1{:}3] = \rho_j\mathbf{p}_t$.)
+
+Stacking the two blocks gives the full $4\times 6$ Jacobian $\partial \tilde{\mathbf{p}}_t / \partial \boldsymbol{\xi}$. Every camera projection model reads only the first three components of its homogeneous argument (§2.2.4), so $\pi$'s Jacobian $\mathbf{J}_\pi = \partial \pi/\partial \mathbf{p}_t \in \mathbb{R}^{2\times 3}$, already introduced in §2.2.2, contracts only against the top three rows of $\partial \tilde{\mathbf{p}}_t/\partial \boldsymbol{\xi}$; the bottom row (the derivative of the homogeneous weight $w$, which is identically zero here) never contributes.
+Writing $\partial \mathbf{p}_t/\partial\boldsymbol{\xi} := (\partial \tilde{\mathbf{p}}_t/\partial\boldsymbol{\xi})[1{:}3,:]$ for this top block,
+
+$$\frac{\partial \mathbf{p}_t}{\partial \boldsymbol{\xi}} = \begin{bmatrix} \rho_j \mathbf{I}_3 & -\rho_j[\mathbf{p}_{t}]_\times \end{bmatrix} \in \mathbb{R}^{3 \times 6},$$
+
+(Note: the symbol $\mathbf{p}_t$ inside $\partial\mathbf{p}_t/\partial\boldsymbol{\xi}$ is overloaded with its use elsewhere in this document (§2.2.2, Step 3 of §2.2.4), where it denotes the true, normalised 3D point. Here it instead stands for the unnormalised homogeneous top block $\tilde{\mathbf{p}}_t[1{:}3] = \rho_j\mathbf{p}_t$, matching exactly what the code carries forward, since Basalt never normalises a point before projecting it, precisely to stay well-defined as $\rho_j \to 0$ (§2.2.4). `linearizePoint` (`include/basalt/utils/ba_utils.h:98`) computes `const Eigen::Matrix<Scalar, 4, 1> p_t_3d = T_t_h * p_h_3d;`, i.e. $\tilde{\mathbf{p}}_t$ unnormalised, and passes it directly into the camera model at `include/basalt/utils/ba_utils.h:101`, `bool valid = cam.project(p_t_3d, res, &Jp);`. The resulting `Jp` is therefore $\mathbf{J}_\pi$ evaluated at the unnormalised $\tilde{\mathbf{p}}_t[1{:}3]$, not at the true point $\mathbf{p}_t$, and it is this same `Jp` that the code multiplies directly against the block above at `include/basalt/utils/ba_utils.h:131`, `*d_res_d_xi = Jp * d_point_d_xi;` with `d_point_d_xi` holding exactly $\partial\tilde{\mathbf{p}}_t/\partial\boldsymbol{\xi}$ from the equation preceding this note. This substitution is self-consistent rather than a second source of error: every camera model's $\pi$ is homogeneous of degree 0 in its 3D argument, visible directly in `PinholeCamera::project` (`thirdparty/basalt-headers/include/basalt/camera/pinhole_camera.hpp:138-139`), `proj[0] = fx * x / z + cx; proj[1] = fy * y / z + cy;`, a function of the ratios $x/z,\,y/z$ alone, so $\pi(\lambda X) = \pi(X)$ for all $\lambda>0$. Differentiating that identity with respect to $X$ gives $\mathbf{J}_\pi(\lambda X) = \mathbf{J}_\pi(X)/\lambda$, confirmed by the Jacobian entries on the same lines, `(*d_proj_d_p3d)(0,0) = fx/z; (*d_proj_d_p3d)(0,2) = -fx*x/z2;`, each carrying one inverse power of $z$ and hence of $\lambda$. Setting $\lambda = \rho_j$ shows the $\rho_j$ carried explicitly by $\partial\mathbf{p}_t/\partial\boldsymbol{\xi}$ above and the $1/\rho_j$ implicit in $\mathbf{J}_\pi$ evaluated at the unnormalised point cancel exactly, so the product below reproduces the same $\partial\mathbf{r}_{ij}/\partial\boldsymbol{\xi}$ that using the true point and its Jacobian throughout would give. $\mathbf{J}_\pi$ in that product must therefore always be read as "whatever `project()` returns for the same unnormalised argument used to form $\partial\mathbf{p}_t/\partial\boldsymbol{\xi}$ above", not as the Jacobian at the true, normalised point; mixing the two conventions would silently drop or double a factor of $\rho_j$.)
 
 and, by the chain rule through $\mathbf{r}_{ij} = \pi(\mathbf{p}_t) - \mathbf{z}_{ij}$,
 
-$$
-\frac{\partial \mathbf{r}_{ij}}{\partial \boldsymbol{\xi}} = \mathbf{J}_\pi \cdot \frac{\partial \mathbf{p}_t}{\partial \boldsymbol{\xi}} \in \mathbb{R}^{2 \times 6}.
-$$
+$$\frac{\partial \mathbf{r}_{ij}}{\partial \boldsymbol{\xi}} = \mathbf{J}_\pi \cdot \frac{\partial \mathbf{p}_t}{\partial \boldsymbol{\xi}} \in \mathbb{R}^{2 \times 6}.$$
 
 The perturbation $\boldsymbol{\xi}$ is itself induced by perturbing the host and target body poses inside `computeRelPose`; the chain rule through that composition gives
 
-$$
-\frac{\partial \mathbf{r}_{ij}}{\partial \mathbf{T}_{w,i_h}} = \frac{\partial \mathbf{r}_{ij}}{\partial \boldsymbol{\xi}} \cdot \frac{\partial \mathbf{T}_{t,h}}{\partial \mathbf{T}_{w,i_h}}, \qquad
-\frac{\partial \mathbf{r}_{ij}}{\partial \mathbf{T}_{w,i_t}} = \frac{\partial \mathbf{r}_{ij}}{\partial \boldsymbol{\xi}} \cdot \frac{\partial \mathbf{T}_{t,h}}{\partial \mathbf{T}_{w,i_t}},
-$$
+$$\frac{\partial \mathbf{r}_{ij}}{\partial \mathbf{T}_{w,i_h}} = \frac{\partial \mathbf{r}_{ij}}{\partial \boldsymbol{\xi}} \cdot \frac{\partial \mathbf{T}_{t,h}}{\partial \mathbf{T}_{w,i_h}}, \qquad \frac{\partial \mathbf{r}_{ij}}{\partial \mathbf{T}_{w,i_t}} = \frac{\partial \mathbf{r}_{ij}}{\partial \boldsymbol{\xi}} \cdot \frac{\partial \mathbf{T}_{t,h}}{\partial \mathbf{T}_{w,i_t}},$$
 
 with $\partial \mathbf{T}_{t,h}/\partial \mathbf{T}_{w,i_h}$ and $\partial \mathbf{T}_{t,h}/\partial \mathbf{T}_{w,i_t}$ the Adjoint-representation Jacobians already derived in §2.2.1 from the same first-order exponential-map identity.
 
 Differentiating with respect to the landmark perturbation $\delta\mathbf{l}$, with $\boldsymbol{\xi} = \mathbf{0}$, the pose $\bar{\mathbf{T}}_{t,h}$ is fixed and only $\tilde{\mathbf{p}}_h$ varies with $\delta\mathbf{l} = [\delta\theta^T, \delta\rho]^T$. Let $\mathbf{J}_\text{up} = \partial \pi_\text{st}^{-1}/\partial \theta \in \mathbb{R}^{4\times 2}$ denote the stereographic unproject Jacobian (`StereographicParam::unproject`, §2.2.3); by construction its fourth row is identically zero, since the raw unprojected 4-vector's last component is a placeholder $0$ before being overwritten by $\rho_j$ and so carries no $\theta$-dependence. Differentiating $\tilde{\mathbf{p}}_h(\delta\mathbf{l}) = [\pi_\text{st}^{-1}(\bar\theta + \delta\theta);\ \bar\rho + \delta\rho]$ termwise gives the two Jacobian blocks
 
-$$
-\frac{\partial \tilde{\mathbf{p}}_h}{\partial \theta} = \mathbf{J}_\text{up}, \qquad
-\frac{\partial \tilde{\mathbf{p}}_h}{\partial \rho} = \mathbf{e}_4 := [0,0,0,1]^T,
-$$
+$$\frac{\partial \tilde{\mathbf{p}}_h}{\partial \theta} = \mathbf{J}_\text{up}, \qquad \frac{\partial \tilde{\mathbf{p}}_h}{\partial \rho} = \mathbf{e}_4 := [0,0,0,1]^T,$$
 
 the first a genuine first-order Taylor approximation (the stereographic chart is nonlinear in $\theta$), the second exact ($\tilde{\mathbf{p}}_h$ is affine, in fact linear, in $\rho$). Stacking, $\partial \tilde{\mathbf{p}}_h/\partial \mathbf{l}_j = [\mathbf{J}_\text{up}\ \ \mathbf{e}_4] \in \mathbb{R}^{4\times 3}$. Because $\tilde{\mathbf{p}}_t = \bar{\mathbf{T}}_{t,h}\, \tilde{\mathbf{p}}_h$ is *linear* in $\tilde{\mathbf{p}}_h$ at fixed pose, the chain rule needs no further linearisation here, it applies $\bar{\mathbf{T}}_{t,h}$ directly:
 
-$$
-\frac{\partial \tilde{\mathbf{p}}_t}{\partial \mathbf{l}_j} = \bar{\mathbf{T}}_{t,h} \cdot \begin{bmatrix} \mathbf{J}_\text{up} & \mathbf{e}_4 \end{bmatrix} \in \mathbb{R}^{4 \times 3}.
-$$
+$$\frac{\partial \tilde{\mathbf{p}}_t}{\partial \mathbf{l}_j} = \bar{\mathbf{T}}_{t,h} \cdot \begin{bmatrix} \mathbf{J}_\text{up} & \mathbf{e}_4 \end{bmatrix} \in \mathbb{R}^{4 \times 3}.$$
 
 Unlike the pose case above, the bottom (homogeneous-weight) row of this Jacobian is *not* zero, its $\delta\rho$ column equals $1$, since $\bar{\mathbf{T}}_{t,h}\, \mathbf{e}_4$ is exactly the fourth column of $\bar{\mathbf{T}}_{t,h}$, namely $[\bar{\mathbf{t}}_{t,h}^T,\, 1]^T$. This is immaterial to the final residual Jacobian only because $\mathbf{J}_\pi$ structurally ignores that row (§2.2.4); the weight row must nonetheless be retained through this step, since dropping it before forming $\bar{\mathbf{T}}_{t,h}\cdot[\mathbf{J}_\text{up}\ \ \mathbf{e}_4]$ would also silently drop its contribution to the *top* three rows via $\bar{\mathbf{t}}_{t,h}$. Restricting to those top three rows, using $\bar{\mathbf{T}}_{t,h} = [\bar{\mathbf{R}}_{t,h} \mid \bar{\mathbf{t}}_{t,h}]$ and $\mathbf{J}_\text{up}$'s zero fourth row,
 
-$$
-\frac{\partial \mathbf{p}_t}{\partial \mathbf{l}_j} = \begin{bmatrix} \bar{\mathbf{R}}_{t,h}\, \mathbf{J}_\text{up}[1{:}3,:] & \bar{\mathbf{t}}_{t,h} \end{bmatrix} \in \mathbb{R}^{3 \times 3},
-$$
+$$\frac{\partial \mathbf{p}_t}{\partial \mathbf{l}_j} = \begin{bmatrix} \bar{\mathbf{R}}_{t,h}\, \mathbf{J}_\text{up}[1{:}3,:] & \bar{\mathbf{t}}_{t,h} \end{bmatrix} \in \mathbb{R}^{3 \times 3},$$
 
 and, by the chain rule,
 
-$$
-\frac{\partial \mathbf{r}_{ij}}{\partial \mathbf{l}_j} = \mathbf{J}_\pi \cdot \frac{\partial \mathbf{p}_t}{\partial \mathbf{l}_j} \in \mathbb{R}^{2 \times 3}.
-$$
+$$\frac{\partial \mathbf{r}_{ij}}{\partial \mathbf{l}_j} = \mathbf{J}_\pi \cdot \frac{\partial \mathbf{p}_t}{\partial \mathbf{l}_j} \in \mathbb{R}^{2 \times 3}.$$
 
 (Correction, 2026-08-28: an earlier draft of this Jacobian read $\mathbf{T}_{t,h}\cdot[\mathbf{J}_\text{up}\ \ \mathbf{T}_{t,h}^{-1}\mathbf{e}_4]$. The $\mathbf{T}_{t,h}^{-1}$ factor was an error, introduced by mis-stating which side of the product the fourth-column extraction belongs on; differentiating `linearizePoint`'s actual computation, `Jpp.col(2) = T_t_h.col(3)`, shows the $\delta\rho$ column is $\mathbf{T}_{t,h}\,\mathbf{e}_4$ with no inverse involved, as derived above.)
 
@@ -368,42 +361,29 @@ $$
 
 Given a set of camera poses $\{\mathbf{T}_{w,i_k}\}_{k=1}^{K}$ and landmarks $\{\mathbf{l}_j\}_{j=1}^{L}$, with observations $\{(i, j, \mathbf{z}_{ij})\} \in \mathcal{V}$, the BA problem seeks to minimise:
 
-$$
-E_\text{BA}(\mathbf{s}) = \frac{1}{2} \sum_{(i,j) \in \mathcal{V}} \mathbf{r}_{ij}(\mathbf{s})^T \boldsymbol{\Sigma}_\text{vis}^{-1} \mathbf{r}_{ij}(\mathbf{s}),
-$$
+$$E_\text{BA}(\mathbf{s}) = \frac{1}{2} \sum_{(i,j) \in \mathcal{V}} \mathbf{r}_{ij}(\mathbf{s})^T \boldsymbol{\Sigma}_\text{vis}^{-1} \mathbf{r}_{ij}(\mathbf{s}),$$
 
 where $\mathbf{s} = [\mathbf{T}_1, \ldots, \mathbf{T}_K, \mathbf{l}_1, \ldots, \mathbf{l}_L]$ is the full state vector and $\boldsymbol{\Sigma}_\text{vis} = \sigma_\text{obs}^2 \mathbf{I}_2$ is the isotropic observation covariance (configured by `vio_obs_std_dev`).
 
 To limit the influence of outlier observations, each residual is down-weighted by a Huber kernel (Huber, 1964):
 
-$$
-w_H(\mathbf{r}) = \begin{cases}
-1 & \text{if } \|\mathbf{r}\| \leq \delta_H, \\
-\delta_H / \|\mathbf{r}\| & \text{if } \|\mathbf{r}\| > \delta_H,
-\end{cases}
-$$
+$$w_H(\mathbf{r}) = \begin{cases} 1 & \text{if } \|\mathbf{r}\| \leq \delta_H, \\ \delta_H / \|\mathbf{r}\| & \text{if } \|\mathbf{r}\| > \delta_H, \end{cases}$$
 
 where $\delta_H$ = `vio_obs_huber_thresh`. The weighted cost becomes $\frac{1}{2} w_H \|\mathbf{r}\|^2 / \sigma_\text{obs}^2$.
 
 To enable efficient online operation, the VO estimator does not optimise the entire trajectory. Instead, it maintains a sliding window of at most `vio_max_kfs` keyframes and `vio_max_states` recent frame poses. The total VO objective includes the visual cost above plus a marginalisation prior $E_\text{marg}(\mathbf{s})$ that summarises all information from evicted states (see `doc/Marginalisation.md`):
 
-$$
-E_\text{VO}(\mathbf{s}) = E_\text{BA}(\mathbf{s}) + E_\text{marg}(\mathbf{s}).
-$$
+$$E_\text{VO}(\mathbf{s}) = E_\text{BA}(\mathbf{s}) + E_\text{marg}(\mathbf{s}).$$
 
 #### 2.2.7 Gauss–Newton Linearisation and the Normal Equations
 
 The non-linear cost is iteratively minimised by linearising each residual around the current estimate $\mathbf{s}$ using a first-order Taylor expansion on the manifold (see `doc/Marginalisation.md` §2 for the complete derivation of the Gauss–Newton approximation, the information matrix $\mathbf{H}$, and the information vector $\mathbf{b}$):
 
-$$
-\mathbf{r}_{ij}(\mathbf{s} \oplus \boldsymbol{\xi}) \approx \mathbf{r}_{ij}(\mathbf{s}) + \mathbf{J}_{ij} \boldsymbol{\xi},
-$$
+$$\mathbf{r}_{ij}(\mathbf{s} \oplus \boldsymbol{\xi}) \approx \mathbf{r}_{ij}(\mathbf{s}) + \mathbf{J}_{ij} \boldsymbol{\xi},$$
 
 where $\boldsymbol{\xi}$ is the stacked state increment and $\mathbf{J}_{ij}$ is the Jacobian row block for observation $(i,j)$. Substituting into the cost and differentiating yields the normal equations $\mathbf{H} \boldsymbol{\xi} = \mathbf{b}$, where
 
-$$
-\mathbf{H} = \sum_{(i,j)} \mathbf{J}_{ij}^T \mathbf{W}_{ij} \mathbf{J}_{ij}, \qquad \mathbf{b} = -\sum_{(i,j)} \mathbf{J}_{ij}^T \mathbf{W}_{ij} \mathbf{r}_{ij},
-$$
+$$\mathbf{H} = \sum_{(i,j)} \mathbf{J}_{ij}^T \mathbf{W}_{ij} \mathbf{J}_{ij}, \qquad \mathbf{b} = -\sum_{(i,j)} \mathbf{J}_{ij}^T \mathbf{W}_{ij} \mathbf{r}_{ij},$$
 
 with $\mathbf{W}_{ij} = w_H / \sigma_\text{obs}^2 \cdot \mathbf{I}_2$.
 
@@ -411,23 +391,17 @@ with $\mathbf{W}_{ij} = w_H / \sigma_\text{obs}^2 \cdot \mathbf{I}_2$.
 
 The key computational insight of BA is the **arrowhead sparsity** of $\mathbf{H}$. Each landmark $\mathbf{l}_j$ appears only in the observations that see it, so its off-diagonal Hessian blocks couple only the (few) frames observing it. Ordering $\boldsymbol{\xi} = [\boldsymbol{\xi}_\text{poses}^T,\, \boldsymbol{\xi}_\text{lms}^T]^T$, the Hessian takes the block form:
 
-$$
-\begin{bmatrix} \mathbf{H}_{pp} & \mathbf{H}_{pl} \\ \mathbf{H}_{lp} & \mathbf{H}_{ll} \end{bmatrix} \begin{bmatrix} \boldsymbol{\xi}_p \\ \boldsymbol{\xi}_l \end{bmatrix} = \begin{bmatrix} \mathbf{b}_p \\ \mathbf{b}_l \end{bmatrix},
-$$
+$$\begin{bmatrix} \mathbf{H}_{pp} & \mathbf{H}_{pl} \\ \mathbf{H}_{lp} & \mathbf{H}_{ll} \end{bmatrix} \begin{bmatrix} \boldsymbol{\xi}_p \\ \boldsymbol{\xi}_l \end{bmatrix} = \begin{bmatrix} \mathbf{b}_p \\ \mathbf{b}_l \end{bmatrix},$$
 
 where $\mathbf{H}_{ll}$ is **block-diagonal** (each $3 \times 3$ block belongs to a single landmark). This permits analytic elimination of the landmarks via the Schur complement:
 
-$$
-\underbrace{(\mathbf{H}_{pp} - \mathbf{H}_{pl}\, \mathbf{H}_{ll}^{-1}\, \mathbf{H}_{lp})}_{\mathbf{H}^*_p} \boldsymbol{\xi}_p = \underbrace{\mathbf{b}_p - \mathbf{H}_{pl}\, \mathbf{H}_{ll}^{-1}\, \mathbf{b}_l}_{\mathbf{b}^*_p}.
-$$
+$$\underbrace{(\mathbf{H}_{pp} - \mathbf{H}_{pl}\, \mathbf{H}_{ll}^{-1}\, \mathbf{H}_{lp})}_{\mathbf{H}^*_p} \boldsymbol{\xi}_p = \underbrace{\mathbf{b}_p - \mathbf{H}_{pl}\, \mathbf{H}_{ll}^{-1}\, \mathbf{b}_l}_{\mathbf{b}^*_p}.$$
 
 Because $\mathbf{H}_{ll}$ is block-diagonal, each $3 \times 3$ inversion is $O(1)$, and the total elimination cost is $O(L \cdot K^2)$ where $L$ is the number of landmarks and $K$ the number of poses. The reduced system $\mathbf{H}^*_p$ is dense but small ($6K \times 6K$ for VO), making it tractable for direct factorisation.
 
 **Square-root elimination (ABS_QR).** Basalt's default linearisation strategy (`vio_linearization_type = ABS_QR`) avoids forming $\mathbf{H}_{ll} = \mathbf{J}_l^T \mathbf{J}_l$ entirely. Instead, it applies a Householder QR decomposition to the landmark columns of each landmark's stacked Jacobian (Demmel et al., 2021):
 
-$$
-\mathbf{Q}^T \begin{bmatrix} \mathbf{J}_l & \mathbf{J}_p & \mathbf{r} \end{bmatrix} = \begin{bmatrix} \mathbf{R}_l & \mathbf{Q}_1^T \mathbf{J}_p & \mathbf{Q}_1^T \mathbf{r} \\ \mathbf{0} & \mathbf{Q}_2^T \mathbf{J}_p & \mathbf{Q}_2^T \mathbf{r} \end{bmatrix}.
-$$
+$$\mathbf{Q}^T \begin{bmatrix} \mathbf{J}_l & \mathbf{J}_p & \mathbf{r} \end{bmatrix} = \begin{bmatrix} \mathbf{R}_l & \mathbf{Q}_1^T \mathbf{J}_p & \mathbf{Q}_1^T \mathbf{r} \\ \mathbf{0} & \mathbf{Q}_2^T \mathbf{J}_p & \mathbf{Q}_2^T \mathbf{r} \end{bmatrix}.$$
 
 The rows $[\mathbf{Q}_2^T \mathbf{J}_p \mid \mathbf{Q}_2^T \mathbf{r}]$ contribute directly to the reduced camera system without ever forming $\mathbf{J}_l^T \mathbf{J}_l$, effectively doubling the numerical precision. This is performed per-landmark by `LandmarkBlock::performQR` (`include/basalt/linearization/landmark_block.hpp`).
 
@@ -437,17 +411,13 @@ The equation above is stated here without proof. `doc/Linearisation.md` derives 
 
 The Gauss–Newton system is regularised with Levenberg–Marquardt (LM) damping:
 
-$$
-(\mathbf{H}^*_p + \lambda \cdot \text{diag}(\mathbf{H}^*_p))\, \boldsymbol{\xi}_p = \mathbf{b}^*_p.
-$$
+$$(\mathbf{H}^*_p + \lambda \cdot \text{diag}(\mathbf{H}^*_p))\, \boldsymbol{\xi}_p = \mathbf{b}^*_p.$$
 
 The damped system is solved by LDLT factorisation. The damping parameter $\lambda$ is adjusted by the Nielsen rule: if the step reduces the actual cost and the ratio of actual to predicted reduction is positive, $\lambda$ is decreased; otherwise it is increased geometrically by `lambda_vee` (initially 2). Convergence is declared when $|f_\text{diff}| < 10^{-6}$ or $\|\boldsymbol{\xi}\|_\infty < 10^{-4}$. Failure is declared if $\lambda$ exceeds `vio_lm_lambda_max`.
 
 After solving for $\boldsymbol{\xi}_p$, landmarks are recovered by **back-substitution**:
 
-$$
-\boldsymbol{\xi}_{l_j} = \mathbf{R}_{l_j}^{-1} (\mathbf{Q}_1^T \mathbf{r}_j - \mathbf{Q}_1^T \mathbf{J}_{p_j}\, \boldsymbol{\xi}_p),
-$$
+$$\boldsymbol{\xi}_{l_j} = \mathbf{R}_{l_j}^{-1} (\mathbf{Q}_1^T \mathbf{r}_j - \mathbf{Q}_1^T \mathbf{J}_{p_j}\, \boldsymbol{\xi}_p),$$
 
 which is performed by `LandmarkBlock::backSubstitute`.
 
@@ -586,9 +556,7 @@ Visual odometry, despite its elegance, suffers from several fundamental and prac
 
 Consider a monocular camera observing $L$ landmarks from $K$ poses. The reprojection residual for any observation $(i, j)$ depends on the relative pose $\mathbf{T}_{t,h}$ and the 3D landmark position $\mathbf{p}_h$. If we apply a uniform scaling $s > 0$ to all translations and all landmark depths simultaneously:
 
-$$
-\mathbf{p}_{w,k} \leftarrow s \cdot \mathbf{p}_{w,k}, \qquad \mathbf{l}_j \leftarrow s \cdot \mathbf{l}_j \quad (\text{i.e., } \rho_j \leftarrow \rho_j / s),
-$$
+$$\mathbf{p}_{w,k} \leftarrow s \cdot \mathbf{p}_{w,k}, \qquad \mathbf{l}_j \leftarrow s \cdot \mathbf{l}_j \quad (\text{i.e., } \rho_j \leftarrow \rho_j / s),$$
 
 then the 3D point in any camera frame scales as $\mathbf{p}_t \leftarrow s \cdot \mathbf{p}_t$, and the projection $\pi(\mathbf{p}_t) = \pi(s \cdot \mathbf{p}_t)$ is invariant because $\pi$ is a perspective projection (division by the $z$-component absorbs the scale). Consequently, the entire reprojection cost $E_\text{BA}$ is invariant under this 7-parameter similarity transformation (3 translation + 3 rotation + 1 scale), and the Hessian $\mathbf{H}$ has a 7-dimensional null space, the gauge freedom of monocular SfM (Hartley and Zisserman, 2004; Triggs et al., 2000). In particular, the absolute scale is unobservable from vision alone.
 
@@ -600,9 +568,7 @@ In Basalt's VO mode (`SqrtKeypointVoEstimator`), the initial pose prior (`vio_in
 
 When the camera undergoes pure rotation ($\mathbf{t}_{k, k+1} = \mathbf{0}$), all scene points lie at optical infinity relative to the baseline, and the epipolar geometry degenerates: the Essential matrix $\mathbf{E} = [\mathbf{t}]_\times \mathbf{R}$ becomes the zero matrix (Scaramuzza and Fraundorfer, 2011). No translation can be recovered, and no new landmarks can be triangulated because the DLT system (§7.1) becomes rank-deficient. In Basalt, the baseline gate
 
-$$
-\|\mathbf{T}_{0,1}.\text{translation}\|^2 < (\text{vio\_min\_triangulation\_dist})^2
-$$
+$$\|\mathbf{T}_{0,1}.\text{translation}\|^2 < (\text{vio\_min\_triangulation\_dist})^2$$
 
 explicitly rejects triangulation attempts with insufficient parallax. During sustained pure rotation, no new landmarks are created, existing landmarks are eventually lost as they leave the field of view, and the sliding window may exhaust its feature constraints entirely.
 
@@ -670,39 +636,43 @@ The tangent-space ordering of a full navigation state is fixed by `PoseVelBiasSt
 
 #### 3.1.1 IMU Residual
 
-The inertial factor relates two consecutive navigation states through the preintegrated pseudo-measurement accumulated between their timestamps. The construction of that pseudo-measurement, namely the mid-point integrator, the covariance propagation and the bias Jacobians, is derived in §4.1, and only its interface is needed here. Preintegration returns a delta state $\Delta \mathbf{s} = (\Delta \mathbf{R}, \Delta \mathbf{v}, \Delta \mathbf{p})$ of duration $\Delta t$, expressed in the body frame at the start of the interval and computed at fixed linearisation biases $(\mathbf{b}_g^\text{lin}, \mathbf{b}_a^\text{lin})$, together with the $9\times 3$ Jacobians $\mathbf{J}_{\Delta|b_g}$ and $\mathbf{J}_{\Delta|b_a}$ of that delta with respect to those biases and the $9\times 9$ covariance $\boldsymbol{\Sigma}_\Delta$.
+**Bias model.** The gyroscope and accelerometer biases $\mathbf{b}_g, \mathbf{b}_a \in \mathbb{R}^3$ are not constants of the sensor but slowly drifting quantities, modelled as a discrete-time Gaussian random walk between consecutive states, $\mathbf{b}_{\bullet,1} = \mathbf{b}_{\bullet,0} + \mathbf{w}_\bullet$ with $\mathbf{w}_\bullet$ zero-mean Gaussian noise of variance growing linearly in the elapsed time $\Delta t$, the defining property of a Wiener process. This random walk is itself enforced as two further three-vector residuals per inertial factor,
 
-**First-order bias correction.** Re-integrating hundreds of samples every time the optimiser nudges a bias would defeat the purpose of preintegration, so the delta is instead corrected to first order about its linearisation biases. Writing $\Delta\mathbf{b}_g = \mathbf{b}_g - \mathbf{b}_g^\text{lin}$ and $\Delta\mathbf{b}_a = \mathbf{b}_a - \mathbf{b}_a^\text{lin}$, the two correction vectors are
+$$\mathbf{r}_{b_g} = \mathbf{W}_{b_g}\left(\mathbf{b}_{g,0} - \mathbf{b}_{g,1}\right), \qquad \mathbf{r}_{b_a} = \mathbf{W}_{b_a}\left(\mathbf{b}_{a,0} - \mathbf{b}_{a,1}\right),$$
 
-$$
-\boldsymbol{\delta}_g = \mathbf{J}_{\Delta|b_g}\, \Delta\mathbf{b}_g \in \mathbb{R}^9, \qquad
-\boldsymbol{\delta}_a = \mathbf{J}_{\Delta|b_a}\, \Delta\mathbf{b}_a \in \mathbb{R}^9,
-$$
+with the diagonal weights $\mathbf{W}_{b_g} = \text{diag}(\boldsymbol{\sigma}_{b_g})^{-1}/\sqrt{\Delta t}$ and $\mathbf{W}_{b_a} = \text{diag}(\boldsymbol{\sigma}_{b_a})^{-1}/\sqrt{\Delta t}$ formed at `imu_block.hpp:76` and `:91` from the per-axis standard deviations $\boldsymbol{\sigma}_{b_\bullet}$ supplied by the calibration.
 
-each partitioned into position, rotation and velocity segments in that order. The rotation segment of $\boldsymbol{\delta}_a$ vanishes identically, because the orientation delta is integrated from the gyroscope alone and carries no dependence on the accelerometer bias, and the implementation asserts exactly this at `preintegration.h:234`.
+The $\Delta t^{-1/2}$ scaling is what makes the factor a random walk rather than a fixed penalty, since the variance of a Wiener increment grows linearly in the elapsed time and its inverse square root therefore weights long intervals more loosely.
+
+Because every state in the sliding window carries its own bias estimate, free to walk away from its neighbours subject only to this penalty, the estimator is continuously re-estimating $\mathbf{b}_g$ and $\mathbf{b}_a$, which is the root cause of the bias update and correction machinery introduced next.
+
+The inertial factor relates two consecutive navigation states through the preintegrated pseudo-measurement accumulated between their timestamps. The construction of that pseudo-measurement, namely the mid-point integrator and the covariance propagation, is derived in §4.1, and only its interface is needed here.
+
+Preintegration returns a delta state $\Delta \mathbf{s} = (\Delta \mathbf{R}, \Delta \mathbf{v}, \Delta \mathbf{p})$ of duration $\Delta t$, expressed in the body frame at the start of the interval and computed at fixed linearisation biases $(\mathbf{b}_g^\text{lin}, \mathbf{b}_a^\text{lin})$, the bias estimate at the instant the interval was opened.
+
+Alongside it, preintegration returns the $9\times 3$ Jacobians $\mathbf{J}_{\Delta|b_g}$ and $\mathbf{J}_{\Delta|b_a}$ of that delta with respect to those same biases, and the $9\times 9$ covariance $\boldsymbol{\Sigma}_\Delta$. How $\mathbf{J}_{\Delta|b_g}$ and $\mathbf{J}_{\Delta|b_a}$ are themselves computed, by propagating a sensitivity recursion alongside the integration, is derived in §4.1, in the paragraph immediately following the mid-point integrator that produces $\Delta\mathbf{s}$.
+
+**Bias update.** By the time a factor's delta is actually used, one or more Gauss-Newton iterations will typically have moved the optimiser's current bias estimate $(\mathbf{b}_g, \mathbf{b}_a)$ away from the linearisation biases $(\mathbf{b}_g^\text{lin}, \mathbf{b}_a^\text{lin})$ fixed when the interval was integrated, exactly the drift the bias model above says must happen. The size of that drift is measured by $\Delta\mathbf{b}_g = \mathbf{b}_g - \mathbf{b}_g^\text{lin}$ and $\Delta\mathbf{b}_a = \mathbf{b}_a - \mathbf{b}_a^\text{lin}$, and it is this pair of vectors, not the biases themselves, that enters the correction below.
+
+**First-order bias correction.** Re-integrating hundreds of samples every time the optimiser nudges a bias would defeat the purpose of preintegration, so the delta is instead corrected to first order about its linearisation biases using the bias Jacobians, treated here as given and derived in §4.1.
+
+The basis for the correction is a Taylor expansion, not a new piece of modelling. Think of the preintegrated delta as a function of whatever bias it were re-integrated with, $\Delta\mathbf{s}(\mathbf{b}_g, \mathbf{b}_a)$, of which the integrator in §4.1 only ever evaluates one point, $\Delta\mathbf{s}(\mathbf{b}_g^\text{lin}, \mathbf{b}_a^\text{lin})$. By definition, $\mathbf{J}_{\Delta|b_g} = \partial \Delta\mathbf{s}/\partial \mathbf{b}_g$ and $\mathbf{J}_{\Delta|b_a} = \partial \Delta\mathbf{s}/\partial \mathbf{b}_a$ evaluated at that same point, so expanding $\Delta\mathbf{s}$ to first order about the linearisation biases in the current bias estimate $(\mathbf{b}_g, \mathbf{b}_a)$ gives
+
+$$\Delta\mathbf{s}(\mathbf{b}_g, \mathbf{b}_a) \approx \Delta\mathbf{s}(\mathbf{b}_g^\text{lin}, \mathbf{b}_a^\text{lin}) + \mathbf{J}_{\Delta|b_g}\,\Delta\mathbf{b}_g + \mathbf{J}_{\Delta|b_a}\,\Delta\mathbf{b}_a,$$
+
+with $\Delta\mathbf{b}_g, \Delta\mathbf{b}_a$ the drift vectors of the preceding paragraph. The two terms added to the already-integrated $\Delta\mathbf{s}(\mathbf{b}_g^\text{lin}, \mathbf{b}_a^\text{lin})$ are exactly the two correction vectors,
+
+$$\boldsymbol{\delta}_g = \mathbf{J}_{\Delta|b_g}\, \Delta\mathbf{b}_g \in \mathbb{R}^9, \qquad \boldsymbol{\delta}_a = \mathbf{J}_{\Delta|b_a}\, \Delta\mathbf{b}_a \in \mathbb{R}^9,$$
+
+so that $\Delta\mathbf{s}(\mathbf{b}_g^\text{lin}, \mathbf{b}_a^\text{lin}) + \boldsymbol{\delta}_g + \boldsymbol{\delta}_a$ stands in for what re-integrating against the current bias estimate would have produced, without ever touching the raw samples again. Each correction is partitioned into position, rotation and velocity segments in that order, matching $\Delta\mathbf{s}$. The rotation segment of $\boldsymbol{\delta}_a$ vanishes identically, because the orientation delta is integrated from the gyroscope alone and $\partial \Delta\mathbf{R}/\partial \mathbf{b}_a = \mathbf{0}$ as a consequence, which the implementation asserts directly at `preintegration.h:234`. The approximation is only as good as the Taylor expansion it comes from, so it degrades once $\Delta\mathbf{b}_g$ or $\Delta\mathbf{b}_a$ grows large, the caveat already noted in §4.1.
 
 **Residual.** Let $\mathbf{s}_0 = (\mathbf{R}_0, \mathbf{p}_0, \mathbf{v}_0)$ and $\mathbf{s}_1 = (\mathbf{R}_1, \mathbf{p}_1, \mathbf{v}_1)$ denote the two states the factor connects. The nine-vector inertial residual, ordered as position, rotation and velocity to match the state layout above, is
 
-$$
-\begin{aligned}
-\mathbf{r}_p &= \mathbf{R}_0^T\!\left(\mathbf{p}_1 - \mathbf{p}_0 - \mathbf{v}_0 \Delta t - \tfrac{1}{2}\mathbf{g}\,\Delta t^2\right) - \left(\Delta\mathbf{p} + \boldsymbol{\delta}_g[1{:}3] + \boldsymbol{\delta}_a[1{:}3]\right), \\
-\mathbf{r}_R &= \text{Log}\!\left(\text{Exp}\!\left(\boldsymbol{\delta}_g[4{:}6]\right)\, \Delta\mathbf{R}\, \mathbf{R}_1^{-1} \mathbf{R}_0\right), \\
-\mathbf{r}_v &= \mathbf{R}_0^T\!\left(\mathbf{v}_1 - \mathbf{v}_0 - \mathbf{g}\,\Delta t\right) - \left(\Delta\mathbf{v} + \boldsymbol{\delta}_g[7{:}9] + \boldsymbol{\delta}_a[7{:}9]\right),
-\end{aligned}
-$$
+$$\begin{aligned} \mathbf{r}_p &= \mathbf{R}_0^T\!\left(\mathbf{p}_1 - \mathbf{p}_0 - \mathbf{v}_0 \Delta t - \frac{1}{2}\mathbf{g}\,\Delta t^2\right) - \left(\Delta\mathbf{p} + \boldsymbol{\delta}_g[1{:}3] + \boldsymbol{\delta}_a[1{:}3]\right), \\ \mathbf{r}_R &= \text{Log}\!\left(\text{Exp}\!\left(\boldsymbol{\delta}_g[4{:}6]\right)\, \Delta\mathbf{R}\, \mathbf{R}_1^{-1} \mathbf{R}_0\right), \\ \mathbf{r}_v &= \mathbf{R}_0^T\!\left(\mathbf{v}_1 - \mathbf{v}_0 - \mathbf{g}\,\Delta t\right) - \left(\Delta\mathbf{v} + \boldsymbol{\delta}_g[7{:}9] + \boldsymbol{\delta}_a[7{:}9]\right), \end{aligned}$$
 
 as computed by `IntegratedImuMeasurement::residual` (`thirdparty/basalt-headers/include/basalt/imu/preintegration.h:221`). The structure is the same in all three rows. The bracketed term on the left transports the state difference into the body frame at time $0$ and removes the contribution of gravity, which was deliberately excluded from the preintegration, leaving a quantity directly comparable with the delta. The bracketed term on the right is the bias-corrected delta. The residual vanishes precisely when the two states are consistent with the integrated inertial measurement, which is the same condition the prediction of §5.1 enforces by construction, so a freshly predicted state produces a zero inertial residual and the optimiser starts from the inertial manifold.
 
 (Correction, 2026-08-31: this residual previously appeared, in the section of `doc/Marginalisation.md` that has since been moved here, with the rotation row written as $\text{Log}((\Delta\mathbf{R}\hat{\mathbf{R}})^T \mathbf{R}_k^T \mathbf{R}_{k+1})$, which is the convention of Forster et al. (2017) rather than the one Basalt implements. Basalt forms $\Delta\mathbf{R}\,\mathbf{R}_1^{-1}\mathbf{R}_0$, the group inverse of the Forster argument up to conjugation. The two agree in norm, and therefore in cost, but not in sign or in Jacobian structure, so the corrected form above is the one from which §3.1.2 differentiates. The position and velocity rows were already stated correctly and are unchanged.)
-
-**Bias random walk.** The biases are not constant. They are modelled as a discrete-time Gaussian random walk between consecutive states, contributing two further three-vector residuals per inertial factor,
-
-$$
-\mathbf{r}_{b_g} = \mathbf{W}_{b_g}\left(\mathbf{b}_{g,0} - \mathbf{b}_{g,1}\right), \qquad
-\mathbf{r}_{b_a} = \mathbf{W}_{b_a}\left(\mathbf{b}_{a,0} - \mathbf{b}_{a,1}\right),
-$$
-
-with the diagonal weights $\mathbf{W}_{b_g} = \text{diag}(\boldsymbol{\sigma}_{b_g})^{-1}/\sqrt{\Delta t}$ and $\mathbf{W}_{b_a} = \text{diag}(\boldsymbol{\sigma}_{b_a})^{-1}/\sqrt{\Delta t}$ formed at `imu_block.hpp:76` and `:91` from the per-axis standard deviations $\boldsymbol{\sigma}_{b_\bullet}$ supplied by the calibration. The $\Delta t^{-1/2}$ scaling is what makes the factor a random walk rather than a fixed penalty, since the variance of a Wiener increment grows linearly in the elapsed time and its inverse square root therefore weights long intervals more loosely.
 
 **Whitening and assembly.** The nine inertial rows are whitened by the square-root inverse of the preintegrated covariance, $\tilde{\mathbf{r}} = \boldsymbol{\Sigma}_\Delta^{-1/2}\mathbf{r}$, obtained from the cached factorisation `get_sqrt_cov_inv()`, whereas the six bias rows carry their weights inside $\mathbf{W}_{b_\bullet}$ as written above. `ImuBlock::linearizeImu` (`include/basalt/linearization/imu_block.hpp:26`) stacks all fifteen whitened rows into a single residual vector $\mathbf{r} \in \mathbb{R}^{15}$ and a single Jacobian $\mathbf{J}_p \in \mathbb{R}^{15 \times 30}$ spanning the two states the factor touches, which is the form the linearisation classes of §3.1.5 consume.
 
@@ -716,61 +686,47 @@ Differentiating the residual of §3.1.1 requires three pieces of machinery beyon
 
 **Preliminary 3, the left and right Jacobians of $SO(3)$.** The logarithm is a nonlinear map, so differentiating $\text{Log}$ of a perturbed product produces a correction factor. For a fixed $\mathbf{A} \in SO(3)$ with $\boldsymbol{\phi} = \text{Log}(\mathbf{A})$,
 
-$$
-\frac{\partial}{\partial \boldsymbol{\epsilon}}\Big|_{\boldsymbol{\epsilon}=\mathbf{0}} \text{Log}\!\left(\mathbf{A}\,\text{Exp}(\boldsymbol{\epsilon})\right) = \mathbf{J}_r^{-1}(\boldsymbol{\phi}), \qquad
-\frac{\partial}{\partial \boldsymbol{\epsilon}}\Big|_{\boldsymbol{\epsilon}=\mathbf{0}} \text{Log}\!\left(\text{Exp}(\boldsymbol{\epsilon})\,\mathbf{A}\right) = \mathbf{J}_l^{-1}(\boldsymbol{\phi}),
-$$
+$$\frac{\partial}{\partial \boldsymbol{\epsilon}}\Big|_{\boldsymbol{\epsilon}=\mathbf{0}} \text{Log}\!\left(\mathbf{A}\,\text{Exp}(\boldsymbol{\epsilon})\right) = \mathbf{J}_r^{-1}(\boldsymbol{\phi}), \qquad \frac{\partial}{\partial \boldsymbol{\epsilon}}\Big|_{\boldsymbol{\epsilon}=\mathbf{0}} \text{Log}\!\left(\text{Exp}(\boldsymbol{\epsilon})\,\mathbf{A}\right) = \mathbf{J}_l^{-1}(\boldsymbol{\phi}),$$
 
 where $\mathbf{J}_r$ and $\mathbf{J}_l$ are the right and left Jacobians of $SO(3)$ and satisfy $\mathbf{J}_l(\boldsymbol{\phi}) = \mathbf{J}_r(-\boldsymbol{\phi})$. Whether the right or the left inverse appears is decided entirely by which side of the product the perturbation ends up on, and both occur in this residual. Basalt provides them as `Sophus::rightJacobianInvSO3` and `Sophus::leftJacobianInvSO3`.
 
 Two abbreviations shorten the derivation. Let
 
-$$
-\mathbf{t} = \mathbf{R}_0^T\!\left(\mathbf{p}_1 - \mathbf{p}_0 - \mathbf{v}_0 \Delta t - \tfrac{1}{2}\mathbf{g}\Delta t^2\right), \qquad
-\mathbf{t}_2 = \mathbf{R}_0^T\!\left(\mathbf{v}_1 - \mathbf{v}_0 - \mathbf{g}\Delta t\right),
-$$
+$$\mathbf{t} = \mathbf{R}_0^T\!\left(\mathbf{p}_1 - \mathbf{p}_0 - \mathbf{v}_0 \Delta t - \frac{1}{2}\mathbf{g}\Delta t^2\right), \qquad \mathbf{t}_2 = \mathbf{R}_0^T\!\left(\mathbf{v}_1 - \mathbf{v}_0 - \mathbf{g}\Delta t\right),$$
 
 which are precisely the local variables `tmp` and `tmp2` in the implementation, so that $\mathbf{r}_p = \mathbf{t} - (\cdots)$ and $\mathbf{r}_v = \mathbf{t}_2 - (\cdots)$ with the parenthesised terms independent of the pose and velocity.
 
-**Derivative with respect to the first state.** The position row depends on $\mathbf{p}_0$, $\boldsymbol{\varphi}_0$ and $\mathbf{v}_0$. The two additive dependences are immediate, $\partial \mathbf{r}_p/\partial \delta\mathbf{p}_0 = -\mathbf{R}_0^T$ and $\partial \mathbf{r}_p/\partial \delta\mathbf{v}_0 = -\mathbf{R}_0^T \Delta t$. For the rotational dependence, substitute the perturbed inverse of Preliminary 1 and write $\mathbf{u} = \mathbf{p}_1 - \mathbf{p}_0 - \mathbf{v}_0\Delta t - \tfrac{1}{2}\mathbf{g}\Delta t^2$ so that $\mathbf{t} = \mathbf{R}_0^T\mathbf{u}$,
+**Derivative with respect to the first state.** The position row depends on $\mathbf{p}_0$, $\boldsymbol{\varphi}_0$ and $\mathbf{v}_0$. The two additive dependences are immediate, $\partial \mathbf{r}_p/\partial \delta\mathbf{p}_0 = -\mathbf{R}_0^T$ and $\partial \mathbf{r}_p/\partial \delta\mathbf{v}_0 = -\mathbf{R}_0^T \Delta t$. For the rotational dependence, substitute the perturbed inverse of Preliminary 1 and write $\mathbf{u} = \mathbf{p}_1 - \mathbf{p}_0 - \mathbf{v}_0\Delta t - \frac{1}{2}\mathbf{g}\Delta t^2$ so that $\mathbf{t} = \mathbf{R}_0^T\mathbf{u}$,
 
-$$
-\mathbf{t}(\delta\boldsymbol{\varphi}_0) = \mathbf{R}_0^T\!\left(\mathbf{I} - [\delta\boldsymbol{\varphi}_0]_\times\right)\mathbf{u} = \mathbf{t} - \mathbf{R}_0^T [\delta\boldsymbol{\varphi}_0]_\times \mathbf{R}_0\, \mathbf{t} = \mathbf{t} - \left[\mathbf{R}_0^T \delta\boldsymbol{\varphi}_0\right]_\times \mathbf{t} = \mathbf{t} + [\mathbf{t}]_\times \mathbf{R}_0^T\, \delta\boldsymbol{\varphi}_0,
-$$
+$$\mathbf{t}(\delta\boldsymbol{\varphi}_0) = \mathbf{R}_0^T\!\left(\mathbf{I} - [\delta\boldsymbol{\varphi}_0]_\times\right)\mathbf{u} = \mathbf{t} - \mathbf{R}_0^T [\delta\boldsymbol{\varphi}_0]_\times \mathbf{R}_0\, \mathbf{t} = \mathbf{t} - \left[\mathbf{R}_0^T \delta\boldsymbol{\varphi}_0\right]_\times \mathbf{t} = \mathbf{t} + [\mathbf{t}]_\times \mathbf{R}_0^T\, \delta\boldsymbol{\varphi}_0,$$
 
 where the second equality inserts $\mathbf{R}_0\mathbf{R}_0^T = \mathbf{I}$, the third applies Preliminary 2, and the fourth uses the antisymmetry $[\mathbf{a}]_\times\mathbf{b} = -[\mathbf{b}]_\times\mathbf{a}$. Hence $\partial \mathbf{r}_p/\partial \delta\boldsymbol{\varphi}_0 = [\mathbf{t}]_\times \mathbf{R}_0^T$. The velocity row is the same computation with $\mathbf{t}_2$ in place of $\mathbf{t}$, giving $\partial \mathbf{r}_v/\partial \delta\boldsymbol{\varphi}_0 = [\mathbf{t}_2]_\times \mathbf{R}_0^T$ and $\partial \mathbf{r}_v/\partial \delta\mathbf{v}_0 = -\mathbf{R}_0^T$.
 
 For the rotation row, collect the factors standing to the left of $\mathbf{R}_0$ into $\mathbf{A} = \text{Exp}(\boldsymbol{\delta}_g[4{:}6])\,\Delta\mathbf{R}\,\mathbf{R}_1^{-1}$, so that $\mathbf{r}_R = \text{Log}(\mathbf{A}\mathbf{R}_0)$. Perturbing gives
 
-$$
-\text{Log}\!\left(\mathbf{A}\,\text{Exp}(\delta\boldsymbol{\varphi}_0)\,\mathbf{R}_0\right) = \text{Log}\!\left(\mathbf{A}\mathbf{R}_0 \cdot \mathbf{R}_0^{-1}\text{Exp}(\delta\boldsymbol{\varphi}_0)\mathbf{R}_0\right) = \text{Log}\!\left(\mathbf{A}\mathbf{R}_0\, \text{Exp}\!\left(\mathbf{R}_0^T \delta\boldsymbol{\varphi}_0\right)\right),
-$$
+$$\text{Log}\!\left(\mathbf{A}\,\text{Exp}(\delta\boldsymbol{\varphi}_0)\,\mathbf{R}_0\right) = \text{Log}\!\left(\mathbf{A}\mathbf{R}_0 \cdot \mathbf{R}_0^{-1}\text{Exp}(\delta\boldsymbol{\varphi}_0)\mathbf{R}_0\right) = \text{Log}\!\left(\mathbf{A}\mathbf{R}_0\, \text{Exp}\!\left(\mathbf{R}_0^T \delta\boldsymbol{\varphi}_0\right)\right),$$
 
 using the adjoint property $\mathbf{R}^{-1}\text{Exp}(\boldsymbol{\epsilon})\mathbf{R} = \text{Exp}(\mathbf{R}^{-1}\boldsymbol{\epsilon})$, which is the group-level form of Preliminary 2. The perturbation now sits on the right of the product, so the right Jacobian inverse of Preliminary 3 applies and $\partial \mathbf{r}_R/\partial \delta\boldsymbol{\varphi}_0 = \mathbf{J}_r^{-1}(\mathbf{r}_R)\, \mathbf{R}_0^T$.
 
 **Derivative with respect to the second state.** Only three blocks are non-zero. Position and velocity enter linearly and undifferentiated by any rotation of their own, giving $\partial \mathbf{r}_p/\partial \delta\mathbf{p}_1 = \mathbf{R}_0^T$ and $\partial \mathbf{r}_v/\partial \delta\mathbf{v}_1 = \mathbf{R}_0^T$. For the rotation row, set $\mathbf{B} = \text{Exp}(\boldsymbol{\delta}_g[4{:}6])\,\Delta\mathbf{R}$ and perturb $\mathbf{R}_1$, so that $\mathbf{R}_1^{-1} \to \mathbf{R}_1^{-1}\text{Exp}(-\delta\boldsymbol{\varphi}_1)$ and
 
-$$
-\text{Log}\!\left(\mathbf{B}\,\mathbf{R}_1^{-1}\text{Exp}(-\delta\boldsymbol{\varphi}_1)\,\mathbf{R}_0\right) = \text{Log}\!\left(\mathbf{B}\mathbf{R}_1^{-1}\mathbf{R}_0\, \text{Exp}\!\left(-\mathbf{R}_0^T \delta\boldsymbol{\varphi}_1\right)\right),
-$$
+$$\text{Log}\!\left(\mathbf{B}\,\mathbf{R}_1^{-1}\text{Exp}(-\delta\boldsymbol{\varphi}_1)\,\mathbf{R}_0\right) = \text{Log}\!\left(\mathbf{B}\mathbf{R}_1^{-1}\mathbf{R}_0\, \text{Exp}\!\left(-\mathbf{R}_0^T \delta\boldsymbol{\varphi}_1\right)\right),$$
 
 by the same adjoint move, whence $\partial \mathbf{r}_R/\partial \delta\boldsymbol{\varphi}_1 = -\mathbf{J}_r^{-1}(\mathbf{r}_R)\, \mathbf{R}_0^T$. Note that the second state contributes nothing to the inertial residual through its biases. The biases of the interval enter only at its start, and the bias of the second state is constrained solely by the random-walk residual.
 
 **Derivative with respect to the biases.** The corrections $\boldsymbol{\delta}_g$ and $\boldsymbol{\delta}_a$ are subtracted from the position and velocity rows, so those rows differentiate to the negated preintegration bias Jacobians, $\partial \mathbf{r}_{p,v}/\partial \mathbf{b}_\bullet = -\mathbf{J}_{\Delta|b_\bullet}[1{:}3 \text{ and } 7{:}9,\, :]$. The rotation row is different, because there the gyroscope correction enters inside an exponential standing on the extreme left of the product. Writing $\mathbf{C} = \Delta\mathbf{R}\,\mathbf{R}_1^{-1}\mathbf{R}_0$ and perturbing the gyroscope bias by $\delta\mathbf{b}_g$ gives, to first order, $\text{Log}(\text{Exp}(\mathbf{J}^R_{\Delta|b_g}\delta\mathbf{b}_g)\,\mathbf{C})$, a left perturbation, so the left Jacobian inverse applies and
 
-$$
-\frac{\partial \mathbf{r}_R}{\partial \mathbf{b}_g} = \mathbf{J}_l^{-1}(\mathbf{r}_R)\, \mathbf{J}^R_{\Delta|b_g}, \qquad \frac{\partial \mathbf{r}_R}{\partial \mathbf{b}_a} = \mathbf{0},
-$$
+$$\frac{\partial \mathbf{r}_R}{\partial \mathbf{b}_g} = \mathbf{J}_l^{-1}(\mathbf{r}_R)\, \mathbf{J}^R_{\Delta|b_g}, \qquad \frac{\partial \mathbf{r}_R}{\partial \mathbf{b}_a} = \mathbf{0},$$
 
 the sign being positive here, in contrast to the negated position and velocity blocks, because the gyroscope correction is composed with the delta rather than subtracted from it. The accelerometer block vanishes for the reason already given in §3.1.1, namely that the rotation delta has no accelerometer dependence.
 
-**Assembled blocks.** Collecting the results, with columns ordered $[\delta\mathbf{p}, \delta\boldsymbol{\varphi}, \delta\mathbf{v}, \delta\mathbf{b}_g, \delta\mathbf{b}_a]$ and rows ordered $[\mathbf{r}_p, \mathbf{r}_R, \mathbf{r}_v, \mathbf{r}_{b_g}, \mathbf{r}_{b_a}]$,
+**Assembled blocks.** Collecting the results, with columns ordered $[\delta\mathbf{p}, \delta\boldsymbol{\varphi}, \delta\mathbf{v}, \delta\mathbf{b}_g, \delta\mathbf{b}_a]$ and rows ordered $[\mathbf{r}_p, \mathbf{r}_R, \mathbf{r}_v, \mathbf{r}_{b_g}, \mathbf{r}_{b_a}]$, and abbreviating the two rotation-row entries already derived above as $\mathbf{Q} := \mathbf{J}_r^{-1}(\mathbf{r}_R)\,\mathbf{R}_0^T$ and $\mathbf{L} := \mathbf{J}_l^{-1}(\mathbf{r}_R)\,\mathbf{J}^R_{\Delta|b_g}$ so that the two matrices below render at a readable width,
 
 $$
 \frac{\partial \mathbf{r}}{\partial \mathbf{s}_0} =
 \begin{bmatrix}
 -\mathbf{R}_0^T & [\mathbf{t}]_\times \mathbf{R}_0^T & -\mathbf{R}_0^T \Delta t & -\mathbf{J}^p_{\Delta|b_g} & -\mathbf{J}^p_{\Delta|b_a} \\
-\mathbf{0} & \mathbf{J}_r^{-1}(\mathbf{r}_R)\mathbf{R}_0^T & \mathbf{0} & \mathbf{J}_l^{-1}(\mathbf{r}_R)\mathbf{J}^R_{\Delta|b_g} & \mathbf{0} \\
+\mathbf{0} & \mathbf{Q} & \mathbf{0} & \mathbf{L} & \mathbf{0} \\
 \mathbf{0} & [\mathbf{t}_2]_\times \mathbf{R}_0^T & -\mathbf{R}_0^T & -\mathbf{J}^v_{\Delta|b_g} & -\mathbf{J}^v_{\Delta|b_a} \\
 \mathbf{0} & \mathbf{0} & \mathbf{0} & \mathbf{W}_{b_g} & \mathbf{0} \\
 \mathbf{0} & \mathbf{0} & \mathbf{0} & \mathbf{0} & \mathbf{W}_{b_a}
@@ -781,7 +737,7 @@ $$
 \frac{\partial \mathbf{r}}{\partial \mathbf{s}_1} =
 \begin{bmatrix}
 \mathbf{R}_0^T & \mathbf{0} & \mathbf{0} & \mathbf{0} & \mathbf{0} \\
-\mathbf{0} & -\mathbf{J}_r^{-1}(\mathbf{r}_R)\mathbf{R}_0^T & \mathbf{0} & \mathbf{0} & \mathbf{0} \\
+\mathbf{0} & -\mathbf{Q} & \mathbf{0} & \mathbf{0} & \mathbf{0} \\
 \mathbf{0} & \mathbf{0} & \mathbf{R}_0^T & \mathbf{0} & \mathbf{0} \\
 \mathbf{0} & \mathbf{0} & \mathbf{0} & -\mathbf{W}_{b_g} & \mathbf{0} \\
 \mathbf{0} & \mathbf{0} & \mathbf{0} & \mathbf{0} & -\mathbf{W}_{b_a}
@@ -800,21 +756,15 @@ When variables such as old keyframes, velocities and biases are removed from the
 
 For the non-linear least squares optimisation, this newly constructed prior must be incorporated into the total objective function. This yields a marginalisation penalty acting on the active state increment $\boldsymbol{\xi}$,
 
-$$
-E_\text{marg}(\boldsymbol{\xi}) = \mathbf{b}^{\ast T} \boldsymbol{\xi} + \frac{1}{2} \boldsymbol{\xi}^T \mathbf{H}^{\ast} \boldsymbol{\xi}.
-$$
+$$E_\text{marg}(\boldsymbol{\xi}) = \mathbf{b}^{\ast T} \boldsymbol{\xi} + \frac{1}{2} \boldsymbol{\xi}^T \mathbf{H}^{\ast} \boldsymbol{\xi}.$$
 
 To optimise this objective alongside the visual and inertial residuals using Gauss-Newton or Levenberg-Marquardt solvers, the marginalisation energy is conventionally reformulated as a sum of squares. The relationship between the energy $E_\text{marg}(\boldsymbol{\xi})$ and its equivalent squared residual $\mathbf{r}_\text{marg}(\boldsymbol{\xi})$ is $E_\text{marg}(\boldsymbol{\xi}) = \frac{1}{2}\|\mathbf{r}_\text{marg}(\boldsymbol{\xi})\|^2 + C$. To find this residual, the information matrix $\mathbf{H}^{\ast}$ is decomposed by a square-root decomposition, Cholesky or eigenvalue, such that $\mathbf{J}_\text{marg}^T \mathbf{J}_\text{marg} = \mathbf{H}^{\ast}$. The corresponding residual vector is then
 
-$$
-\mathbf{r}_\text{marg}(\boldsymbol{\xi}) = \mathbf{J}_\text{marg}\, \boldsymbol{\xi} + \mathbf{r}_{\text{marg},0}.
-$$
+$$\mathbf{r}_\text{marg}(\boldsymbol{\xi}) = \mathbf{J}_\text{marg}\, \boldsymbol{\xi} + \mathbf{r}_{\text{marg},0}.$$
 
 Expanding the squared norm,
 
-$$
-\frac{1}{2}\left\|\mathbf{J}_\text{marg}\boldsymbol{\xi} + \mathbf{r}_{\text{marg},0}\right\|^2 = \frac{1}{2}\boldsymbol{\xi}^T \mathbf{J}_\text{marg}^T \mathbf{J}_\text{marg} \boldsymbol{\xi} + \mathbf{r}_{\text{marg},0}^T \mathbf{J}_\text{marg} \boldsymbol{\xi} + \frac{1}{2}\mathbf{r}_{\text{marg},0}^T \mathbf{r}_{\text{marg},0},
-$$
+$$\frac{1}{2}\left|\mathbf{J}_\text{marg}\boldsymbol{\xi} + \mathbf{r}_{\text{marg},0}\right|^2 = \frac{1}{2}\boldsymbol{\xi}^T \mathbf{J}_\text{marg}^T \mathbf{J}_\text{marg} \boldsymbol{\xi} + \mathbf{r}_{\text{marg},0}^T \mathbf{J}_\text{marg} \boldsymbol{\xi} + \frac{1}{2}\mathbf{r}_{\text{marg},0}^T \mathbf{r}_{\text{marg},0},$$
 
 and matching the linear terms against $E_\text{marg}(\boldsymbol{\xi})$ identifies the constant offset vector $\mathbf{r}_{\text{marg},0}$. It must satisfy $\mathbf{J}_\text{marg}^T \mathbf{r}_{\text{marg},0} = \mathbf{b}^{\ast}$, whose minimum-norm solution is $\mathbf{r}_{\text{marg},0} = (\mathbf{J}_\text{marg}^T)^{+}\, \mathbf{b}^{\ast}$. Minimising the squared norm of $\mathbf{r}_\text{marg}(\boldsymbol{\xi})$ therefore reproduces the behaviour of minimising $E_\text{marg}(\boldsymbol{\xi})$ exactly. A complete step-by-step derivation of this formulation, including the required background on quadratic forms, positive semi-definite square roots and the Moore-Penrose pseudoinverse, is presented in `doc/Marginalisation.md` Appendix A, and the Schur complement that produces $\mathbf{H}^{\ast}$ and $\mathbf{b}^{\ast}$ in the first place is derived in `doc/Marginalisation.md` §3.2.
 
@@ -824,9 +774,7 @@ The inclusion of the marginalisation residual is vital because it anchors the ac
 
 The three residual families are now in hand, the reprojection residual of §2.2.4, the inertial and bias random-walk residuals of §3.1.1, and the marginalisation residual above. The optimal state $\mathbf{s}^{\ast}$ is the minimiser of their weighted sum of squares,
 
-$$
-E(\mathbf{s}) = \underbrace{\frac{1}{2}\sum_{(i,j) \in \mathcal{V}} \mathbf{r}_{ij}^T\, \boldsymbol{\Sigma}_\text{vis}^{-1}\, \mathbf{r}_{ij}}_{\text{reprojection}} + \underbrace{\frac{1}{2}\sum_{k \in \mathcal{I}} \mathbf{r}_k^T\, \boldsymbol{\Sigma}_k^{-1}\, \mathbf{r}_k}_{\text{inertial}} + \underbrace{\frac{1}{2}\sum_{k \in \mathcal{I}} \left(\mathbf{r}_k^{b_g\,T} \mathbf{W}_{b_g} \mathbf{r}_k^{b_g} + \mathbf{r}_k^{b_a\,T} \mathbf{W}_{b_a} \mathbf{r}_k^{b_a}\right)}_{\text{bias random walk}} + E_\text{marg}(\mathbf{s}),
-$$
+$$E(\mathbf{s}) = \underbrace{\frac{1}{2}\sum_{(i,j) \in \mathcal{V}} \mathbf{r}_{ij}^T\, \boldsymbol{\Sigma}_\text{vis}^{-1}\, \mathbf{r}_{ij}}_{\text{reprojection}} + \underbrace{\frac{1}{2}\sum_{k \in \mathcal{I}} \mathbf{r}_k^T\, \boldsymbol{\Sigma}_k^{-1}\, \mathbf{r}_k}_{\text{inertial}} + \underbrace{\frac{1}{2}\sum_{k \in \mathcal{I}} \left(\mathbf{r}_k^{b_g\,T} \mathbf{W}_{b_g} \mathbf{r}_k^{b_g} + \mathbf{r}_k^{b_a\,T} \mathbf{W}_{b_a} \mathbf{r}_k^{b_a}\right)}_{\text{bias random walk}} + E_\text{marg}(\mathbf{s}),$$
 
 where $\mathcal{V}$ is the set of valid visual observations, feature $j$ observed in frame $i$, and $\mathcal{I}$ is the set of preintegrated inertial measurements connecting consecutive frames. The visual term is the bundle adjustment objective $E_\text{BA}$ of §2.2.6 unchanged, including its Huber robustification and its isotropic covariance $\boldsymbol{\Sigma}_\text{vis} = \sigma_\text{obs}^2 \mathbf{I}_2$, and the marginalisation term is the same $E_\text{marg}$ that already appeared in the vision-only objective $E_\text{VO}$ of §2.2.6. Setting the inertial and bias terms to zero and shrinking every fifteen-dimensional state to its pose recovers $E_\text{VO}$ exactly, which is the precise sense in which VIO extends rather than replaces the estimator of §2.
 
@@ -1124,7 +1072,7 @@ every linearisation point and offset maps by $\mathbf{R} \leftarrow \mathbf{Q} \
 
 Inertial Measurement Units sample angular velocity $\boldsymbol{\omega}_k$ and specific force $\mathbf{a}_k$ at frequencies (typically 200–1000 Hz) that far exceed the camera frame rate (20–60 Hz). A naïve optimizer that treated each IMU sample as an independent factor and kept its endpoints as optimization variables would incur a linear re-integration cost every time a pose, velocity, or bias changed during a non-linear iteration. Preintegration (Lupton and Sukkarieh, 2012; Forster et al., 2017) folds the raw samples between two camera timestamps into a single pseudo-measurement expressed in the reference frame of the first state, decoupling the heavy integration from the optimization variables.
 
-The canonical reference is Forster et al. (2017), *On-Manifold Preintegration for Real-Time Visual–Inertial Odometry*, IEEE T-RO. Basalt deviates from the Forster formulation in two respects: (i) it stores the delta state as a `PoseVelState<Scalar>` with a full $SE(3) \times \mathbb{R}^3$ structure and propagates it in Euclidean body frame rather than separately accumulating $\Delta R, \Delta v, \Delta p$; (ii) it uses a mid-point (trapezoidal) integrator for the rotation update to reduce discretization error at moderate sampling rates.
+The canonical reference is Forster et al. (2017), *On-Manifold Preintegration for Real-Time Visual–Inertial Odometry*, IEEE T-RO. Basalt deviates from the Forster formulation in two respects: (i) it stores the delta state as a `PoseVelState<Scalar>` with a full $SE(3) \times \mathbb{R}^3$ structure and propagates it in Euclidean body frame rather than separately accumulating $\Delta R, \Delta v, \Delta p$; (ii) it uses a mid-point integrator, evaluating the rotation at the temporal midpoint of each sample rather than at either endpoint, to reduce discretization error at moderate sampling rates, a scheme distinct from and more accurate than the trapezoidal rule the derivation in §4.1 contrasts it with.
 
 ### 4.1 Mathematical Formulation
 
@@ -1134,30 +1082,101 @@ $$ \mathbf{a}_k = \mathbf{a}_k^{\text{raw}} - \mathbf{b}_a^\text{lin}, \qquad \b
 
 Gravity is *not* removed at this stage; it is added at residual-evaluation time through the predicted-state equation.
 
-**Mid-point integrator.** For a time step $\Delta t = t_{k+1} - t_k$, the body-frame state $(\mathbf{R}_k, \mathbf{v}_k, \mathbf{p}_k)$ is propagated using the mid-point rotation $\mathbf{R}_{k+\tfrac{1}{2}} = \mathbf{R}_k\, \text{Exp}\!\left(\tfrac{1}{2}\Delta t\, \boldsymbol{\omega}_k\right)$:
+**Mid-point integrator.** For a time step $\Delta t = t_{k+1} - t_k$, the body-frame state $(\mathbf{R}_k, \mathbf{v}_k, \mathbf{p}_k)$ is propagated using the mid-point rotation $\mathbf{R}_{k+\frac{1}{2}} = \mathbf{R}_k\, \text{Exp}\!\left(\frac{1}{2}\Delta t\, \boldsymbol{\omega}_k\right)$:
 
-$$
-\begin{aligned}
-  \mathbf{R}_{k+1} &= \mathbf{R}_k\, \text{Exp}(\Delta t\, \boldsymbol{\omega}_k), \\
-  \mathbf{v}_{k+1} &= \mathbf{v}_k + \mathbf{R}_{k+\tfrac{1}{2}}\, \mathbf{a}_k\, \Delta t, \\
-  \mathbf{p}_{k+1} &= \mathbf{p}_k + \mathbf{v}_k\, \Delta t + \tfrac{1}{2}\,\mathbf{R}_{k+\tfrac{1}{2}}\, \mathbf{a}_k\, \Delta t^2.
-\end{aligned}
-$$
+$$\begin{aligned} \mathbf{R}_{k+1} &= \mathbf{R}_k\, \text{Exp}(\Delta t\, \boldsymbol{\omega}_k), \\ \mathbf{v}_{k+1} &= \mathbf{v}_k + \mathbf{R}_{k+\frac{1}{2}}\, \mathbf{a}_k\, \Delta t, \\ \mathbf{p}_{k+1} &= \mathbf{p}_k + \mathbf{v}_k\, \Delta t + \frac{1}{2}\,\mathbf{R}_{k+\frac{1}{2}}\, \mathbf{a}_k\, \Delta t^2. \end{aligned}$$
 
-The mid-point evaluation of $\mathbf{R}$ is second-order accurate for constant $\boldsymbol{\omega}$, whereas a trapezoidal rule in $\mathbf{R}$ alone would be first-order. The gravity term is intentionally absent — the delta state is expressed *relative* to the starting body frame with zero gravity.
+The gravity term is intentionally absent, the delta state is expressed *relative* to the starting body frame with zero gravity.
 
-**Covariance and bias Jacobian propagation.** Linearising the propagation around $(\mathbf{R}_k, \mathbf{v}_k, \mathbf{p}_k)$ gives the state-transition Jacobian $\mathbf{F}$ and the noise-input Jacobians $\mathbf{A}$ (accel) and $\mathbf{G}$ (gyro):
+**Why the mid-point rule.** The rotation update itself carries no approximation, given a constant gyroscope sample $\boldsymbol{\omega}_k$ held over the step, $\mathbf{R}(t) = \mathbf{R}_k\,\text{Exp}(t\,\boldsymbol{\omega}_k)$ is the exact solution of $\dot{\mathbf{R}} = \mathbf{R}[\boldsymbol{\omega}_k]_\times$, not an approximation of it. The approximation enters only in how the single, cheap evaluation of this continuously rotating $\mathbf{R}(t)$ is used to stand in for the velocity integral $\int_0^{\Delta t} \mathbf{R}(t)\,\mathbf{a}_k\,dt$, which has no closed form for a continuously rotating integrand and must be approximated by one representative rotation times $\mathbf{a}_k \Delta t$.
 
-$$
-\boldsymbol{\Sigma}_{k+1} = \mathbf{F}\, \boldsymbol{\Sigma}_k\, \mathbf{F}^T + \mathbf{A}\, \boldsymbol{\Sigma}_a\, \mathbf{A}^T + \mathbf{G}\, \boldsymbol{\Sigma}_g\, \mathbf{G}^T,
-$$
+The cheapest representative is the left endpoint, $\mathbf{R}(t) \approx \mathbf{R}_k$ for the whole step, the Euler choice. Expanding $\mathbf{R}(t) = \mathbf{R}_k\big(\mathbf{I} + t[\boldsymbol{\omega}_k]_\times + O(t^2)\big)$ about $t=0$, the resulting local error is
 
-with $\boldsymbol{\Sigma}_a, \boldsymbol{\Sigma}_g$ the discrete-time accelerometer and gyroscope noise covariances (diagonal). The bias-correction Jacobians, which enable analytical bias updates without re-integration, are propagated in parallel:
+$$\int_0^{\Delta t}\!\big(\mathbf{R}(t)-\mathbf{R}_k\big)\mathbf{a}_k\,dt \approx \mathbf{R}_k[\boldsymbol{\omega}_k]_\times\mathbf{a}_k\int_0^{\Delta t}\! t\,dt = \mathbf{R}_k[\boldsymbol{\omega}_k]_\times\mathbf{a}_k\,\frac{\Delta t^2}{2} = O(\Delta t^2),$$
 
-$$
-\mathbf{J}_{\Delta|b_a} \leftarrow -\mathbf{A} + \mathbf{F}\, \mathbf{J}_{\Delta|b_a}, \qquad
-\mathbf{J}_{\Delta|b_g} \leftarrow -\mathbf{G} + \mathbf{F}\, \mathbf{J}_{\Delta|b_g}.
-$$
+which accumulates over $N=T/\Delta t$ steps spanning a fixed interval $T$ to a global error of $O(\Delta t)$, first order, so halving the sampling period only halves the eventual drift.
+
+Evaluating the representative rotation at the temporal midpoint instead removes this leading term entirely. Because $\boldsymbol{\omega}_k$ is held constant, rotations about it compose additively in the exponent, so $\mathbf{R}(t) = \mathbf{R}_{k+\frac12}\,\text{Exp}(s\,\boldsymbol{\omega}_k)$ exactly, with $s = t - \frac{\Delta t}{2}$ ranging symmetrically over $[-\frac{\Delta t}{2}, \frac{\Delta t}{2}]$. Expanding about the midpoint,
+
+$$\mathbf{R}(t) - \mathbf{R}_{k+\frac12} \approx \mathbf{R}_{k+\frac12}\Big(s[\boldsymbol{\omega}_k]_\times + \frac{s^2}{2}[\boldsymbol{\omega}_k]_\times^2 + O(s^3)\Big),$$
+
+the linear-in-$s$ term is odd on the symmetric interval and integrates to exactly zero, $\int_{-\Delta t/2}^{\Delta t/2} s\,ds = 0$, leaving only the quadratic remainder,
+
+$$\int \big(\mathbf{R}(t)-\mathbf{R}_{k+\frac12}\big)\mathbf{a}_k\,dt \approx \mathbf{R}_{k+\frac12}[\boldsymbol{\omega}_k]_\times^2\mathbf{a}_k\int_{-\Delta t/2}^{\Delta t/2}\!\frac{s^2}{2}\,ds = \mathbf{R}_{k+\frac12}[\boldsymbol{\omega}_k]_\times^2\mathbf{a}_k\,\frac{\Delta t^3}{24} = O(\Delta t^3).$$
+
+One extra exponential, $\text{Exp}(\frac12\Delta t\,\boldsymbol{\omega}_k)$, reusing the same gyroscope sample already available, buys a local error one order smaller purely through the symmetric cancellation above, exactly the mechanism behind any second order, or midpoint, quadrature rule. The local error $O(\Delta t^3)$ accumulates to a global error of $O(\Delta t^2)$, one full order better than the Euler choice, so halving the sampling period now quarters the drift rather than merely halving it.
+
+A rule that instead averages the rotation at the two endpoints, $(\mathbf{R}_k+\mathbf{R}_{k+1})/2$, in place of evaluating once at the true midpoint, is weaker than it first appears. Averaging two points on a curved manifold such as $SO(3)$ is not the same as evaluating the curve at its midpoint parameter, the chord between two points on a curve sits off the curve by an amount proportional to curvature times span squared, here $O(\Delta t^2)$, and if the rotation update used to reach the second endpoint is itself linearised, $\mathbf{R}_k(\mathbf{I} + \frac{\Delta t}{2}([\boldsymbol{\omega}_k]_\times+[\boldsymbol{\omega}_{k+1}]_\times))$, rather than composed from the exact exponential, the odd-term cancellation that gives the mid-point rule its second order no longer holds, and the per-step error degrades back to the Euler rate. This is the sense, following Forster et al. (2017), in which a trapezoidal rule in $\mathbf{R}$ alone remains first order while the mid-point evaluation above is second order.
+
+Against a still higher order scheme such as RK4, each additional stage would need the dynamics evaluated at an intermediate time using an intermediate IMU sample that a strapdown IMU simply does not provide, it reports $\boldsymbol{\omega}_k, \mathbf{a}_k$ once per physical sample, not at $t_k+\Delta t/4$. Since IMU rates, typically 200 to 1000 Hz, already far exceed camera rates, the preintegration window between keyframes already contains many samples, and the $O(\Delta t^2)$ global error of the mid-point rule at these rates is already small relative to the sensor noise floor, so the added implementation and runtime cost of a four stage scheme would buy accuracy the raw measurement noise already swamps. The mid-point rule is, in this sense, the accuracy obtainable for the one gyroscope and one accelerometer sample a single step actually supplies, a full order better than the cheapest alternative at the cost of one extra exponential, and not worth outgrowing given what that single sample can support.
+
+**The per-sample transition Jacobians.** Differentiating one mid-point step with respect to its three inputs, the state entering the step $(\mathbf{R}_k, \mathbf{v}_k, \mathbf{p}_k)$, the bias-corrected specific force $\mathbf{a}_k$ and the bias-corrected angular rate $\boldsymbol{\omega}_k$, gives the three matrices `propagateState` returns, $\mathbf{F}_k = \partial \mathbf{s}_{k+1}/\partial \mathbf{s}_k$, $\mathbf{A}_k = \partial \mathbf{s}_{k+1}/\partial \mathbf{a}_k$ and $\mathbf{G}_k = \partial \mathbf{s}_{k+1}/\partial \boldsymbol{\omega}_k$, with rows and columns ordered position, rotation, velocity as throughout this document, and rotation perturbed on the left as in Preliminary 1 of §3.1.2, $\mathbf{R} \to \text{Exp}(\delta\boldsymbol{\varphi})\mathbf{R}$. Throughout, write $\mathbf{a}_w = \mathbf{R}_{k+\frac12}\mathbf{a}_k$ for the mid-point specific force rotated into the world frame.
+
+These three matrices are needed because they are not merely descriptive, the preintegrated covariance $\boldsymbol{\Sigma}_\Delta$ and the bias Jacobians $\mathbf{J}_{\Delta|b_g}, \mathbf{J}_{\Delta|b_a}$ consumed by the residual in §3.1.1 are both computed by propagating exactly these per-sample Jacobians forward through every sample in the interval, so without them neither quantity could be obtained without re-integrating from scratch.
+
+**Derivation of $\mathbf{F}_k$.** The position and velocity rows that depend linearly on $\mathbf{p}_k$ and $\mathbf{v}_k$ are read off directly from the integrator equations, $\partial \mathbf{p}_{k+1}/\partial \mathbf{p}_k = \mathbf{I}$, $\partial \mathbf{v}_{k+1}/\partial \mathbf{v}_k = \mathbf{I}$ and $\partial \mathbf{p}_{k+1}/\partial \mathbf{v}_k = \Delta t\,\mathbf{I}$, since $\mathbf{v}_k$ enters $\mathbf{p}_{k+1}$ only through the term $\mathbf{v}_k\Delta t$. The rotation row reproduces the perturbation unchanged, because perturbing $\mathbf{R}_k \to \text{Exp}(\delta\boldsymbol{\varphi}_k)\mathbf{R}_k$ carries straight through $\mathbf{R}_{k+1} = \mathbf{R}_k\,\text{Exp}(\Delta t\,\boldsymbol{\omega}_k) \to \text{Exp}(\delta\boldsymbol{\varphi}_k)\,\mathbf{R}_{k+1}$, so $\partial \boldsymbol{\varphi}_{k+1}/\partial \boldsymbol{\varphi}_k = \mathbf{I}$.
+
+The only coupling term is the dependence of $\mathbf{v}_{k+1}$ and $\mathbf{p}_{k+1}$ on $\boldsymbol{\varphi}_k$, through $\mathbf{R}_{k+\frac12} = \mathbf{R}_k\,\text{Exp}(\frac12\Delta t\,\boldsymbol{\omega}_k)$. The same perturbation carries through to $\mathbf{R}_{k+\frac12} \to \text{Exp}(\delta\boldsymbol{\varphi}_k)\,\mathbf{R}_{k+\frac12}$, so, to first order,
+
+$$\delta\mathbf{v}_{k+1} = \delta\mathbf{R}_{k+\frac12}\,\mathbf{a}_k\,\Delta t \approx [\delta\boldsymbol{\varphi}_k]_\times\mathbf{R}_{k+\frac12}\mathbf{a}_k\,\Delta t = [\delta\boldsymbol{\varphi}_k]_\times \mathbf{a}_w\,\Delta t = -[\mathbf{a}_w\Delta t]_\times\,\delta\boldsymbol{\varphi}_k,$$
+
+$\mathbf{a}_w = \mathbf{R}_{k+\frac12}\mathbf{a}_k$ is the specific force sample rotated into the world frame by the mid-point orientation, as introduced above, substituted in at the third equality.
+
+the last step using the antisymmetry $[\mathbf{x}]_\times\mathbf{y} = -[\mathbf{y}]_\times\mathbf{x}$, so $\partial \mathbf{v}_{k+1}/\partial \boldsymbol{\varphi}_k = [-\mathbf{a}_w\Delta t]_\times$. Since $\mathbf{p}_{k+1}$ depends on $\boldsymbol{\varphi}_k$ through the identical term scaled by $\frac12\Delta t^2$ rather than $\Delta t$, $\partial \mathbf{p}_{k+1}/\partial \boldsymbol{\varphi}_k = \frac12\Delta t\,\partial \mathbf{v}_{k+1}/\partial \boldsymbol{\varphi}_k$. Collecting all nine blocks,
+
+$$\mathbf{F}_k = \begin{bmatrix} \mathbf{I} & \frac12\Delta t\,[-\mathbf{a}_w\Delta t]_\times & \Delta t\,\mathbf{I} \\ \mathbf{0} & \mathbf{I} & \mathbf{0} \\ \mathbf{0} & [-\mathbf{a}_w\Delta t]_\times & \mathbf{I} \end{bmatrix}.$$
+
+**Derivation of $\mathbf{A}_k$.** The specific force $\mathbf{a}_k$ enters only linearly, through $\mathbf{R}_{k+\frac12}\mathbf{a}_k\,\Delta t$ in $\mathbf{v}_{k+1}$ and the same term scaled by $\frac12\Delta t$ in $\mathbf{p}_{k+1}$, with no effect on $\mathbf{R}_{k+1}$, giving directly
+
+$$\mathbf{A}_k = \begin{bmatrix} \frac12 \mathbf{R}_{k+\frac12}\Delta t^2 \\ \mathbf{0} \\ \mathbf{R}_{k+\frac12}\Delta t \end{bmatrix}.$$
+
+**Derivation of $\mathbf{G}_k$.** The angular rate $\boldsymbol{\omega}_k$ enters through two separate exponentials, the full step one inside $\mathbf{R}_{k+1}$ and the half step one inside $\mathbf{R}_{k+\frac12}$, so each must be linearised in turn using the forward perturbation identity $\text{Exp}(\mathbf{x}+\delta\mathbf{x}) \approx \text{Exp}(\mathbf{x})\,\text{Exp}(\mathbf{J}_r(\mathbf{x})\,\delta\mathbf{x})$, with $\mathbf{J}_r$ the right Jacobian of $SO(3)$ already introduced in §3.1.2. For the full step, $\mathbf{R}_{k+1}' = \mathbf{R}_k\,\text{Exp}(\Delta t\,\boldsymbol{\omega}_k)\,\text{Exp}(\mathbf{J}_r(\Delta t\,\boldsymbol{\omega}_k)\,\Delta t\,\delta\boldsymbol{\omega}_k) = \mathbf{R}_{k+1}\,\text{Exp}(\mathbf{J}_r(\Delta t\,\boldsymbol{\omega}_k)\,\Delta t\,\delta\boldsymbol{\omega}_k)$, a right perturbation of $\mathbf{R}_{k+1}$ that becomes, by the group-level conjugation identity of Preliminary 2 for pure rotations, $\mathbf{R}\,\text{Exp}(\boldsymbol{\xi})\mathbf{R}^{-1} = \text{Exp}(\mathbf{R}\boldsymbol{\xi})$, the left perturbation $\delta\boldsymbol{\varphi}_{k+1} = \mathbf{R}_{k+1}\,\mathbf{J}_r(\Delta t\,\boldsymbol{\omega}_k)\,\Delta t\,\delta\boldsymbol{\omega}_k$, so $\partial \boldsymbol{\varphi}_{k+1}/\partial \boldsymbol{\omega}_k = \mathbf{R}_{k+1}\,\mathbf{J}_r(\Delta t\,\boldsymbol{\omega}_k)\,\Delta t$.
+
+The half step rotation linearises identically with $\frac12\Delta t$ in place of $\Delta t$, giving the left perturbation $\delta\boldsymbol{\varphi}_{k+\frac12} = \mathbf{R}_{k+\frac12}\,\mathbf{J}_r(\frac12\Delta t\,\boldsymbol{\omega}_k)\,\frac12\Delta t\,\delta\boldsymbol{\omega}_k$, which propagates into $\mathbf{v}_{k+1}$ by exactly the same mechanism as $\delta\boldsymbol{\varphi}_k$ did for $\mathbf{F}_k$ above, $\delta\mathbf{v}_{k+1} = -[\mathbf{a}_w\Delta t]_\times\,\delta\boldsymbol{\varphi}_{k+\frac12}$, so
+
+$$\partial \mathbf{v}_{k+1}/\partial \boldsymbol{\omega}_k = \mathbf{G}_v := [-\mathbf{a}_w\Delta t]_\times\, \mathbf{R}_{k+\frac12}\, \mathbf{J}_r\!\left(\frac{1}{2}\Delta t\,\boldsymbol{\omega}_k\right)\tfrac12\Delta t,$$
+
+and, by the same $\frac12\Delta t$ scaling relating position to velocity used for $\mathbf{F}_k$ and $\mathbf{A}_k$, $\partial \mathbf{p}_{k+1}/\partial \boldsymbol{\omega}_k = \frac12\Delta t\,\mathbf{G}_v$. Collecting these,
+
+$$\mathbf{G}_k = \begin{bmatrix} \frac12\Delta t\, \mathbf{G}_v \\ \mathbf{R}_{k+1}\,\mathbf{J}_r(\Delta t\,\boldsymbol{\omega}_k)\,\Delta t \\ \mathbf{G}_v \end{bmatrix}.$$
+
+$\mathbf{F}_k$, $\mathbf{A}_k$ and $\mathbf{G}_k$ are exactly `d_next_d_curr`, `d_next_d_accel` and `d_next_d_gyro` at `preintegration.h:95-125`. The off-diagonal block coupling rotation to velocity and position, $[-\mathbf{a}_w\Delta t]_\times$, recurs in both $\mathbf{F}_k$ and $\mathbf{G}_v$ because both arise from the same mechanism, a rotation perturbation propagating through the rotated vector $\mathbf{a}_w$, the vector case of the Preliminary 2 conjugation identity of §3.1.2.
+
+**Covariance propagation.** Sandwiching these same three matrices between the current covariance and the two noise covariances gives the standard linear uncertainty propagation for a first-order Taylor expansion of a noisy recursion,
+
+$$\boldsymbol{\Sigma}_{k+1} = \mathbf{F}_k\, \boldsymbol{\Sigma}_k\, \mathbf{F}_k^T + \mathbf{A}_k\, \boldsymbol{\Sigma}_a\, \mathbf{A}_k^T + \mathbf{G}_k\, \boldsymbol{\Sigma}_g\, \mathbf{G}_k^T,$$
+
+with $\boldsymbol{\Sigma}_a, \boldsymbol{\Sigma}_g$ the discrete-time accelerometer and gyroscope noise covariances (diagonal).
+
+**Derivation.** The samples entering step $k$ are not noise-free, the bias-corrected $\mathbf{a}_k$ and $\boldsymbol{\omega}_k$ used above carry leftover white measurement noise $\mathbf{n}_a, \mathbf{n}_g$ with covariances $\boldsymbol{\Sigma}_a, \boldsymbol{\Sigma}_g$, on top of whatever error $\delta\mathbf{s}_k$ the accumulated delta already carries from earlier samples. Write the true recursion as $\mathbf{s}_{k+1} = f(\mathbf{s}_k, \mathbf{a}_k, \boldsymbol{\omega}_k)$ and perturb every one of its three arguments at once, $\mathbf{s}_k \to \mathbf{s}_k \oplus \delta\mathbf{s}_k$, $\mathbf{a}_k \to \mathbf{a}_k + \mathbf{n}_a$, $\boldsymbol{\omega}_k \to \boldsymbol{\omega}_k + \mathbf{n}_g$, with $\oplus$ the same left perturbation used throughout this derivation. To first order, the resulting state error is exactly a linear combination of the three perturbations, weighted by the very Jacobians already derived above,
+
+$$\delta\mathbf{s}_{k+1} \approx \mathbf{F}_k\,\delta\mathbf{s}_k + \mathbf{A}_k\,\mathbf{n}_a + \mathbf{G}_k\,\mathbf{n}_g,$$
+
+because $\mathbf{F}_k, \mathbf{A}_k, \mathbf{G}_k$ are, by definition, the partial derivatives of $f$ with respect to each of these three arguments evaluated at the same point, so a simultaneous perturbation of all three is, to first order, simply the sum of their individual effects. The covariance of $\delta\mathbf{s}_{k+1}$ follows by taking $\mathbf{E}[\delta\mathbf{s}_{k+1}\delta\mathbf{s}_{k+1}^T]$ of the expression above,
+
+$$\boldsymbol{\Sigma}_{k+1} = \mathbf{F}_k\,\mathbf{E}[\delta\mathbf{s}_k\delta\mathbf{s}_k^T]\,\mathbf{F}_k^T + \mathbf{A}_k\,\mathbf{E}[\mathbf{n}_a\mathbf{n}_a^T]\,\mathbf{A}_k^T + \mathbf{G}_k\,\mathbf{E}[\mathbf{n}_g\mathbf{n}_g^T]\,\mathbf{G}_k^T + \text{cross terms},$$
+
+and the cross terms vanish because $\mathbf{n}_a$ and $\mathbf{n}_g$ are independent white noise at sample $k$, uncorrelated with each other and with $\delta\mathbf{s}_k$, which depends only on noise from samples before $k$. The three surviving terms are exactly $\boldsymbol{\Sigma}_k$, $\boldsymbol{\Sigma}_a$ and $\boldsymbol{\Sigma}_g$ by definition, which gives the stated recursion. This is the same mechanism, applied to a second moment rather than a point value, that the mean of $\mathbf{s}_{k+1}$ already follows deterministically through $\mathbf{F}_k, \mathbf{A}_k, \mathbf{G}_k$ in the derivation above, only here every one of the three inputs is held uncertain at once instead of being perturbed one at a time.
+
+**Deriving the bias Jacobian recursion.** The bias Jacobian after $k$ samples, $\mathbf{J}_{\Delta|b_a}^{(k)} = \partial \mathbf{s}_k/\partial \mathbf{b}_a$, asks the same question as the covariance propagation, how a small change at the input propagates through the recursion, but for a change in the linearisation bias rather than for sensor noise. The sample entering step $k$ is already bias-corrected, $\mathbf{a}_k = \mathbf{a}_k^\text{raw} - \mathbf{b}_a^\text{lin}$, so a perturbation $\delta\mathbf{b}_a$ of the bias changes that corrected sample by exactly $-\delta\mathbf{b}_a$, the very same input that $\mathbf{A}_k$ already differentiates the step with respect to for noise.
+
+$\mathbf{s}_{k+1} = f(\mathbf{s}_k,\, \mathbf{a}_k^\text{raw} - \mathbf{b}_a,\, \boldsymbol{\omega}_k^\text{raw} - \mathbf{b}_g)$ depends on $\mathbf{b}_a$ through two separate arguments, $\mathbf{s}_k$ and the bias-corrected sample, so the chain rule gives, holding the raw samples fixed,
+
+$$\mathbf{J}_{\Delta|b_a}^{(k+1)} = \frac{\partial \mathbf{s}_{k+1}}{\partial \mathbf{s}_k}\,\frac{\partial \mathbf{s}_k}{\partial \mathbf{b}_a} \;+\; \frac{\partial \mathbf{s}_{k+1}}{\partial \mathbf{a}_k}\,\frac{\partial(\mathbf{a}_k^\text{raw} - \mathbf{b}_a)}{\partial \mathbf{b}_a}.$$
+
+The two partial derivatives on the left of each product are exactly $\mathbf{F}_k = \partial \mathbf{s}_{k+1}/\partial \mathbf{s}_k$ and $\mathbf{A}_k = \partial \mathbf{s}_{k+1}/\partial \mathbf{a}_k$, the same two matrices already derived above, the one on the right of the first product is $\mathbf{J}_{\Delta|b_a}^{(k)}$ by definition, and the one on the right of the second product is $\partial(\mathbf{a}_k^\text{raw} - \mathbf{b}_a)/\partial \mathbf{b}_a = -\mathbf{I}$, since $\mathbf{a}_k^\text{raw}$ does not depend on $\mathbf{b}_a$. Substituting all four,
+
+$$\mathbf{J}_{\Delta|b_a}^{(k+1)} = \mathbf{F}_k\,\mathbf{J}_{\Delta|b_a}^{(k)} + \mathbf{A}_k\,(-\mathbf{I}) = \mathbf{F}_k\, \mathbf{J}_{\Delta|b_a}^{(k)} - \mathbf{A}_k,$$
+
+and identically for the gyroscope bias with $\mathbf{G}_k$ in place of $\mathbf{A}_k$, which is exactly the update executed once per sample at `preintegration.h:183-184`,
+
+$$\mathbf{J}_{\Delta|b_a} \leftarrow -\mathbf{A} + \mathbf{F}\, \mathbf{J}_{\Delta|b_a}, \qquad \mathbf{J}_{\Delta|b_g} \leftarrow -\mathbf{G} + \mathbf{F}\, \mathbf{J}_{\Delta|b_g},$$
+
+seeded at $\mathbf{J}_{\Delta|b_\bullet}^{(0)} = \mathbf{0}$, since the delta is the identity state before any sample has been integrated and so cannot yet depend on the bias. Unrolling the recursion over $N$ samples exposes the structure directly,
+
+$$\mathbf{J}_{\Delta|b_a}^{(N)} = -\sum_{k=0}^{N-1} \left(\prod_{m=k+1}^{N-1} \mathbf{F}_m\right) \mathbf{A}_k,$$
+
+each sample's own sensitivity $\mathbf{A}_k$ carried forward to the end of the interval by every subsequent transition matrix, exactly the mechanism of the covariance propagation above but composed linearly rather than quadratically, since a Jacobian is a first moment and a covariance a second moment, so no transpose or sandwiching noise matrix appears here. This is also why both recursions reuse the very same $\mathbf{F}_k, \mathbf{A}_k, \mathbf{G}_k$, computed once per sample and consumed twice in `integrate` (`preintegration.h:177-184`).
 
 **Residual.** The preintegrated delta, its covariance and its bias Jacobians are consumed by the inertial residual that couples two consecutive navigation states, together with the bias random-walk residual that constrains their biases. Both are stated in §3.1.1 and differentiated in §3.1.2 and are not repeated here. One caveat belongs with the preintegration rather than with the residual, namely that the first-order bias correction $\boldsymbol{\delta}_\bullet = \mathbf{J}_{\Delta|b_\bullet}\Delta\mathbf{b}_\bullet$ is exact only for small $\Delta\mathbf{b}$. If the biases drift substantially within a single interval the delta must be re-integrated, which in Basalt happens implicitly through marginalisation, since that fixes the linearisation biases of every state evicted from the active window and the intervals themselves are short.
 
@@ -1203,13 +1222,7 @@ A good initial guess is essential for the success of any non-linear least-square
 
 Given the previous state $\mathbf{s}_0 = (\mathbf{R}_0, \mathbf{p}_0, \mathbf{v}_0, \mathbf{b}_{a,0}, \mathbf{b}_{g,0})$, gravity $\mathbf{g}$, and a preintegrated measurement $\Delta \mathbf{s} = (\Delta \mathbf{R}, \Delta \mathbf{v}, \Delta \mathbf{p})$ of duration $\Delta t$, the predicted state $\mathbf{s}_1$ is
 
-$$
-\begin{aligned}
-\mathbf{R}_1 &= \mathbf{R}_0\, \Delta \mathbf{R}, \\
-\mathbf{v}_1 &= \mathbf{v}_0 + \mathbf{g}\,\Delta t + \mathbf{R}_0\,\Delta \mathbf{v}, \\
-\mathbf{p}_1 &= \mathbf{p}_0 + \mathbf{v}_0\,\Delta t + \tfrac{1}{2}\mathbf{g}\,\Delta t^2 + \mathbf{R}_0\,\Delta \mathbf{p}.
-\end{aligned}
-$$
+$$\begin{aligned} \mathbf{R}_1 &= \mathbf{R}_0\, \Delta \mathbf{R}, \\ \mathbf{v}_1 &= \mathbf{v}_0 + \mathbf{g}\,\Delta t + \mathbf{R}_0\,\Delta \mathbf{v}, \\ \mathbf{p}_1 &= \mathbf{p}_0 + \mathbf{v}_0\,\Delta t + \frac{1}{2}\mathbf{g}\,\Delta t^2 + \mathbf{R}_0\,\Delta \mathbf{p}. \end{aligned}$$
 
 Biases are propagated by identity: $\mathbf{b}_{a,1} = \mathbf{b}_{a,0}$, $\mathbf{b}_{g,1} = \mathbf{b}_{g,0}$. This is the "zero-bias-random-walk" choice — a consistent prior for the optimizer to adjust.
 
@@ -1304,30 +1317,19 @@ These steps work together to balance two competing pressures: insufficient basel
 
 **Linear triangulation.** Given unit bearing vectors $\mathbf{f}_0, \mathbf{f}_1 \in \mathbb{R}^3$ observed from camera poses with known relative transform $\mathbf{T}_{0,1} \in SE(3)$, the DLT system stacks the two cross-product constraints $\mathbf{f}_i \times (\mathbf{P}_i \mathbf{X}) = 0$ into a $4\times 4$ system $\mathbf{A}\mathbf{X} = \mathbf{0}$ where $\mathbf{X} = [\mathbf{x}^T, w]^T$ is the homogeneous world point. Basalt uses the projection matrices $\mathbf{P}_1 = [\mathbf{I}\ |\ \mathbf{0}]$ and $\mathbf{P}_2 = \mathbf{T}_{0,1}^{-1}$, and the four rows
 
-$$
-\begin{aligned}
-\mathbf{A}_{0,:} &= f_{0,x}\, \mathbf{P}_{1,2,:} - f_{0,z}\, \mathbf{P}_{1,0,:}, \\
-\mathbf{A}_{1,:} &= f_{0,y}\, \mathbf{P}_{1,2,:} - f_{0,z}\, \mathbf{P}_{1,1,:}, \\
-\mathbf{A}_{2,:} &= f_{1,x}\, \mathbf{P}_{2,2,:} - f_{1,z}\, \mathbf{P}_{2,0,:}, \\
-\mathbf{A}_{3,:} &= f_{1,y}\, \mathbf{P}_{2,2,:} - f_{1,z}\, \mathbf{P}_{2,1,:}.
-\end{aligned}
-$$
+$$\begin{aligned} \mathbf{A}_{0,:} &= f_{0,x}\, \mathbf{P}_{1,2,:} - f_{0,z}\, \mathbf{P}_{1,0,:}, \\ \mathbf{A}_{1,:} &= f_{0,y}\, \mathbf{P}_{1,2,:} - f_{0,z}\, \mathbf{P}_{1,1,:}, \\ \mathbf{A}_{2,:} &= f_{1,x}\, \mathbf{P}_{2,2,:} - f_{1,z}\, \mathbf{P}_{2,0,:}, \\ \mathbf{A}_{3,:} &= f_{1,y}\, \mathbf{P}_{2,2,:} - f_{1,z}\, \mathbf{P}_{2,1,:}. \end{aligned}$$
 
 The null-space vector corresponding to the smallest singular value is returned by Jacobi SVD. It is then rescaled such that $\| \mathbf{X}_{0:3} \| = 1$, making the first three components the unit direction and the fourth the inverse-distance.
 
 **Stereographic landmark parameterisation.** The resulting $(\mathbf{d}, \rho)$ pair with $\|\mathbf{d}\|=1$ lies on the unit sphere (a 2-manifold) times the positive real line. To give the direction a *minimal* two-parameter representation, Basalt uses a stereographic projection `StereographicParam::project` (`thirdparty/basalt-headers/include/basalt/camera/stereographic_param.hpp:79`):
 
-$$
-\pi(\mathbf{d}) = \left[\frac{d_x}{d+d_z},\; \frac{d_y}{d+d_z}\right]^T, \quad d = |\mathbf{d}|.
-$$
+$$\pi(\mathbf{d}) = \left[\frac{d_x}{d+d_z},\; \frac{d_y}{d+d_z}\right]^T, \quad d = |\mathbf{d}|.$$
 
 The landmark is stored as `(Vec2 direction, Scalar inv_dist)` in `Keypoint<Scalar>` (`include/basalt/vi_estimator/landmark_database.h:53`). This gives 3 DOF per landmark instead of the 4 of a homogeneous point, eliminating the gauge freedom of the 4-vector's scale. Stereographic projection is smooth and bijective except at the antipodal point $-\mathbf{z}$ — a benign restriction because landmarks always lie in front of the host camera ($d_z > 0$).
 
 **Baseline gate.** The triangulation attempt is rejected if
 
-$$
-\|\mathbf{T}_{0,1}.\text{translation}\|^2 < (\text{vio\_min\_triangulation\_dist})^2.
-$$
+$$\|\mathbf{T}_{0,1}.\text{translation}\|^2 < (\text{vio\_min\_triangulation\_dist})^2.$$
 
 This suppresses the numerical ill-conditioning of near-zero-parallax DLT solutions.
 
@@ -1378,17 +1380,13 @@ Marginalisation, treated thoroughly in `doc/Marginalisation.md`, is the mechanis
 
 **Total objective.** Let $\mathbf{s}$ denote the stack of active pose-only frame poses (`frame_poses`, 6-DoF each), full navigation states (`frame_states`, 15-DoF each), and landmarks (`lmdb`, 3-DoF each). Basalt minimises the objective assembled in §3.1.4, restated here for reference,
 
-$$
-E(\mathbf{s}) = \underbrace{\tfrac{1}{2} \sum_{(i,j)\in\mathcal{V}} \mathbf{r}_{ij}(\mathbf{s})^T \boldsymbol{\Sigma}_\text{vis}^{-1} \mathbf{r}_{ij}(\mathbf{s})}_{\text{reprojection}} + \underbrace{\tfrac{1}{2} \sum_{k\in\mathcal{I}} \mathbf{r}_k^{\text{IMU}}(\mathbf{s})^T \boldsymbol{\Sigma}_k^{-1} \mathbf{r}_k^{\text{IMU}}(\mathbf{s})}_{\text{inertial}} + \underbrace{\tfrac{1}{2} \sum_{k\in\mathcal{I}} \left(\mathbf{r}_k^{b_a\,T} \boldsymbol{W}_{b_a} \mathbf{r}_k^{b_a} + \mathbf{r}_k^{b_g\,T} \boldsymbol{W}_{b_g} \mathbf{r}_k^{b_g}\right)}_{\text{bias random walk}} + E_{\text{marg}}(\mathbf{s}),
-$$
+$$E(\mathbf{s}) = \underbrace{\frac{1}{2} \sum_{(i,j)\in\mathcal{V}} \mathbf{r}_{ij}(\mathbf{s})^T \boldsymbol{\Sigma}_\text{vis}^{-1} \mathbf{r}_{ij}(\mathbf{s})}_{\text{reprojection}} + \underbrace{\frac{1}{2} \sum_{k\in\mathcal{I}} \mathbf{r}_k^{\text{IMU}}(\mathbf{s})^T \boldsymbol{\Sigma}_k^{-1} \mathbf{r}_k^{\text{IMU}}(\mathbf{s})}_{\text{inertial}} + \underbrace{\frac{1}{2} \sum_{k\in\mathcal{I}} \left(\mathbf{r}_k^{b_a\,T} \boldsymbol{W}_{b_a} \mathbf{r}_k^{b_a} + \mathbf{r}_k^{b_g\,T} \boldsymbol{W}_{b_g} \mathbf{r}_k^{b_g}\right)}_{\text{bias random walk}} + E_{\text{marg}}(\mathbf{s}),$$
 
 with Huber robustification applied to the visual residuals. The marginalisation prior energy $E_{\text{marg}}$ is formulated in §3.1.3 and derived in full in `doc/Marginalisation.md` Appendix A.
 
 **Linearisation.** Each iteration replaces the objective with its Gauss–Newton quadratic model at the current estimate $\mathbf{s}$:
 
-$$
-\mathbf{r}(\mathbf{s} \oplus \boldsymbol{\xi}) \approx \mathbf{r}(\mathbf{s}) + \mathbf{J}(\mathbf{s})\, \boldsymbol{\xi}, \qquad E_{\text{quad}}(\boldsymbol{\xi}) = \tfrac{1}{2}\|\mathbf{J}\boldsymbol{\xi} + \mathbf{r}\|^2_{\boldsymbol{W}}.
-$$
+$$\mathbf{r}(\mathbf{s} \oplus \boldsymbol{\xi}) \approx \mathbf{r}(\mathbf{s}) + \mathbf{J}(\mathbf{s})\, \boldsymbol{\xi}, \qquad E_{\text{quad}}(\boldsymbol{\xi}) = \frac{1}{2}\|\mathbf{J}\boldsymbol{\xi} + \mathbf{r}\|^2_{\boldsymbol{W}}.$$
 
 The normal equations are $\mathbf{H}\boldsymbol{\xi} = -\mathbf{J}^T \mathbf{W}\mathbf{r} = \mathbf{b}$, with $\mathbf{H} = \mathbf{J}^T \mathbf{W} \mathbf{J}$.
 
