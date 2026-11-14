@@ -312,6 +312,113 @@ TEST(VioTestSuite, ImuNullspace3Test) {
 }
 #endif
 
+#ifdef BASALT_INSTANTIATIONS_DOUBLE
+TEST(VioTestSuite, ImuBlockGSScaleFreeRowsTest) {
+  Eigen::Vector3d bg = Eigen::Vector3d::Random() / 100;
+  Eigen::Vector3d ba = Eigen::Vector3d::Random() / 10;
+
+  basalt::IntegratedImuMeasurement<double> imu_meas(0, bg, ba);
+
+  basalt::Se3Spline<5> gt_spline(int64_t(10e9));
+  gt_spline.genRandomTrajectory(15);
+
+  Eigen::Vector3d accel_cov, gyro_cov;
+  accel_cov.setConstant(accel_std_dev * accel_std_dev);
+  gyro_cov.setConstant(gyro_std_dev * gyro_std_dev);
+
+  const int64_t dt_ns = 1e7;
+  for (int64_t t_ns = dt_ns / 2; t_ns < int64_t(1e8); t_ns += dt_ns) {
+    const Sophus::SE3d pose = gt_spline.pose(t_ns);
+    basalt::ImuData<double> data;
+    data.accel = pose.so3().inverse() * (gt_spline.transAccelWorld(t_ns) -
+                                         basalt::constants::g) +
+                 ba;
+    data.gyro = gt_spline.rotVelBody(t_ns) + bg;
+    data.t_ns = t_ns + dt_ns / 2;
+    imu_meas.integrate(data, accel_cov, gyro_cov);
+  }
+
+  basalt::PoseVelBiasState<double> state0, state1;
+  state0.t_ns = 0;
+  state0.T_w_i = gt_spline.pose(int64_t(0));
+  state0.vel_w_i = gt_spline.transVelWorld(int64_t(0));
+  state0.bias_gyro = bg;
+  state0.bias_accel = ba;
+
+  state1.t_ns = imu_meas.get_dt_ns();
+  state1.T_w_i = gt_spline.pose(state1.t_ns) *
+                 Sophus::se3_expd(Sophus::Vector6d::Random() / 10);
+  state1.vel_w_i =
+      gt_spline.transVelWorld(state1.t_ns) + Sophus::Vector3d::Random() / 10;
+  state1.bias_gyro = bg;
+  state1.bias_accel = ba;
+
+  Eigen::aligned_map<int64_t, basalt::PoseVelBiasStateWithLin<double>>
+      frame_states;
+  frame_states[state0.t_ns] = basalt::PoseVelBiasStateWithLin<double>(state0);
+  frame_states[state1.t_ns] = basalt::PoseVelBiasStateWithLin<double>(state1);
+
+  basalt::AbsOrderMap aom;
+  aom.abs_order_map[basalt::kGravityScaleStateId] =
+      std::make_pair(0, basalt::GRAVITY_SCALE_SIZE);
+  aom.abs_order_map[state0.t_ns] = std::make_pair(3, 15);
+  aom.abs_order_map[state1.t_ns] = std::make_pair(18, 15);
+  aom.total_size = 33;
+  aom.items = 3;
+
+  Eigen::Vector3d weight_sqrt;
+  weight_sqrt.setConstant(1e3);
+  basalt::ImuLinData<double> ild = {basalt::constants::g,
+                                    weight_sqrt,
+                                    weight_sqrt,
+                                    {std::make_pair(state0.t_ns, &imu_meas)}};
+
+  basalt::GravityScaleStateWithLin<double> gs;
+
+  // Rotation rows only, forced by a zero tolerance.
+  basalt::ImuBlockGS<double> ib_rot(&imu_meas, &ild, aom, &gs, true, 0.0);
+  const double e_rot = ib_rot.linearizeImu(frame_states);
+  EXPECT_FALSE(ib_rot.UsedFullRows());
+
+  const Eigen::Matrix<double, 9, 1> res =
+      imu_meas.residual(state0, basalt::constants::g, state1, bg, ba);
+  const Eigen::Vector3d r_rot = res.segment<3>(3);
+  const Eigen::Matrix3d cov_rot = imu_meas.get_cov().block<3, 3>(3, 3);
+  const double e_expected = 0.5 * r_rot.dot(cov_rot.ldlt().solve(r_rot));
+  EXPECT_NEAR(e_rot, e_expected, 1e-9 * (1.0 + e_expected));
+
+  basalt::DenseAccumulator<double> acc_rot;
+  acc_rot.reset(aom.total_size);
+  ib_rot.add_dense_H_b(acc_rot);
+  EXPECT_LE(acc_rot.getH().topRows(3).norm(), 1e-12);
+  EXPECT_LE(acc_rot.getB().head(3).norm(), 1e-12);
+  EXPECT_LE(acc_rot.getH().block(9, 0, 3, 33).norm(), 1e-12);
+  EXPECT_LE(acc_rot.getH().block(24, 0, 3, 33).norm(), 1e-12);
+
+  // All rows with the scale column removed, forced by a large tolerance.
+  basalt::ImuBlockGS<double> ib_full(&imu_meas, &ild, aom, &gs, true, 1e12);
+  ib_full.linearizeImu(frame_states);
+  EXPECT_TRUE(ib_full.UsedFullRows());
+
+  basalt::ImuBlockGS<double> ib_ref(&imu_meas, &ild, aom, &gs);
+  ib_ref.linearizeImu(frame_states);
+
+  basalt::DenseAccumulator<double> acc_full, acc_ref;
+  acc_full.reset(aom.total_size);
+  acc_ref.reset(aom.total_size);
+  ib_full.add_dense_H_b(acc_full);
+  ib_ref.add_dense_H_b(acc_ref);
+
+  Eigen::MatrixXd H_ref = acc_ref.getH();
+  Eigen::VectorXd b_ref = acc_ref.getB();
+  H_ref.row(2).setZero();
+  H_ref.col(2).setZero();
+  b_ref[2] = 0;
+  EXPECT_LE((acc_full.getH() - H_ref).norm(), 1e-9 * (1.0 + H_ref.norm()));
+  EXPECT_LE((acc_full.getB() - b_ref).norm(), 1e-9 * (1.0 + b_ref.norm()));
+}
+#endif
+
 TEST(VioTestSuite, RelPoseTest) {
   Sophus::SE3d T_w_i_h = Sophus::se3_expd(Sophus::Vector6d::Random());
   Sophus::SE3d T_w_i_t = Sophus::se3_expd(Sophus::Vector6d::Random());

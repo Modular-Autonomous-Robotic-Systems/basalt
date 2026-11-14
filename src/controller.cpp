@@ -215,8 +215,12 @@ void Controller::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
         std::make_shared<basalt::LocalMapper>(calib_, vio_config_, mpLogger);
     local_mapper_->SetMarginalisationDataInputQueue(&local_map_input_queue_);
     local_mapper_->SetKFInputQueue(&local_map_kf_queue_);
+    local_mapper_->SetGravityScaleCorrectionLog(
+        vio_estimator_->mGsCorrectionLog);
     local_mapper_->SetVIOPoseUpdateCallback(
-        [this](const auto& poses) { vio_estimator_->QueuePoseUpdates(poses); });
+        [this](const auto& poses, int64_t gsEpoch) {
+            vio_estimator_->QueuePoseUpdates(poses, gsEpoch);
+        });
     local_mapper_->Initialise();
 
     if (mpUseProducerConsumerArchitecture) {

@@ -121,9 +121,15 @@ public:
     // appropriate for the VO path (no mapper) and for any estimator that
     // does not participate in the mapper feedback loop.
     virtual void QueuePoseUpdates(
-        const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>& updates) {
+        const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>& updates,
+        int64_t gsEpoch = 0) {
         (void)updates;
+        (void)gsEpoch;
     }
+
+    // Cumulative gravity and scale corrections, created by an estimator that
+    // optimises them, null otherwise.
+    GravityScaleCorrectionLog::Ptr mGsCorrectionLog;
 
     virtual Sophus::SE3d getT_w_i_init() = 0;
 

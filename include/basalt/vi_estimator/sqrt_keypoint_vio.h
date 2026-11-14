@@ -218,10 +218,13 @@ public:
     // Accept refined keyframe poses from the local mapper. Called from the
     // mapper thread; the mutex ensures thread-safe handoff to the VIO thread.
     void QueuePoseUpdates(
-        const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>& updates)
-        override {
+        const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>& updates,
+        int64_t gsEpoch = 0) override {
         std::lock_guard<std::mutex> lock(mpPosesToUpdateMutex);
-        for (const auto& kv : updates) mpPosesToUpdate[kv.first] = kv.second;
+        for (const auto& kv : updates) {
+            mpPosesToUpdate[kv.first] = kv.second;
+            mpPosesToUpdateEpoch[kv.first] = gsEpoch;
+        }
     }
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -318,6 +321,7 @@ private:
     // the LocalMapper always operates in double precision.
     Eigen::aligned_unordered_map<int64_t, PoseStateWithLin<double>>
         mpPosesToUpdate;
+    std::unordered_map<int64_t, int64_t> mpPosesToUpdateEpoch;
     mutable std::mutex mpPosesToUpdateMutex;
 
     // Thresholds above which a mapper correction is considered too large

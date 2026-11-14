@@ -141,7 +141,7 @@ template <class Scalar_>
 void BundleAdjustmentBase<Scalar_>::computeError(
     Scalar& error,
     std::map<int, std::vector<std::pair<TimeCamId, Scalar>>>* outliers,
-    Scalar outlier_threshold) const {
+    Scalar outlier_threshold, Scalar relScale) const {
   std::vector<TimeCamId> host_frames;
   for (const auto& [tcid, _] : lmdb.getObservations()) {
     host_frames.push_back(tcid);
@@ -164,8 +164,15 @@ void BundleAdjustmentBase<Scalar_>::computeError(
           PoseStateWithLin state_t = getPoseStateWithLin(tcid_t.frame_id);
 
           Sophus::SE3<Scalar> T_t_h_sophus =
-              computeRelPose(state_h.getPose(), calib.T_i_c[tcid_h.cam_id],
-                             state_t.getPose(), calib.T_i_c[tcid_t.cam_id]);
+              relScale == Scalar(1)
+                  ? computeRelPose(state_h.getPose(),
+                                   calib.T_i_c[tcid_h.cam_id],
+                                   state_t.getPose(),
+                                   calib.T_i_c[tcid_t.cam_id])
+                  : computeRelPoseGS(state_h.getPose(),
+                                     calib.T_i_c[tcid_h.cam_id],
+                                     state_t.getPose(),
+                                     calib.T_i_c[tcid_t.cam_id], relScale);
 
           T_t_h = T_t_h_sophus.matrix();
         } else {
@@ -325,6 +332,11 @@ void BundleAdjustmentBase<Scalar_>::computeDelta(const AbsOrderMap& marg_order,
       BASALT_ASSERT(frame_states.at(kv.first).isLinearized());
       delta.template segment<POSE_VEL_BIAS_SIZE>(kv.second.first) =
           frame_states.at(kv.first).getDelta();
+    } else if (kv.first == kGravityScaleStateId) {
+      BASALT_ASSERT(kv.second.second == GRAVITY_SCALE_SIZE);
+      BASALT_ASSERT(mGsState.has_value());
+      delta.template segment<GRAVITY_SCALE_SIZE>(kv.second.first) =
+          mGsState->GetDelta();
     } else {
       BASALT_ASSERT(false);
     }

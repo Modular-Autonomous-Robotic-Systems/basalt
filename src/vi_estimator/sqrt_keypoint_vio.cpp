@@ -603,7 +603,17 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
                  it != mpPosesToUpdate.end();) {
                 const int64_t t_ns = it->first;
                 const PoseStateWithLin<double>& lm_pose = it->second;
-                const SE3 T_new = lm_pose.getPose().template cast<Scalar>();
+                Sophus::SE3d T_new_d = lm_pose.getPose();
+                const auto it_epoch = mpPosesToUpdateEpoch.find(t_ns);
+                if (this->mGsCorrectionLog &&
+                    it_epoch != mpPosesToUpdateEpoch.end()) {
+                    T_new_d =
+                        this->mGsCorrectionLog
+                            ->Between(it_epoch->second,
+                                      this->mGsCorrectionLog->LatestEpoch())
+                            .Apply(T_new_d);
+                }
+                const SE3 T_new = T_new_d.template cast<Scalar>();
 
                 auto it_fp = frame_poses.find(t_ns);
                 if (it_fp != frame_poses.end()) {
@@ -635,6 +645,7 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
                         // continue;
                     }
                 }
+                mpPosesToUpdateEpoch.erase(t_ns);
                 it = mpPosesToUpdate.erase(it);
                 // ++it;
             }
@@ -1266,6 +1277,9 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
                     m->abs_b = Q2r_or_b.template cast<double>();
                 }
 
+                if (this->mGsCorrectionLog) {
+                    m->mGsEpoch = this->mGsCorrectionLog->LatestEpoch();
+                }
                 assign_cast_map_values(m->frame_poses, frame_poses);
                 assign_cast_map_values(m->frame_states, frame_states);
                 m->kfs_all = kf_ids_all;
@@ -2047,6 +2061,9 @@ void SqrtKeypointVioEstimator<Scalar_>::PublishKeyframe() {
         last_state_t_ns,
         it_state->second.getState().T_w_i.template cast<double>());
     kf->opt_flow_res = it_flow->second;
+    if (this->mGsCorrectionLog) {
+        kf->mGsEpoch = this->mGsCorrectionLog->LatestEpoch();
+    }
 
     this->mpKFOutputQueue->push(kf);
 }

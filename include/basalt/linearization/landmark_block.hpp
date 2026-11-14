@@ -17,6 +17,8 @@ struct RelPoseLin {
   Mat4 T_t_h;
   Mat6 d_rel_d_h;
   Mat6 d_rel_d_t;
+  Eigen::Matrix<Scalar, 6, 1> d_rel_d_logscale =
+      Eigen::Matrix<Scalar, 6, 1>::Zero();
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };

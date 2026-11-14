@@ -326,6 +326,13 @@ void NfrMapper::optimize(int num_iterations, int opt_pass) {
                     Hdiag_lambda[i] = std::max(Hdiag_lambda[i], min_lambda);
 
                 const Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
+                if (!inc.allFinite()) {
+                    lambda = std::min(max_lambda, lambda_vee * lambda);
+                    lambda_vee *= 2;
+                    max_iter--;
+                    inner++;
+                    continue;
+                }
                 double max_inc = inc.array().abs().maxCoeff();
                 if (max_inc < 1e-5) converged = true;
 
@@ -401,6 +408,7 @@ void NfrMapper::optimize(int num_iterations, int opt_pass) {
                 Hdiag_lambda[i] = std::max(Hdiag_lambda[i], min_lambda);
 
             const Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
+            if (!inc.allFinite()) break;
             double max_inc = inc.array().abs().maxCoeff();
             if (max_inc < 1e-5) converged = true;
 

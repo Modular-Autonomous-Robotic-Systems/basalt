@@ -742,7 +742,7 @@ void ScBundleAdjustmentBase<Scalar_>::computeImuError(
     const Eigen::aligned_map<int64_t, IntegratedImuMeasurement<Scalar>>&
         imu_meas,
     const Vec3& gyro_bias_weight, const Vec3& accel_bias_weight,
-    const Vec3& g) {
+    const Vec3& g, Scalar scale) {
   imu_error = 0;
   bg_error = 0;
   ba_error = 0;
@@ -758,9 +758,16 @@ void ScBundleAdjustmentBase<Scalar_>::computeImuError(
       PoseVelBiasStateWithLin<Scalar> start_state = states.at(start_t);
       PoseVelBiasStateWithLin<Scalar> end_state = states.at(end_t);
 
-      const typename PoseVelState<Scalar>::VecN res = kv.second.residual(
-          start_state.getState(), g, end_state.getState(),
-          start_state.getState().bias_gyro, start_state.getState().bias_accel);
+      const typename PoseVelState<Scalar>::VecN res =
+          scale == Scalar(1)
+              ? kv.second.residual(start_state.getState(), g,
+                                   end_state.getState(),
+                                   start_state.getState().bias_gyro,
+                                   start_state.getState().bias_accel)
+              : kv.second.residualGS(start_state.getState(), g,
+                                     end_state.getState(),
+                                     start_state.getState().bias_gyro,
+                                     start_state.getState().bias_accel, scale);
 
       //      std::cout << "res: (" << start_t << "," << end_t << ") "
       //                << res.transpose() << std::endl;

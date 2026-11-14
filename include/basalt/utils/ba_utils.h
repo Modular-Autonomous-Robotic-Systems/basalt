@@ -79,6 +79,59 @@ Sophus::SE3<Scalar> computeRelPose(
   return res;
 }
 
+template <class Scalar>
+Sophus::SE3<Scalar> computeRelPoseGS(
+    const Sophus::SE3<Scalar>& T_w_i_h, const Sophus::SE3<Scalar>& T_i_c_h,
+    const Sophus::SE3<Scalar>& T_w_i_t, const Sophus::SE3<Scalar>& T_i_c_t,
+    Scalar scale, Sophus::Matrix6<Scalar>* d_rel_d_h = nullptr,
+    Sophus::Matrix6<Scalar>* d_rel_d_t = nullptr,
+    Sophus::Vector6<Scalar>* d_rel_d_logscale = nullptr) {
+  Sophus::SE3<Scalar> tmp2 = (T_i_c_t).inverse();
+
+  const Eigen::Matrix<Scalar, 3, 1> tau =
+      T_w_i_t.so3().inverse() *
+      (T_w_i_h.translation() - T_w_i_t.translation());
+
+  Sophus::SE3<Scalar> T_t_i_h_i;
+  T_t_i_h_i.so3() = T_w_i_t.so3().inverse() * T_w_i_h.so3();
+  T_t_i_h_i.translation() = scale * tau;
+
+  Sophus::SE3<Scalar> tmp = tmp2 * T_t_i_h_i;
+  Sophus::SE3<Scalar> res = tmp * T_i_c_h;
+
+  Sophus::Matrix6<Scalar> Ds = Sophus::Matrix6<Scalar>::Identity();
+  Ds.template topLeftCorner<3, 3>() *= scale;
+
+  if (d_rel_d_h) {
+    Sophus::Matrix3<Scalar> R = T_w_i_h.so3().inverse().matrix();
+
+    Sophus::Matrix6<Scalar> RR;
+    RR.setZero();
+    RR.template topLeftCorner<3, 3>() = R;
+    RR.template bottomRightCorner<3, 3>() = R;
+
+    *d_rel_d_h = tmp.Adj() * Ds * RR;
+  }
+
+  if (d_rel_d_t) {
+    Sophus::Matrix3<Scalar> R = T_w_i_t.so3().inverse().matrix();
+
+    Sophus::Matrix6<Scalar> RR;
+    RR.setZero();
+    RR.template topLeftCorner<3, 3>() = R;
+    RR.template bottomRightCorner<3, 3>() = R;
+
+    *d_rel_d_t = -tmp2.Adj() * Ds * RR;
+  }
+
+  if (d_rel_d_logscale) {
+    d_rel_d_logscale->setZero();
+    d_rel_d_logscale->template head<3>() = tmp2.so3() * (scale * tau);
+  }
+
+  return res;
+}
+
 template <class Scalar, class CamT>
 inline bool linearizePoint(
     const Eigen::Matrix<Scalar, 2, 1>& kpt_obs, const Keypoint<Scalar>& kpt_pos,

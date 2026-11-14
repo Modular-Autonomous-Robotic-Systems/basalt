@@ -76,6 +76,68 @@ void LocalMapper::SetVIOPoseUpdateCallback(PoseUpdateCallback cb) {
     mpVioPoseUpdateCallback = std::move(cb);
 }
 
+void LocalMapper::SetGravityScaleCorrectionLog(
+    GravityScaleCorrectionLog::Ptr log) {
+    mpGsLog = std::move(log);
+}
+
+void LocalMapper::CatchUpGravityScale() {
+    if (!mpGsLog) return;
+
+    const int64_t latest = mpGsLog->LatestEpoch();
+    if (latest == mpMapGsEpoch) return;
+
+    ApplyGravityScaleCorrection(mpGsLog->Between(mpMapGsEpoch, latest));
+    mpMapGsEpoch = latest;
+}
+
+void LocalMapper::ApplyGravityScaleCorrection(
+    const GravityScaleCorrectionLog::Entry& correction) {
+    for (auto& [t_ns, state] : frame_poses) {
+        state = PoseStateWithLin<double>(t_ns, correction.Apply(state.getPose()));
+    }
+
+    for (const auto& kv : lmdb.getLandmarks()) {
+        lmdb.getLandmark(kv.first).inv_dist /= correction.mScale;
+    }
+
+    Sophus::Matrix6d D_inv = Sophus::Matrix6d::Identity();
+    D_inv.topLeftCorner<3, 3>() /= correction.mScale;
+    for (RelPoseFactor& rpf : rel_pose_factors) {
+        rpf.T_i_j.translation() *= correction.mScale;
+        rpf.cov_inv = D_inv * rpf.cov_inv * D_inv;
+    }
+
+    for (RollPitchFactor& rpf : roll_pitch_factors) {
+        rpf.R_w_i_meas = correction.mQ * rpf.R_w_i_meas;
+    }
+}
+
+void LocalMapper::TransformMargDataBySim3(
+    MargData& data, const GravityScaleCorrectionLog::Entry& correction) {
+    const double s = correction.mScale;
+    const Eigen::Matrix3d Q_inv_m = correction.mQ.inverse().matrix();
+
+    for (auto& kv : data.frame_poses) kv.second.TransformBySim3(correction.mQ, s);
+    for (auto& kv : data.frame_states) kv.second.TransformBySim3(correction.mQ, s);
+
+    for (const auto& [id, idx] : data.aom.abs_order_map) {
+        const int col = idx.first;
+        std::vector<std::pair<int, Eigen::Matrix3d>> blocks = {
+            {col, Q_inv_m / s}, {col + 3, Q_inv_m}};
+        if (idx.second == POSE_VEL_BIAS_SIZE) {
+            blocks.emplace_back(col + 6, Q_inv_m / s);
+        }
+
+        for (const auto& [start, M] : blocks) {
+            data.abs_H.middleCols(start, 3) = data.abs_H.middleCols(start, 3) * M;
+            data.abs_H.middleRows(start, 3) =
+                M.transpose() * data.abs_H.middleRows(start, 3);
+            data.abs_b.segment<3>(start) =
+                M.transpose() * data.abs_b.segment<3>(start);
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // MapLocally — thread entry point
@@ -119,6 +181,7 @@ void LocalMapper::MapLocally() {
         mpNewKeyframesForTracking.clear();
         mpLatestKeyframesMatches.clear();
 
+        CatchUpGravityScale();
 
         for (Keyframe::Ptr& k : vKeyframes) {
             IngestKeyframe(k);
@@ -255,7 +318,9 @@ void LocalMapper::MapLocally() {
             std::chrono::duration<double>(tEnd - tStep).count();
 
         tStep = std::chrono::high_resolution_clock::now();
-        if (mpVioPoseUpdateCallback) mpVioPoseUpdateCallback(frame_poses);
+        if (mpVioPoseUpdateCallback) {
+            mpVioPoseUpdateCallback(frame_poses, mpMapGsEpoch);
+        }
         tEnd = std::chrono::high_resolution_clock::now();
         const double poseUpdateCbSeconds =
             std::chrono::duration<double>(tEnd - tStep).count();
@@ -290,7 +355,11 @@ void LocalMapper::IngestKeyframe(Keyframe::Ptr& kf) {
 
     // Rebuilt rather than copied so linearized stays false, which
     // NfrMapper::optimize asserts before applying an increment.
-    frame_poses[t_ns] = PoseStateWithLin<double>(t_ns, kf->pose.getPose());
+    Sophus::SE3d T_w_i = kf->pose.getPose();
+    if (mpGsLog && kf->mGsEpoch != mpMapGsEpoch) {
+        T_w_i = mpGsLog->Between(kf->mGsEpoch, mpMapGsEpoch).Apply(T_w_i);
+    }
+    frame_poses[t_ns] = PoseStateWithLin<double>(t_ns, T_w_i);
     img_data[t_ns] = kf->opt_flow_res->input_images;
     mpNewKeyframesForTracking.emplace(t_ns);
 }
@@ -304,6 +373,12 @@ void LocalMapper::IngestMargData(MargData::Ptr& data) {
     // processMargData's img_data write inert without altering NfrMapper,
     // which the offline mapper still depends on.
     data->opt_flow_res.clear();
+
+    if (mpGsLog && data->mGsEpoch != mpMapGsEpoch) {
+        TransformMargDataBySim3(
+            *data, mpGsLog->Between(data->mGsEpoch, mpMapGsEpoch));
+        data->mGsEpoch = mpMapGsEpoch;
+    }
 
     const size_t relBegin = rel_pose_factors.size();
     const size_t rpBegin = roll_pitch_factors.size();

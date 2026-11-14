@@ -21,7 +21,8 @@ public:
     using Scalar = double;
     using Ptr = std::shared_ptr<LocalMapper>;
     using PoseUpdateCallback = std::function<void(
-        const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>&)>;
+        const Eigen::aligned_map<int64_t, PoseStateWithLin<double>>&,
+        int64_t)>;
 
     LocalMapper(const Calibration<double>& calib, const VioConfig& config,
                 const Logger::Ptr& logger = nullptr);
@@ -34,6 +35,7 @@ public:
         tbb::concurrent_bounded_queue<MargData::Ptr>* queue);
     void SetKFInputQueue(tbb::concurrent_bounded_queue<Keyframe::Ptr>* queue);
     void SetVIOPoseUpdateCallback(PoseUpdateCallback cb);
+    void SetGravityScaleCorrectionLog(GravityScaleCorrectionLog::Ptr log);
 
     // ── Pipeline (public for testability) ───────────────────────────
     void MapLocally();  // thread entry point
@@ -100,6 +102,14 @@ private:
     tbb::concurrent_bounded_queue<MargData::Ptr>* mpMargInputQueue = nullptr;
     tbb::concurrent_bounded_queue<Keyframe::Ptr>* mpKFInputQueue = nullptr;
     PoseUpdateCallback mpVioPoseUpdateCallback;
+    GravityScaleCorrectionLog::Ptr mpGsLog;
+    int64_t mpMapGsEpoch = 0;
+
+    void CatchUpGravityScale();
+    void ApplyGravityScaleCorrection(
+        const GravityScaleCorrectionLog::Entry& correction);
+    static void TransformMargDataBySim3(
+        MargData& data, const GravityScaleCorrectionLog::Entry& correction);
 
     // Helpers
     void PruneFactorsWithUnknownKeyframes(size_t relBegin, size_t rpBegin);

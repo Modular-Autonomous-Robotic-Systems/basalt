@@ -249,7 +249,7 @@ class ScBundleAdjustmentBase : public BundleAdjustmentBase<Scalar_> {
       const Eigen::aligned_map<int64_t, IntegratedImuMeasurement<Scalar>>&
           imu_meas,
       const Vec3& gyro_bias_weight, const Vec3& accel_bias_weight,
-      const Vec3& g);
+      const Vec3& g, Scalar scale = Scalar(1));
 
   template <class AccumT>
   static void linearizeAbs(const MatX& rel_H, const VecX& rel_b,
