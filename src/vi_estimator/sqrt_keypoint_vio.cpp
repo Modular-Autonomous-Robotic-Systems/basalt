@@ -45,8 +45,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <tbb/parallel_reduce.h>
 
 #include <algorithm>
-#include <basalt/linearization/linearization_base.hpp>
 #include <basalt/linearization/linearization_abs_qr.hpp>
+#include <basalt/linearization/linearization_base.hpp>
 #include <basalt/utils/cast_utils.hpp>
 #include <basalt/utils/format.hpp>
 #include <basalt/utils/time_utils.hpp>
@@ -133,8 +133,7 @@ SqrtKeypointVioEstimator<Scalar_>::SqrtKeypointVioEstimator(
         if (config.vio_gravity_prior_std_deg > 0) {
             const Scalar sigma =
                 Scalar(config.vio_gravity_prior_std_deg * M_PI / 180.0);
-            marg_data.H(3, 3) = marg_data.H(4, 4) =
-                Scalar(1) / (sigma * sigma);
+            marg_data.H(3, 3) = marg_data.H(4, 4) = Scalar(1) / (sigma * sigma);
         }
 
         // small prior to avoid jumps in bias
@@ -534,9 +533,16 @@ SqrtKeypointVioEstimator<Scalar>::ProcessFrame(
                 mpStationaryLatchOpen = false;
             mpIsStationary = mpIsStationary && mpStationaryLatchOpen;
         }
+        if (mpGsActive && mpDm && config.vio_gs_dm_delay_from_motion &&
+            mpWasStationary && !mpIsStationary) {
+            mpDmResetPending = true;
+        }
+        mpWasStationary = mpIsStationary;
         if (mpGsActive && mpGsStartNs < 0 && !mpIsStationary &&
-            (!mpStationaryEnableStartLatch || !mpStationaryLatchOpen))
+            (!mpStationaryEnableStartLatch || !mpStationaryLatchOpen)) {
             mpGsStartNs = curr_frame->t_ns;
+            mpDmMotionIndex = mpDm ? mpDm->NextIndex() : 0;
+        }
         mpLogger->AddVioImuFrame(
             curr_frame->t_ns, double(frameDtNs) * 1e-9, numImuIntegrated,
             int(std::round(double(frameDtNs) * 1e-9 *
@@ -726,6 +732,14 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
 
         frame_states[last_state_t_ns] =
             PoseVelBiasStateWithLin<Scalar>(next_state);
+        // A flagged state's rows become permanent only when it leaves the
+        // window, so motion detected before then withdraws every flag and
+        // absorbs the lag of the detector's averaging window.
+        if (mpIsStationary) {
+            mvpStationaryStates.insert(last_state_t_ns);
+        } else {
+            mvpStationaryStates.clear();
+        }
 
         imu_meas[meas->get_start_t_ns()] = *meas;
     }
@@ -1344,6 +1358,34 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
         //    accum.getH(),
         //                       accum.getB(), marg_prior_error);
 
+        // The zero motion residuals whose first state leaves the window enter
+        // the prior, and the delayed store with it, so that the information of
+        // the stationary period outlives the window.
+        {
+            std::set<int64_t> leaving = states_to_marg_all;
+            leaving.insert(states_to_marg_vel_bias.begin(),
+                           states_to_marg_vel_bias.end());
+            MatX Js;
+            VecX rs;
+            StationaryRows(aom, &leaving, Js, rs);
+            if (Js.rows() > 0) {
+                auto append = [&](MatX& J, VecX& r) {
+                    const Eigen::Index n0 = J.rows();
+                    J.conservativeResize(n0 + Js.rows(), Eigen::NoChange);
+                    J.bottomRows(Js.rows()) = Js;
+                    r.conservativeResize(n0 + rs.rows());
+                    r.tail(rs.rows()) = rs;
+                };
+                if (is_lin_sqrt && marg_data.is_sqrt) {
+                    append(Q2Jp_or_H, Q2r_or_b);
+                } else {
+                    Q2Jp_or_H += Js.transpose() * Js;
+                    Q2r_or_b += Js.transpose() * rs;
+                }
+                if (mpGsActive) append(Q2Jp_store, Q2r_store);
+            }
+        }
+
         // Save marginalization prior
         if (this->out_marg_queue && !kfs_to_marg.empty()) {
             // int64_t kf_id = *kfs_to_marg.begin();
@@ -1606,6 +1648,12 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
 
         lmdb.removeKeyframes(kfs_to_marg, poses_to_marg, states_to_marg_all);
 
+        for (auto it = mvpStationaryStates.begin();
+             it != mvpStationaryStates.end();) {
+            it = frame_states.count(*it) > 0 ? std::next(it)
+                                              : mvpStationaryStates.erase(it);
+        }
+
         if (config.vio_marg_lost_landmarks) {
             for (const auto& lm_id : lost_landmaks) lmdb.removeLandmark(lm_id);
         }
@@ -1704,11 +1752,10 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
 
     if (mpGsActive) {
         LogGravityScale(mpGsSwapEvent);
-        if (mpGsStartNs >= 0 &&
-            last_state_t_ns - mpGsStartNs >=
-                int64_t(config.vio_gs_duration_s * 1e9)) {
-            FoldGravityScale();
-        }
+        const bool elapsed =
+            mpGsStartNs >= 0 && last_state_t_ns - mpGsStartNs >=
+                                    int64_t(config.vio_gs_duration_s * 1e9);
+        if (elapsed || mpGsFoldSettled) FoldGravityScale();
     }
 
     mpLogger->SolverScratch()
@@ -1842,8 +1889,8 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                 const Scalar tiltStd =
                     Scalar(config.vio_gs_jump_tilt_rw_deg * M_PI / 180.0) *
                     std::sqrt(dtFrame);
-                gsJumpW2.template head<2>().setConstant(
-                    Scalar(1) / (tiltStd * tiltStd));
+                gsJumpW2.template head<2>().setConstant(Scalar(1) /
+                                                        (tiltStd * tiltStd));
             }
             if (config.vio_gs_jump_sigma_rw > 0) {
                 const Scalar sigmaStd =
@@ -1853,7 +1900,6 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
         }
         const bool applyGsJump =
             !gsHoldBlock && (gsJumpW2.array() > Scalar(0)).any();
-
 
         int it = 0;
         int it_rejected = 0;
@@ -1903,19 +1949,15 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                     .format("ms");
             }
 
-            // The zero velocity cost enters error_total, l_diff and
+            // The stationary residuals enter error_total, l_diff and
             // after_error_total as well as H and b, so that step acceptance
-            // judges the objective the step was solved for. See
-            // plans/vio_drift_analysis.md Phase 3b, step acceptance.
-            const bool applyZeroVelocity =
-                mpZeroVelocityWeight > 0 && mpIsStationary;
-            const Scalar zeroVelocityW2 =
-                mpZeroVelocityWeight * mpZeroVelocityWeight;
-            if (applyZeroVelocity)
-                error_total += Scalar(0.5) * zeroVelocityW2 *
-                               frame_states.at(last_state_t_ns)
-                                   .getState()
-                                   .vel_w_i.squaredNorm();
+            // judges the objective the step was solved for.
+            MatX stationaryJ;
+            VecX stationaryR;
+            StationaryRows(aom, nullptr, stationaryJ, stationaryR);
+            const bool applyStationary = stationaryJ.rows() > 0;
+            if (applyStationary)
+                error_total += Scalar(0.5) * stationaryR.squaredNorm();
             if (applyGsJump)
                 error_total +=
                     Scalar(0.5) * gsJumpW2.dot(gsJump.cwiseProduct(gsJump));
@@ -1993,18 +2035,9 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
 
                     lqr->get_dense_H_b(H, b);
 
-                    // Zero velocity residual r = w v_w_i on the newest state,
-                    // the only one the per frame stationarity test describes.
-                    // The velocity block sits at offset 6 of the tangent
-                    // ordering [trans, rot, vel, bias_gyro, bias_accel].
-                    if (applyZeroVelocity) {
-                        const int vi =
-                            aom.abs_order_map.at(last_state_t_ns).first + 6;
-                        H.template block<3, 3>(vi, vi).diagonal().array() +=
-                            zeroVelocityW2;
-                        b.template segment<3>(vi) +=
-                            zeroVelocityW2 *
-                            frame_states.at(last_state_t_ns).getState().vel_w_i;
+                    if (applyStationary) {
+                        H += stationaryJ.transpose() * stationaryJ;
+                        b += stationaryJ.transpose() * stationaryR;
                     }
 
                     if (applyGsJump) {
@@ -2013,7 +2046,6 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                         b.template head<GRAVITY_SCALE_SIZE>() +=
                             gsJumpW2.cwiseProduct(gsJump);
                     }
-
 
                     MatX gauge_P;
                     if (mpGsActive) {
@@ -2087,19 +2119,14 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
 
                     Timer t;
                     l_diff = lqr->backSubstitute(inc);
-                    // Exact model decrease of the zero velocity cost, read
-                    // before the increment is applied.
-                    if (applyZeroVelocity) {
-                        const int vi =
-                            aom.abs_order_map.at(last_state_t_ns).first + 6;
-                        const Vec3 dv = inc.template segment<3>(vi);
-                        const Vec3& v =
-                            frame_states.at(last_state_t_ns).getState().vel_w_i;
-                        l_diff -= zeroVelocityW2 * dv.dot(v + Scalar(0.5) * dv);
+                    // Exact model decrease of the stationary residuals, which
+                    // are linear in the increment.
+                    if (applyStationary) {
+                        const VecX dr = stationaryJ * inc;
+                        l_diff -= dr.dot(stationaryR + Scalar(0.5) * dr);
                     }
                     if (applyGsJump) {
-                        const Vec3 dg =
-                            inc.template head<GRAVITY_SCALE_SIZE>();
+                        const Vec3 dg = inc.template head<GRAVITY_SCALE_SIZE>();
                         l_diff -= gsJumpW2.dot(
                             dg.cwiseProduct(gsJump + Scalar(0.5) * dg));
                     }
@@ -2177,11 +2204,14 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                 Scalar after_error_total =
                     after_update_vision_and_inertial_error +
                     after_update_marg_prior_error;
-                if (applyZeroVelocity)
-                    after_error_total += Scalar(0.5) * zeroVelocityW2 *
-                                         frame_states.at(last_state_t_ns)
-                                             .getState()
-                                             .vel_w_i.squaredNorm();
+                if (applyStationary) {
+                    MatX stationaryJNew;
+                    VecX stationaryRNew;
+                    StationaryRows(aom, nullptr, stationaryJNew,
+                                   stationaryRNew);
+                    after_error_total +=
+                        Scalar(0.5) * stationaryRNew.squaredNorm();
+                }
                 const Vec3 gsJumpNew =
                     applyGsJump
                         ? Vec3(gsJump + inc.template head<GRAVITY_SCALE_SIZE>())
@@ -2391,8 +2421,8 @@ void SqrtKeypointVioEstimator<Scalar_>::LogGravityScale(int swapEvent) {
         this->mGsCorrectionLog->Between(0, epoch);
     mpLogger->AddVioGravityScale(
         last_state_t_ns, epoch, double(mpGsStepSigma), double(mpGsStepTiltDeg),
-        cumulative.mScale, cumulative.mQ.log().norm() * 180.0 / M_PI,
-        swapEvent, double(mpGsJumpCost), mpGsVisualImuFull, mpGsVisualImuRot,
+        cumulative.mScale, cumulative.mQ.log().norm() * 180.0 / M_PI, swapEvent,
+        double(mpGsJumpCost), mpGsVisualImuFull, mpGsVisualImuRot,
         double(mpGsVisualImuScaleCol));
 }
 
@@ -2512,8 +2542,8 @@ void SqrtKeypointVioEstimator<Scalar_>::LinearizeMargGS(
     lqr_options.lb_options.obs_std_dev = obs_std_dev;
     lqr_options.linearization_type = config.vio_linearization_type;
 
-    ImuLinData<Scalar> ild = {g, gyro_bias_sqrt_weight, accel_bias_sqrt_weight,
-                              {}};
+    ImuLinData<Scalar> ild = {
+        g, gyro_bias_sqrt_weight, accel_bias_sqrt_weight, {}};
 
     for (const auto& kv : imu_meas) {
         int64_t start_t = kv.second.get_start_t_ns();
@@ -2573,8 +2603,7 @@ void SqrtKeypointVioEstimator<Scalar_>::RecentrePriorsGS() {
 }
 
 template <class Scalar_>
-void SqrtKeypointVioEstimator<Scalar_>::StripGsFromMargData(
-    MargData& m) const {
+void SqrtKeypointVioEstimator<Scalar_>::StripGsFromMargData(MargData& m) const {
     constexpr int c = GRAVITY_SCALE_SIZE;
     const int n = int(m.aom.total_size) - c;
 
@@ -2603,8 +2632,8 @@ void SqrtKeypointVioEstimator<Scalar_>::FoldGravityScale() {
     const GravityScaleStateWithLin<Scalar>& gs = *this->mGsState;
     constexpr int c = GRAVITY_SCALE_SIZE;
 
-    BASALT_ASSERT(marg_data.order.abs_order_map.at(kGravityScaleStateId).first ==
-                  0);
+    BASALT_ASSERT(
+        marg_data.order.abs_order_map.at(kGravityScaleStateId).first == 0);
 
     marg_data.b += marg_data.H.leftCols(c) * gs.GetDelta();
     MatX J = marg_data.H.rightCols(marg_data.H.cols() - c);
@@ -2659,10 +2688,9 @@ SqrtKeypointVioEstimator<Scalar_>::MakeDelayedJob(bool coarse) const {
             job->mvWindowImu.push_back(kv.second);
             job->mvWindowImu.back().get_sqrt_cov_inv();
         }
-        job->mInitialDir =
-            this->mGsCorrectionLog->Between(0, job->mEpoch)
-                .mQ.template cast<Scalar>() *
-            g.normalized();
+        job->mInitialDir = this->mGsCorrectionLog->Between(0, job->mEpoch)
+                               .mQ.template cast<Scalar>() *
+                           g.normalized();
         if (config.vio_gravity_prior_std_deg > 0) {
             const Scalar sigma =
                 Scalar(config.vio_gravity_prior_std_deg * M_PI / 180.0);
@@ -2672,6 +2700,20 @@ SqrtKeypointVioEstimator<Scalar_>::MakeDelayedJob(bool coarse) const {
         job->mvKeyframes = mpDm->Keyframes();
         job->mvKeyframes.insert(kf_ids.begin(), kf_ids.end());
         job->mScaleVarMax = Scalar(config.vio_gs_dm_coarse_scale_var);
+        // The window's biases, warm started by the stationary period, are the
+        // prior of the coarse optimisation's one bias.
+        const PoseVelBiasState<Scalar>& newest =
+            frame_states.rbegin()->second.getState();
+        if (config.vio_gs_dm_coarse_bg_prior_std > 0) {
+            const Scalar s = Scalar(config.vio_gs_dm_coarse_bg_prior_std);
+            job->mBgPrior = newest.bias_gyro;
+            job->mBgPriorW = Scalar(1) / (s * s);
+        }
+        if (config.vio_gs_dm_coarse_ba_prior_std > 0) {
+            const Scalar s = Scalar(config.vio_gs_dm_coarse_ba_prior_std);
+            job->mBaPrior = newest.bias_accel;
+            job->mBaPriorW = Scalar(1) / (s * s);
+        }
         // A quarter of the frame period, so that the readvance that follows
         // also ends before the next frame.
         if (!imu_meas.empty()) {
@@ -2690,19 +2732,26 @@ template <class Scalar_>
 bool SqrtKeypointVioEstimator<Scalar_>::InstallCoarseJob(
     const DelayedMargJob<Scalar>& job) {
     if (job.mCoarseSpans == 0 || job.mCoarseTimedOut) return false;
-    const GravityScaleCorrectionLog::Entry c =
-        this->mGsCorrectionLog->Between(
-            job.mEpoch, this->mGsCorrectionLog->LatestEpoch());
+    const GravityScaleCorrectionLog::Entry c = this->mGsCorrectionLog->Between(
+        job.mEpoch, this->mGsCorrectionLog->LatestEpoch());
     const Vec3 dir = c.mQ.template cast<Scalar>() * job.mCoarseDir;
     const Scalar sigma = job.mCoarseSigma - Scalar(std::log(c.mScale));
     DelayedMargSetBlock(*this->mGsState, dir, sigma);
     RecentreGravityScale();
     AnchorGs(mpAnchorCurr);
+    // Setting the block scaled every relative translation of the visual
+    // residual, so the inverse distances of the landmarks follow.
+    {
+        const Scalar sInv = std::exp(-sigma);
+        for (const auto& kv : lmdb.getLandmarks()) {
+            lmdb.getLandmark(kv.first).inv_dist *= sInv;
+        }
+    }
 
     // The velocity increments were solved in the epoch of the snapshot.
     const GravityScaleCorrectionLog::Entry cNow =
-        this->mGsCorrectionLog->Between(
-            job.mEpoch, this->mGsCorrectionLog->LatestEpoch());
+        this->mGsCorrectionLog->Between(job.mEpoch,
+                                        this->mGsCorrectionLog->LatestEpoch());
     const Mat3 Qm = cNow.mQ.template cast<Scalar>().matrix();
     const Scalar s = Scalar(cNow.mScale);
     auto inc = [&](int64_t id, const PoseVelBiasState<Scalar>& st) {
@@ -2788,14 +2837,20 @@ void SqrtKeypointVioEstimator<Scalar_>::UpdateDelayedMarg(
     DelayedMargStep<Scalar>&& step) {
     Timer tStore;
     const int64_t epoch = this->mGsCorrectionLog->LatestEpoch();
-    mpDm->Push(std::move(step));
+    // At the end of a stationary run the step, which still holds the ground
+    // keyframes, is discarded with the prior it would extend.
+    if (mpDmResetPending) {
+        mpDmResetPending = false;
+        ResetPriorToLastState(step.mIndex + 1);
+    } else {
+        mpDm->Push(std::move(step));
+    }
     DelayedMargValues<Scalar>& values = mpDm->Values();
     values.mvWindowStates = frame_states;
     values.mvWindowPoses = frame_poses;
     mpDm->AdvanceBoundary(*this->mGsState, g, gyro_bias_sqrt_weight,
-                          accel_bias_sqrt_weight,
-                          this->mGsCorrectionLog.get(), epoch,
-                          config.vio_gs_visual_prior_inertial,
+                          accel_bias_sqrt_weight, this->mGsCorrectionLog.get(),
+                          epoch, config.vio_gs_visual_prior_inertial,
                           Scalar(config.vio_gs_visual_prior_scale_tol));
     const double storeSeconds = mpDmStoreSeconds + tStore.elapsed();
 
@@ -2836,10 +2891,14 @@ void SqrtKeypointVioEstimator<Scalar_>::UpdateDelayedMarg(
         install(job);
     }
 
-    // The coarse phase ends once the store first holds the delay, and a
-    // smoothed readvance starts the delayed phase.
+    // The coarse phase ends once the store first holds the delay, counted from
+    // the first moving frame when asked, and a smoothed readvance starts the
+    // delayed phase.
     const int steps = int(mpDm->Steps().size());
-    if (mpDmCoarse && mpDm->NextIndex() >= config.vio_gs_dm_delay &&
+    const int64_t coarseEnd =
+        config.vio_gs_dm_delay +
+        (config.vio_gs_dm_delay_from_motion ? mpDmMotionIndex : 0);
+    if (mpDmCoarse && mpDm->NextIndex() >= coarseEnd &&
         !mpDmFuture.valid()) {
         mpDmCoarse = false;
         mpDmForceReplace = true;
@@ -2847,8 +2906,8 @@ void SqrtKeypointVioEstimator<Scalar_>::UpdateDelayedMarg(
 
     const GravityScaleStateWithLin<Scalar>& gs = *this->mGsState;
     const Scalar anchorSigma = std::abs(gs.GetSigma() - mpAnchorCurr.sigma);
-    const Scalar anchorTilt = std::acos(std::clamp(
-        gs.GetDir().dot(mpAnchorCurr.dir), Scalar(-1), Scalar(1)));
+    const Scalar anchorTilt = std::acos(
+        std::clamp(gs.GetDir().dot(mpAnchorCurr.dir), Scalar(-1), Scalar(1)));
     const int records = int(values.mvRecords.size());
 
     auto start = [&](bool coarseJobKind) {
@@ -2883,6 +2942,23 @@ void SqrtKeypointVioEstimator<Scalar_>::UpdateDelayedMarg(
         }
     }
 
+    // Fold test over the last marginalisations of the delayed phase.
+    if (!mpDmCoarse && config.vio_gs_dm_fold_settle_count > 0) {
+        mvpGsFoldEpochs.push_back(this->mGsCorrectionLog->LatestEpoch());
+        while (int(mvpGsFoldEpochs.size()) >
+               config.vio_gs_dm_fold_settle_count + 1) {
+            mvpGsFoldEpochs.pop_front();
+        }
+        mpGsFoldSettled =
+            int(mvpGsFoldEpochs.size()) ==
+                config.vio_gs_dm_fold_settle_count + 1 &&
+            DelayedMargBlockSettled(
+                *this->mGsCorrectionLog, mvpGsFoldEpochs,
+                g.normalized().template cast<double>(),
+                std::log(config.vio_gs_dm_fold_settle_scale),
+                config.vio_gs_dm_fold_settle_tilt_deg * M_PI / 180.0);
+    }
+
     mpLogger->AddVioDelayedMarg(
         last_state_t_ns, steps, records, started, installed, coarse,
         double(anchorSigma), double(anchorTilt) * 180.0 / M_PI, jobSeconds,
@@ -2898,7 +2974,138 @@ void SqrtKeypointVioEstimator<Scalar_>::UpdateDelayedMarg(
         coarseJob ? double(coarseJob->mCoarseBg.norm()) : 0.0,
         coarseJob ? double(coarseJob->mCoarseMaxVelInc) : 0.0,
         coarseJob ? coarseJob->mCoarseIterations : 0,
-        coarseJob ? int(coarseJob->mCoarseTimedOut) : 0, waitSeconds);
+        coarseJob ? int(coarseJob->mCoarseTimedOut) : 0, waitSeconds,
+        int(mpDmMotionIndex), mpGsFoldSettled ? 1 : 0);
+}
+
+// Zero velocity rows w_v v on every stationary state, and zero motion rows
+// w_p (p_b - p_a) and w_r Log(R_a^T R_b) between consecutive stationary
+// states, with the Jacobians of the left perturbed rotations taken at the
+// linearisation point. With leaving, only the zero motion rows whose first
+// state leaves. Marginalised, the zero velocity rows of a whole stationary
+// period would hold the mean velocity as if their errors were independent,
+// pinning the ground poses far tighter than the slow slide of a vehicle
+// spinning up on the ground, whereas the zero motion rows form a random walk.
+template <class Scalar_>
+void SqrtKeypointVioEstimator<Scalar_>::StationaryRows(
+    const AbsOrderMap& aom, const std::set<int64_t>* leaving, MatX& J,
+    VecX& r) const {
+    const Scalar wv = mpZeroVelocityWeight;
+    const Scalar wp = config.vio_zero_motion_pos_std > 0
+                          ? Scalar(1.0 / config.vio_zero_motion_pos_std)
+                          : Scalar(0);
+    const Scalar wr =
+        config.vio_zero_motion_rot_std_deg > 0
+            ? Scalar(180.0 / (M_PI * config.vio_zero_motion_rot_std_deg))
+            : Scalar(0);
+    auto selected = [&](int64_t id) {
+        return leaving == nullptr || leaving->count(id) > 0;
+    };
+
+    std::vector<int64_t> vVel;
+    std::vector<std::pair<int64_t, int64_t>> vMotion;
+    bool prevStationary = false;
+    int64_t prevId = -1;
+    for (const auto& [id, state] : frame_states) {
+        const auto it = aom.abs_order_map.find(id);
+        const bool stationary = it != aom.abs_order_map.end() &&
+                                it->second.second == POSE_VEL_BIAS_SIZE &&
+                                mvpStationaryStates.count(id) > 0;
+        if (stationary && wv > 0 && leaving == nullptr) vVel.push_back(id);
+        if (stationary && prevStationary && (wp > 0 || wr > 0) &&
+            selected(prevId)) {
+            vMotion.emplace_back(prevId, id);
+        }
+        prevStationary = stationary;
+        prevId = id;
+    }
+
+    const int rows = 3 * int(vVel.size()) + 6 * int(vMotion.size());
+    J.setZero(rows, aom.total_size);
+    r.setZero(rows);
+    int row = 0;
+    for (const int64_t id : vVel) {
+        const int c = aom.abs_order_map.at(id).first;
+        J.template block<3, 3>(row, c + 6).diagonal().setConstant(wv);
+        r.template segment<3>(row) =
+            wv * frame_states.at(id).getState().vel_w_i;
+        row += 3;
+    }
+    for (const auto& [a, b] : vMotion) {
+        const PoseVelBiasStateWithLin<Scalar>& sa = frame_states.at(a);
+        const PoseVelBiasStateWithLin<Scalar>& sb = frame_states.at(b);
+        const int ca = aom.abs_order_map.at(a).first;
+        const int cb = aom.abs_order_map.at(b).first;
+        J.template block<3, 3>(row, ca).diagonal().setConstant(-wp);
+        J.template block<3, 3>(row, cb).diagonal().setConstant(wp);
+        r.template segment<3>(row) =
+            wp * (sb.getState().T_w_i.translation() -
+                  sa.getState().T_w_i.translation());
+        row += 3;
+        const Mat3 Rat = sa.getStateLin().T_w_i.so3().inverse().matrix();
+        J.template block<3, 3>(row, ca + 3) = -wr * Rat;
+        J.template block<3, 3>(row, cb + 3) = wr * Rat;
+        r.template segment<3>(row) =
+            wr * (sa.getState().T_w_i.so3().inverse() *
+                  sb.getState().T_w_i.so3())
+                     .log();
+        row += 3;
+    }
+}
+
+// The ground keyframes are tied by the stationary residuals more rigidly than
+// a vehicle settling on its landing gear stays still, so at the first moving
+// frame only the marginal of the prior on the last stationary state survives,
+// with its pose, velocity, biases and their correlation with gravity.
+template <class Scalar_>
+void SqrtKeypointVioEstimator<Scalar_>::ResetPriorToLastState(
+    int64_t nextIndex) {
+    if (mpDmFuture.valid()) mpDmFuture.get();
+
+    std::set<int> idxKeep, idxMarg;
+    int64_t stateId = -1;
+    for (const auto& [id, idx] : marg_data.order.abs_order_map) {
+        std::set<int>& s = idx.second == POSE_SIZE ? idxMarg : idxKeep;
+        for (int i = 0; i < idx.second; i++) s.insert(idx.first + i);
+        if (idx.second == POSE_VEL_BIAS_SIZE) stateId = id;
+    }
+    BASALT_ASSERT(stateId >= 0);
+    BASALT_ASSERT(
+        marg_data.order.abs_order_map.at(kGravityScaleStateId).first == 0);
+
+    MatX H = marg_data.H;
+    VecX b = marg_data.b;
+    MatX HNew;
+    VecX bNew;
+    MargHelper<Scalar>::marginalizeHelperSqrtToSqrt(H, b, idxKeep, idxMarg,
+                                                    HNew, bNew);
+    AbsOrderMap order;
+    order.abs_order_map[kGravityScaleStateId] =
+        std::make_pair(0, GRAVITY_SCALE_SIZE);
+    order.abs_order_map[stateId] =
+        std::make_pair(GRAVITY_SCALE_SIZE, POSE_VEL_BIAS_SIZE);
+    order.total_size = GRAVITY_SCALE_SIZE + POSE_VEL_BIAS_SIZE;
+    order.items = 2;
+    marg_data.H = HNew;
+    marg_data.b = bNew;
+    marg_data.order = order;
+
+    std::set<int64_t> kfs;
+    for (const auto& kv : frame_poses) kfs.insert(kv.first);
+    for (const int64_t id : kfs) {
+        frame_poses.erase(id);
+        prev_opt_flow_res.erase(id);
+        kf_ids.erase(id);
+    }
+    lmdb.removeKeyframes(kfs, kfs, {});
+
+    DelayedMargPrior<Scalar> boundary;
+    boundary.mH = marg_data.H;
+    boundary.mB = marg_data.b;
+    boundary.mOrder = marg_data.order;
+    boundary.mAnchor.Set(*this->mGsState);
+    mpDm->Reset(boundary, nextIndex);
+    mpDmLastCoarseKeyframe = -1;
 }
 
 template <class Scalar_>

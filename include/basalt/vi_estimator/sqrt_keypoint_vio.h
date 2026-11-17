@@ -35,11 +35,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
 #include <basalt/imu/preintegration.h>
+#include <basalt/utils/logger.h>
 #include <basalt/vi_estimator/delayed_marginalisation.h>
 #include <basalt/vi_estimator/sqrt_ba_base.h>
 #include <basalt/vi_estimator/vio_estimator.h>
 
-#include <basalt/utils/logger.h>
 #include <deque>
 #include <future>
 #include <mutex>
@@ -158,7 +158,17 @@ public:
     std::shared_ptr<DelayedMargJob<Scalar>> MakeDelayedJob(bool coarse) const;
     int InstallDelayedJob(DelayedMargJob<Scalar>& job);
     bool InstallCoarseJob(const DelayedMargJob<Scalar>& job);
+    // Rows of the zero velocity and zero motion residuals of the stationary
+    // states in aom. With leaving, only the zero motion factors whose first
+    // state leaves the window.
+    void StationaryRows(const AbsOrderMap& aom,
+                        const std::set<int64_t>* leaving, MatX& J,
+                        VecX& r) const;
     void StopDelayedMarg();
+    // Replaces the prior by its marginal on the gravity and scale block and
+    // the window state it holds, drops every keyframe pose with its landmarks
+    // and restarts the delayed store from the new prior at nextIndex.
+    void ResetPriorToLastState(int64_t nextIndex);
 
     void debug_finalize() override;
 
@@ -291,6 +301,16 @@ private:
     bool mpDmForceReplace = false;
     int64_t mpDmLastCoarseKeyframe = -1;
     double mpDmStoreSeconds = 0;
+    // Steps pushed into the store before the period's first moving frame.
+    int64_t mpDmMotionIndex = 0;
+    // Set by a moving frame that follows a stationary one, so that the next
+    // marginalisation resets the prior to the last stationary state.
+    bool mpDmResetPending = false;
+    bool mpWasStationary = false;
+    // Epochs of the last vio_gs_dm_fold_settle_count + 1 marginalisations of
+    // the delayed phase, and whether they satisfy the fold test.
+    std::deque<int64_t> mvpGsFoldEpochs;
+    bool mpGsFoldSettled = false;
     int mpGsVisualImuRot = 0;
     Scalar mpGsVisualImuScaleCol = 0;
     int frames_after_kf;
@@ -338,6 +358,8 @@ private:
     // Scalar mpStationaryAccelTol = Scalar(0.5);
     // Scalar mpStationaryGyroTol = Scalar(0.05);
     bool mpIsStationary = false;
+    // Frame states created while the vehicle was stationary.
+    std::set<int64_t> mvpStationaryStates;
     Scalar mpZeroVelocityWeight = Scalar(0);
 
     struct ImuSample {

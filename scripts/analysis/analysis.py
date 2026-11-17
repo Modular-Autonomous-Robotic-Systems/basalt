@@ -1499,6 +1499,7 @@ class Analysis:
             "stored steps": {e: col(df, "steps") for e, df in dm.items()},
             "records of departed variables": {e: col(df, "records") for e, df in dm.items()},
             "coarse phase, 1 coarse and 0 delayed": {e: col(df, "coarse_phase") for e, df in dm.items()},
+            "fold test satisfied": {e: col(df, "fold_settled") for e, df in dm.items() if "fold_settled" in df},
         }, "Delayed store occupancy and phase")
 
         cj = {e: np.flatnonzero(col(df, "coarse") > 0) for e, df in dm.items()}

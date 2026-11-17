@@ -8,7 +8,9 @@
 #include <basalt/vi_estimator/delayed_marginalisation.h>
 #include <basalt/vi_estimator/marg_helper.h>
 
+#include <deque>
 #include <iostream>
+#include <limits>
 #include <random>
 
 #include "gtest/gtest.h"
@@ -930,4 +932,108 @@ TEST(VioTestSuite, DelayedMargCoarseDeadlineTest) {
   EXPECT_TRUE(job.mvCoarseVelInc.empty());
   EXPECT_EQ(job.mCoarseIterations, 0);
 }
+
+// From keepFromIndex on the store keeps one step more than the delay, so that
+// it holds the last stationary step and the delay's moving steps.
+TEST(VioTestSuite, DelayedMargStoreKeepFromTest) {
+  auto advance = [](int64_t keepFromIndex) {
+    DelayedMargChain chain;
+    basalt::DelayedMarginalisation<double> store(2);
+    store.SetBoundary(chain.boundary);
+    for (const auto& s : chain.steps) {
+      basalt::DelayedMargStep<double> step = *s;
+      store.Push(std::move(step));
+    }
+    store.Values() = chain.values;
+    store.AdvanceBoundary(chain.gs, basalt::constants::g, chain.weight,
+                          chain.weight, chain.log.get(), 0, true, 1.0,
+                          keepFromIndex);
+    return std::make_pair(store.Steps().size(),
+                          store.Steps().front()->mIndex);
+  };
+
+  const auto plain = advance(std::numeric_limits<int64_t>::max());
+  EXPECT_EQ(plain.first, 2u);
+  EXPECT_EQ(plain.second, 5);
+  const auto kept = advance(4);
+  EXPECT_EQ(kept.first, 3u);
+  EXPECT_EQ(kept.second, 4);
+}
+
+// A reset restarts the store from the given prior, discarding its steps,
+// records and keyframes while the step indices continue.
+TEST(VioTestSuite, DelayedMargStoreResetTest) {
+  DelayedMargChain chain;
+  basalt::DelayedMarginalisation<double> store(2);
+  store.SetBoundary(chain.boundary);
+  for (const auto& s : chain.steps) {
+    basalt::DelayedMargStep<double> step = *s;
+    store.Push(std::move(step));
+  }
+  store.Values() = chain.values;
+  store.AddKeyframe(1);
+  ASSERT_FALSE(store.Values().mvRecords.empty());
+
+  const int64_t next = store.NextIndex();
+  store.Reset(chain.boundary, next);
+  EXPECT_TRUE(store.Steps().empty());
+  EXPECT_TRUE(store.Values().mvRecords.empty());
+  EXPECT_TRUE(store.Keyframes().empty());
+  EXPECT_TRUE(store.KfChain().mvSpans.empty());
+  EXPECT_EQ(store.NextIndex(), next);
+  EXPECT_TRUE(store.Boundary().mH.isApprox(chain.boundary.mH));
+  EXPECT_TRUE(store.Boundary().mB.isApprox(chain.boundary.mB));
+}
+
+// A tight bias prior holds the coarse optimisation's one bias at the prior's
+// mean, and a disabled prior leaves the estimate free.
+TEST(VioTestSuite, DelayedMargCoarseBiasPriorTest) {
+  basalt::Se3Spline<5> spline(int64_t(1e9));
+  spline.genRandomTrajectory(15);
+  const Eigen::Vector3d ba(0.05, -0.03, 0.02);
+  const Eigen::Vector3d bg(0.004, -0.003, 0.002);
+
+  basalt::DelayedMargJob<double> held =
+      MakeCoarseTestJob(spline, 1.6, 0.0, 0.0, ba, bg);
+  held.mBgPrior = Eigen::Vector3d(0.001, 0.001, 0.001);
+  held.mBaPrior = Eigen::Vector3d(0.01, 0.01, 0.01);
+  held.mBgPriorW = 1e14;
+  held.mBaPriorW = 1e14;
+  held.Coarse();
+  EXPECT_FALSE(held.mCoarseTimedOut);
+  EXPECT_LT((held.mCoarseBg - held.mBgPrior).norm(), 1e-6);
+  EXPECT_LT((held.mCoarseBa - held.mBaPrior).norm(), 1e-6);
+
+  basalt::DelayedMargJob<double> free =
+      MakeCoarseTestJob(spline, 1.6, 0.0, 0.0, ba, bg);
+  free.Coarse();
+  EXPECT_LT((free.mCoarseBg - bg).norm(), 1e-4);
+}
 #endif
+
+// The fold test bounds the cumulative scale and gravity change between the
+// kept epochs and the last.
+TEST(VioTestSuite, DelayedMargBlockSettledTest) {
+  const Eigen::Vector3d up = basalt::constants::g.normalized();
+  const double deg = M_PI / 180.0;
+  const double half = std::log(1.005), two = std::log(1.02);
+
+  basalt::GravityScaleCorrectionLog log;
+  for (int i = 0; i < 2; i++) log.Append(Sophus::SO3d(), 1.0);
+  log.Append(Sophus::SO3d(), 1.01);
+  std::deque<int64_t> epochs = {0, 1, 2, 3};
+  EXPECT_FALSE(
+      basalt::DelayedMargBlockSettled(log, epochs, up, half, 0.1 * deg));
+  EXPECT_TRUE(basalt::DelayedMargBlockSettled(log, epochs, up, two, 0.1 * deg));
+
+  log.Append(Sophus::SO3d::exp(Eigen::Vector3d(0.2 * deg, 0, 0)), 1.0);
+  epochs.push_back(4);
+  EXPECT_FALSE(
+      basalt::DelayedMargBlockSettled(log, epochs, up, two, 0.1 * deg));
+  EXPECT_TRUE(basalt::DelayedMargBlockSettled(log, epochs, up, two, 0.3 * deg));
+
+  log.Append(Sophus::SO3d(), 1.0);
+  epochs = {4, 5};
+  EXPECT_TRUE(
+      basalt::DelayedMargBlockSettled(log, epochs, up, half, 0.1 * deg));
+}

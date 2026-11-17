@@ -391,7 +391,8 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"coarse_cost0", "f"}, {"coarse_cost1", "f"},
               {"coarse_spans", "count"}, {"coarse_bg", "f"},
               {"coarse_max_vel_inc", "f"}, {"coarse_iterations", "count"},
-              {"coarse_timed_out", "count"}, {"wait", "ms"}});
+              {"coarse_timed_out", "count"}, {"wait", "ms"},
+              {"motion_index", "count"}, {"fold_settled", "count"}});
 
     Register("vio_assoc", "[VIO][assoc]",
              {{"t_ns", "ns"}, {"of_obs", "count"}, {"connected0", "count"},
@@ -879,7 +880,8 @@ void Logger::AddVioDelayedMarg(int64_t tNs, int steps, int records,
                                double coarseCost1, int coarseSpans,
                                double coarseBg, double coarseMaxVelInc,
                                int coarseIterations, int coarseTimedOut,
-                               double waitSeconds) {
+                               double waitSeconds, int motionIndex,
+                               int foldSettled) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_delayed_marg");
     s.add_int("t_ns", tNs);
@@ -909,6 +911,8 @@ void Logger::AddVioDelayedMarg(int64_t tNs, int steps, int records,
     s.add("coarse_iterations", double(coarseIterations));
     s.add("coarse_timed_out", double(coarseTimedOut));
     s.add("wait", waitSeconds);
+    s.add("motion_index", double(motionIndex));
+    s.add("fold_settled", double(foldSettled));
     s.CommitRow();
 }
 

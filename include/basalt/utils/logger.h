@@ -201,7 +201,8 @@ public:
                            double coarseCost0, double coarseCost1,
                            int coarseSpans, double coarseBg,
                            double coarseMaxVelInc, int coarseIterations,
-                           int coarseTimedOut, double waitSeconds);
+                           int coarseTimedOut, double waitSeconds,
+                           int motionIndex, int foldSettled);
     void AddVioGravityScale(int64_t tNs, int64_t epoch, double sigmaStep,
                             double tiltStepDeg, double scaleCumulative,
                             double tiltCumulativeDeg, int swapEvent,
