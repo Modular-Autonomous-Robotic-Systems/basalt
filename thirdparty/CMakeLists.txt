@@ -3,6 +3,19 @@ cmake_minimum_required(VERSION 3.10...3.18)
 add_library(nlohmann::json INTERFACE IMPORTED GLOBAL)
 set_property(TARGET nlohmann::json PROPERTY INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/json/)
 
+# basalt-headers no longer vendors Eigen, Sophus and cereal, and only find_package()s targets not already defined.
+if(NOT TARGET Eigen3::Eigen)
+  add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+  set_property(TARGET Eigen3::Eigen PROPERTY INTERFACE_INCLUDE_DIRECTORIES ${EIGEN3_INCLUDE_DIR})
+endif()
+
+set(BUILD_SOPHUS_TESTS OFF CACHE BOOL "disable BUILD_SOPHUS_TESTS")
+set(BUILD_SOPHUS_EXAMPLES OFF CACHE BOOL "disable BUILD_SOPHUS_EXAMPLES")
+add_subdirectory(Sophus EXCLUDE_FROM_ALL)
+add_subdirectory(cereal EXCLUDE_FROM_ALL)
+
+# Normal variable so a cache entry left ON by an earlier configure cannot win (CMP0077).
+set(BASALT_HEADERS_ENABLE_INSTALL OFF)
 add_subdirectory(basalt-headers EXCLUDE_FROM_ALL)
 add_subdirectory(ros EXCLUDE_FROM_ALL)
 add_subdirectory(apriltag EXCLUDE_FROM_ALL)
