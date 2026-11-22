@@ -36,6 +36,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <sophus/se3.hpp>
 
+#include <basalt/utils/ba_utils.h>
 #include <basalt/utils/imu_types.h>
 
 namespace basalt {
@@ -44,32 +45,8 @@ inline Sophus::Vector6d relPoseError(
     const Sophus::SE3d& T_i_j, const Sophus::SE3d& T_w_i,
     const Sophus::SE3d& T_w_j, Sophus::Matrix6d* d_res_d_T_w_i = nullptr,
     Sophus::Matrix6d* d_res_d_T_w_j = nullptr) {
-  Sophus::SE3d T_j_i = T_w_j.inverse() * T_w_i;
-  Sophus::Vector6d res = Sophus::se3_logd(T_i_j * T_j_i);
-
-  if (d_res_d_T_w_i || d_res_d_T_w_j) {
-    Sophus::Matrix6d J;
-    Sophus::rightJacobianInvSE3Decoupled(res, J);
-
-    Eigen::Matrix3d R = T_w_i.so3().inverse().matrix();
-
-    Sophus::Matrix6d Adj;
-    Adj.setZero();
-    Adj.topLeftCorner<3, 3>() = R;
-    Adj.bottomRightCorner<3, 3>() = R;
-
-    if (d_res_d_T_w_i) {
-      *d_res_d_T_w_i = J * Adj;
-    }
-
-    if (d_res_d_T_w_j) {
-      Adj.topRightCorner<3, 3>() =
-          Sophus::SO3d::hat(T_j_i.inverse().translation()) * R;
-      *d_res_d_T_w_j = -J * Adj;
-    }
-  }
-
-  return res;
+  return relPoseErrorGS<double>(T_i_j, T_w_i, T_w_j, 1.0, d_res_d_T_w_i,
+                                d_res_d_T_w_j);
 }
 
 inline Sophus::Vector3d absPositionError(

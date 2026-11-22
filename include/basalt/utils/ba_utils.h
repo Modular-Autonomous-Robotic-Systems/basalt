@@ -34,6 +34,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #pragma once
 
+#include <basalt/utils/sophus_utils.hpp>
 #include <basalt/vi_estimator/landmark_database.h>
 
 namespace basalt {
@@ -127,6 +128,50 @@ Sophus::SE3<Scalar> computeRelPoseGS(
   if (d_rel_d_logscale) {
     d_rel_d_logscale->setZero();
     d_rel_d_logscale->template head<3>() = tmp2.so3() * (scale * tau);
+  }
+
+  return res;
+}
+
+// Decoupled residual of the relative pose T_w_j^-1 * T_w_i, with its
+// translation multiplied by scale, against the measurement T_i_j, and its
+// Jacobians on the left world increments of both poses and on the log scale.
+template <class Scalar>
+Sophus::Vector6<Scalar> relPoseErrorGS(
+    const Sophus::SE3<Scalar>& T_i_j, const Sophus::SE3<Scalar>& T_w_i,
+    const Sophus::SE3<Scalar>& T_w_j, Scalar scale,
+    Sophus::Matrix6<Scalar>* d_res_d_T_w_i = nullptr,
+    Sophus::Matrix6<Scalar>* d_res_d_T_w_j = nullptr,
+    Sophus::Vector6<Scalar>* d_res_d_logscale = nullptr) {
+  Sophus::SE3<Scalar> T_j_i = T_w_j.inverse() * T_w_i;
+  T_j_i.translation() *= scale;
+  Sophus::Vector6<Scalar> res = Sophus::se3_logd(T_i_j * T_j_i);
+
+  if (d_res_d_T_w_i || d_res_d_T_w_j) {
+    Sophus::Matrix6<Scalar> J;
+    Sophus::rightJacobianInvSE3Decoupled(res, J);
+
+    Sophus::Matrix3<Scalar> R = T_w_i.so3().inverse().matrix();
+
+    Sophus::Matrix6<Scalar> Adj;
+    Adj.setZero();
+    Adj.template topLeftCorner<3, 3>() = scale * R;
+    Adj.template bottomRightCorner<3, 3>() = R;
+
+    if (d_res_d_T_w_i) {
+      *d_res_d_T_w_i = J * Adj;
+    }
+
+    if (d_res_d_T_w_j) {
+      Adj.template topRightCorner<3, 3>() =
+          Sophus::SO3<Scalar>::hat(T_j_i.inverse().translation()) * R;
+      *d_res_d_T_w_j = -J * Adj;
+    }
+  }
+
+  if (d_res_d_logscale) {
+    d_res_d_logscale->setZero();
+    d_res_d_logscale->template head<3>() = T_i_j.so3() * T_j_i.translation();
   }
 
   return res;

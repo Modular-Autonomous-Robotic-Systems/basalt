@@ -190,6 +190,13 @@ public:
                          double maxTransErr, double maxRotErr,
                          double limitTrans, double limitRot);
     void PrintVioPoseUpdate();
+    void AddVioLocalMap(int64_t tNs, int keyframes, int pairs, double scaleGap,
+                        double tiltGapDeg, double yawGapDeg, double mapSpeed,
+                        double windowSpeed, double maxSpeedJump,
+                        double gradRest, double hessRest,
+                        double gradLocalMap, double hessLocalMap,
+                        double sigmaStep);
+    void PrintVioLocalMap();
     void AddVioDelayedMarg(int64_t tNs, int steps, int records, int started,
                            int installed, int coarse, double anchorSigma,
                            double anchorTiltDeg, double jobSeconds,

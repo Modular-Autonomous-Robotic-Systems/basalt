@@ -35,6 +35,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <basalt/optimization/accumulator.h>
 #include <basalt/utils/assert.h>
+#include <basalt/utils/ba_utils.h>
 #include <basalt/utils/system_utils.h>
 #include <basalt/vi_estimator/marg_helper.h>
 #include <basalt/vi_estimator/sc_ba_base.h>
@@ -634,85 +635,34 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
         .format("none");
     Timer t_total;
 
-    // ── Apply local-mapper pose corrections to frame_poses ──────────
-    // Only frame_poses entries are updated (already-marginalised KFs with
-    // pose-only state). frame_states entries are left untouched because
-    // they are coupled to ongoing IMU preintegration and overwriting them
-    // would violate the BASALT_ASSERT at line 352.
+    // Drain the local mapper's keyframe poses into the estimator thread's
+    // map, which the local map rows of optimize read, and drop entries older
+    // than the window.
     Timer tPoseUpdate;
-    int poseUpdatePending = 0, poseUpdateApplied = 0, poseUpdateRejected = 0;
-    Scalar poseUpdateMaxTransErr = 0, poseUpdateMaxRotErr = 0;
+    int poseUpdatePending = 0;
     {
         std::lock_guard<std::mutex> lock(mpPosesToUpdateMutex);
         poseUpdatePending = int(mpPosesToUpdate.size());
-        // Held while the delayed store is active, so that no readvance meets
-        // a keyframe pose moved by the visual only mapper,
-        // plans/delayed_marginalisation.md §2.3.8.
-        if (mpDm && config.vio_gs_dm_hold_pose_updates) {
-            poseUpdateRejected = poseUpdatePending;
-            mpPosesToUpdate.clear();
-            mpPosesToUpdateEpoch.clear();
+        for (const auto& [t_ns, pose] : mpPosesToUpdate) {
+            const auto it = mpPosesToUpdateEpoch.find(t_ns);
+            mvpLocalMapPoses[t_ns] = {
+                pose.getPose(),
+                it != mpPosesToUpdateEpoch.end() ? it->second : 0};
         }
-        if (!mpPosesToUpdate.empty()) {
-            for (auto it = mpPosesToUpdate.begin();
-                 it != mpPosesToUpdate.end();) {
-                const int64_t t_ns = it->first;
-                const PoseStateWithLin<double>& lm_pose = it->second;
-                Sophus::SE3d T_new_d = lm_pose.getPose();
-                const auto it_epoch = mpPosesToUpdateEpoch.find(t_ns);
-                if (this->mGsCorrectionLog &&
-                    it_epoch != mpPosesToUpdateEpoch.end()) {
-                    T_new_d =
-                        this->mGsCorrectionLog
-                            ->Between(it_epoch->second,
-                                      this->mGsCorrectionLog->LatestEpoch())
-                            .Apply(T_new_d);
-                }
-                const SE3 T_new = T_new_d.template cast<Scalar>();
-
-                auto it_fp = frame_poses.find(t_ns);
-                if (it_fp != frame_poses.end()) {
-                    const SE3 T_old = it_fp->second.getPose();
-                    const SE3 diff = T_new.inverse() * T_old;
-                    const Scalar trans_err = diff.translation().norm();
-                    const Scalar rot_err = diff.so3().log().norm();
-                    poseUpdateMaxTransErr =
-                        std::max(poseUpdateMaxTransErr, trans_err);
-                    poseUpdateMaxRotErr =
-                        std::max(poseUpdateMaxRotErr, rot_err);
-                    if (trans_err > kRelinThresholdTrans ||
-                        rot_err > kRelinThresholdRot) {
-                        // Large correction — skip to preserve FEJ
-                        // consistency. The entry stays so the mapper
-                        // can send a refined (smaller) update next time.
-                        poseUpdateRejected++;
-                        // it = mpPosesToUpdate.erase(it);
-                        // continue;
-                    } else {
-                        // Small correction — apply and preserve the
-                        // linearised flag to avoid tripping the
-                        // isLinearized() assertion in computeDelta.
-                        const bool was_lin = it_fp->second.isLinearized();
-                        it_fp->second =
-                            PoseStateWithLin<Scalar>(t_ns, T_new, was_lin);
-                        poseUpdateApplied++;
-                        // it = mpPosesToUpdate.erase(it);
-                        // continue;
-                    }
-                }
-                mpPosesToUpdateEpoch.erase(t_ns);
-                it = mpPosesToUpdate.erase(it);
-                // ++it;
-            }
-        }
+        mpPosesToUpdate.clear();
+        mpPosesToUpdateEpoch.clear();
     }
+    const int64_t oldest = !frame_poses.empty()
+                               ? frame_poses.begin()->first
+                               : (frame_states.empty()
+                                      ? 0
+                                      : frame_states.begin()->first);
+    mvpLocalMapPoses.erase(mvpLocalMapPoses.begin(),
+                           mvpLocalMapPoses.lower_bound(oldest));
+    mpLocalMapPairs = 0;
+    mpLocalMapMaxTrans = mpLocalMapMaxRot = 0;
+    mpLocalMapDiag = LocalMapDiagnostics();
     const double poseUpdateSeconds = tPoseUpdate.elapsed();
-    mpLogger->AddVioPoseUpdate(
-        opt_flow_meas->t_ns, poseUpdatePending, poseUpdateApplied,
-        poseUpdateRejected, double(poseUpdateMaxTransErr),
-        double(poseUpdateMaxRotErr), double(kRelinThresholdTrans),
-        double(kRelinThresholdRot));
-    // mpLogger->PrintVioPoseUpdate();
 
     if (meas.get()) {
         BASALT_ASSERT(frame_states[last_state_t_ns].getState().t_ns ==
@@ -1024,6 +974,19 @@ SqrtKeypointVioEstimator<Scalar_>::measure(
     Timer tOptMarg;
     optimize_and_marg(num_points_connected, lost_landmaks);
     const double optMargSeconds = tOptMarg.elapsed();
+    mpLogger->AddVioPoseUpdate(
+        opt_flow_meas->t_ns, poseUpdatePending, mpLocalMapPairs, 0,
+        double(mpLocalMapMaxTrans), double(mpLocalMapMaxRot),
+        config.vio_local_map_pos_std,
+        config.vio_local_map_rot_std_deg * M_PI / 180.0);
+    mpLogger->AddVioLocalMap(
+        opt_flow_meas->t_ns, mpLocalMapDiag.mKeyframes, mpLocalMapPairs,
+        mpLocalMapDiag.mScaleGap, mpLocalMapDiag.mTiltGapDeg,
+        mpLocalMapDiag.mYawGapDeg, mpLocalMapDiag.mMapSpeed,
+        mpLocalMapDiag.mWindowSpeed, mpLocalMapDiag.mMaxSpeedJump,
+        mpLocalMapDiag.mGradRest, mpLocalMapDiag.mHessRest,
+        mpLocalMapDiag.mGradLocalMap, mpLocalMapDiag.mHessLocalMap,
+        mpLocalMapDiag.mSigmaStep);
     PoseVelBiasStateWithLin p = frame_states.at(last_state_t_ns);
 
     {
@@ -1757,6 +1720,7 @@ void SqrtKeypointVioEstimator<Scalar_>::marginalize(
                                     int64_t(config.vio_gs_duration_s * 1e9);
         if (elapsed || mpGsFoldSettled) FoldGravityScale();
     }
+    if (!mpGsActive) mpLocalMapOpen = true;
 
     mpLogger->SolverScratch()
         .add("marginalize", t_total.elapsed())
@@ -1958,6 +1922,24 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
             const bool applyStationary = stationaryJ.rows() > 0;
             if (applyStationary)
                 error_total += Scalar(0.5) * stationaryR.squaredNorm();
+            MatX localMapJ;
+            VecX localMapR;
+            Scalar localMapMaxTrans = 0, localMapMaxRot = 0;
+            if (config.vio_local_map_pairwise)
+                LocalMapRows2(aom, localMapJ, localMapR, &localMapMaxTrans,
+                              &localMapMaxRot);
+            else
+                LocalMapRows(aom, localMapJ, localMapR, &localMapMaxTrans,
+                             &localMapMaxRot);
+            const bool applyLocalMap = localMapJ.rows() > 0;
+            if (applyLocalMap)
+                error_total += Scalar(0.5) * localMapR.squaredNorm();
+            if (it == 0) {
+                mpLocalMapPairs = int(localMapJ.rows() / POSE_SIZE);
+                mpLocalMapMaxTrans = localMapMaxTrans;
+                mpLocalMapMaxRot = localMapMaxRot;
+                if (applyLocalMap) LocalMapGaps(aom, mpLocalMapDiag);
+            }
             if (applyGsJump)
                 error_total +=
                     Scalar(0.5) * gsJumpW2.dot(gsJump.cwiseProduct(gsJump));
@@ -2035,9 +2017,31 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
 
                     lqr->get_dense_H_b(H, b);
 
+                    const int scaleCol =
+                        mpGsActive && it == 0 && j == 0
+                            ? aom.abs_order_map.at(kGravityScaleStateId).first +
+                                  GRAVITY_SCALE_SIZE - 1
+                            : -1;
+                    if (scaleCol >= 0) {
+                        mpLocalMapDiag.mGradRest = double(b[scaleCol]);
+                        mpLocalMapDiag.mHessRest =
+                            double(H(scaleCol, scaleCol));
+                        if (applyLocalMap) {
+                            mpLocalMapDiag.mGradLocalMap =
+                                double(localMapJ.col(scaleCol).dot(localMapR));
+                            mpLocalMapDiag.mHessLocalMap =
+                                double(localMapJ.col(scaleCol).squaredNorm());
+                        }
+                    }
+
                     if (applyStationary) {
                         H += stationaryJ.transpose() * stationaryJ;
                         b += stationaryJ.transpose() * stationaryR;
+                    }
+
+                    if (applyLocalMap) {
+                        H += localMapJ.transpose() * localMapJ;
+                        b += localMapJ.transpose() * localMapR;
                     }
 
                     if (applyGsJump) {
@@ -2105,6 +2109,8 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                     }
 
                     if (mpGsActive) inc = gauge_P * inc;
+                    if (scaleCol >= 0)
+                        mpLocalMapDiag.mSigmaStep = double(-inc[scaleCol]);
                 }
 
                 // backup state (then apply increment and check cost decrease)
@@ -2124,6 +2130,10 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                     if (applyStationary) {
                         const VecX dr = stationaryJ * inc;
                         l_diff -= dr.dot(stationaryR + Scalar(0.5) * dr);
+                    }
+                    if (applyLocalMap) {
+                        const VecX dr = localMapJ * inc;
+                        l_diff -= dr.dot(localMapR + Scalar(0.5) * dr);
                     }
                     if (applyGsJump) {
                         const Vec3 dg = inc.template head<GRAVITY_SCALE_SIZE>();
@@ -2211,6 +2221,16 @@ void SqrtKeypointVioEstimator<Scalar_>::optimize() {
                                    stationaryRNew);
                     after_error_total +=
                         Scalar(0.5) * stationaryRNew.squaredNorm();
+                }
+                if (applyLocalMap) {
+                    MatX localMapJNew;
+                    VecX localMapRNew;
+                    if (config.vio_local_map_pairwise)
+                        LocalMapRows2(aom, localMapJNew, localMapRNew);
+                    else
+                        LocalMapRows(aom, localMapJNew, localMapRNew);
+                    after_error_total +=
+                        Scalar(0.5) * localMapRNew.squaredNorm();
                 }
                 const Vec3 gsJumpNew =
                     applyGsJump
@@ -2875,6 +2895,7 @@ void SqrtKeypointVioEstimator<Scalar_>::UpdateDelayedMarg(
             maxPosInc = job->mMaxPosInc;
             installed = 1;
             mpGsSwapEvent = 6;
+            mpLocalMapOpen = true;
         }
         catchupSeconds = t.elapsed();
         jobSeconds = job->mSeconds;
@@ -3050,6 +3071,197 @@ void SqrtKeypointVioEstimator<Scalar_>::StationaryRows(
                   sb.getState().T_w_i.so3())
                      .log();
         row += 3;
+    }
+}
+
+namespace {
+// Isotropic information of one local map pair with both variances multiplied
+// by norm.
+Sophus::Matrix6d localMapInformation(const VioConfig& config, double norm) {
+    const double rotStd = config.vio_local_map_rot_std_deg * M_PI / 180.0;
+    Sophus::Matrix6d info = Sophus::Matrix6d::Zero();
+    info.diagonal().head<3>().setConstant(
+        1.0 / (config.vio_local_map_pos_std * config.vio_local_map_pos_std *
+               norm));
+    info.diagonal().tail<3>().setConstant(1.0 / (rotStd * rotStd * norm));
+    return info;
+}
+
+RelPoseFactor makeLocalMapFactor(int64_t i, int64_t j, const Sophus::SE3d& Ti,
+                                 const Sophus::SE3d& Tj,
+                                 const Sophus::Matrix6d& info) {
+    RelPoseFactor rpf;
+    rpf.t_i_ns = i;
+    rpf.t_j_ns = j;
+    rpf.T_i_j = Ti.inverse() * Tj;
+    rpf.cov_inv = info;
+    return rpf;
+}
+}  // namespace
+
+template <class Scalar_>
+void SqrtKeypointVioEstimator<Scalar_>::GetLocalMapPoses(
+    const AbsOrderMap& aom, std::vector<int64_t>& vIds,
+    Eigen::aligned_vector<Sophus::SE3d>& vPoses) const {
+    vIds.clear();
+    vPoses.clear();
+    if (!mpLocalMapOpen || config.vio_local_map_pos_std <= 0 ||
+        config.vio_local_map_rot_std_deg <= 0)
+        return;
+
+    const int64_t latest = this->mGsCorrectionLog
+                               ? this->mGsCorrectionLog->LatestEpoch()
+                               : 0;
+    for (const auto& [id, entry] : mvpLocalMapPoses) {
+        if (aom.abs_order_map.count(id) == 0) continue;
+        const auto& [T, epoch] = entry;
+        vIds.push_back(id);
+        vPoses.push_back(this->mGsCorrectionLog
+                             ? this->mGsCorrectionLog->Between(epoch, latest)
+                                   .Apply(T)
+                             : T);
+    }
+}
+
+template <class Scalar_>
+void SqrtKeypointVioEstimator<Scalar_>::LocalMapRows(const AbsOrderMap& aom,
+                                                     MatX& J, VecX& r,
+                                                     Scalar* maxTrans,
+                                                     Scalar* maxRot) const {
+    std::vector<int64_t> vIds;
+    Eigen::aligned_vector<Sophus::SE3d> vPoses;
+    GetLocalMapPoses(aom, vIds, vPoses);
+
+    Eigen::aligned_vector<RelPoseFactor> vFactors;
+    const size_t n = vIds.size();
+    if (n >= 2) {
+        const Sophus::Matrix6d info =
+            localMapInformation(config, double(n - 1));
+        for (size_t k = 1; k < n; ++k) {
+            vFactors.push_back(makeLocalMapFactor(vIds[0], vIds[k], vPoses[0],
+                                                  vPoses[k], info));
+        }
+    }
+    RelPoseFactorRows(aom, vFactors, J, r, maxTrans, maxRot);
+}
+
+template <class Scalar_>
+void SqrtKeypointVioEstimator<Scalar_>::LocalMapRows2(const AbsOrderMap& aom,
+                                                      MatX& J, VecX& r,
+                                                      Scalar* maxTrans,
+                                                      Scalar* maxRot) const {
+    std::vector<int64_t> vIds;
+    Eigen::aligned_vector<Sophus::SE3d> vPoses;
+    GetLocalMapPoses(aom, vIds, vPoses);
+
+    Eigen::aligned_vector<RelPoseFactor> vFactors;
+    const size_t n = vIds.size();
+    if (n >= 2) {
+        const Sophus::Matrix6d info =
+            localMapInformation(config, double(n) * double(n));
+        vFactors.reserve(n * (n - 1) / 2);
+        for (size_t i = 0; i + 1 < n; ++i) {
+            for (size_t j = i + 1; j < n; ++j) {
+                vFactors.push_back(makeLocalMapFactor(vIds[i], vIds[j],
+                                                      vPoses[i], vPoses[j],
+                                                      info));
+            }
+        }
+    }
+    RelPoseFactorRows(aom, vFactors, J, r, maxTrans, maxRot);
+}
+
+template <class Scalar_>
+void SqrtKeypointVioEstimator<Scalar_>::LocalMapGaps(
+    const AbsOrderMap& aom, LocalMapDiagnostics& diag) const {
+    std::vector<int64_t> vIds;
+    Eigen::aligned_vector<Sophus::SE3d> vPoses;
+    GetLocalMapPoses(aom, vIds, vPoses);
+    diag.mKeyframes = int(vIds.size());
+    if (vIds.size() < 2) return;
+
+    const double s = mpGsActive && this->mGsState.has_value()
+                         ? double(this->mGsState->GetScale())
+                         : 1.0;
+    double mapLen = 0, winLen = 0, tilt = 0, yaw = 0, mapSpeed = 0,
+           winSpeed = 0, maxJump = 0;
+    const size_t n = vIds.size();
+    for (size_t k = 0; k + 1 < n; ++k) {
+        const Sophus::SE3d Ti =
+            getPoseStateWithLin(vIds[k]).getPose().template cast<double>();
+        const Sophus::SE3d Tj =
+            getPoseStateWithLin(vIds[k + 1]).getPose().template cast<double>();
+        const double dt = double(vIds[k + 1] - vIds[k]) * 1e-9;
+        const double dMap =
+            (vPoses[k + 1].translation() - vPoses[k].translation()).norm();
+        const double dWin = s * (Tj.translation() - Ti.translation()).norm();
+        mapLen += dMap;
+        winLen += dWin;
+        mapSpeed += dMap / dt;
+        winSpeed += dWin / dt;
+        maxJump = std::max(maxJump, std::abs(dMap - dWin) / dt);
+
+        const Sophus::SO3d dR =
+            (vPoses[k].so3().inverse() * vPoses[k + 1].so3()) *
+            (Ti.so3().inverse() * Tj.so3()).inverse();
+        const Eigen::Vector3d phi = Ti.so3() * dR.log();
+        tilt += phi.head<2>().norm();
+        yaw += std::abs(phi.z());
+    }
+    const double m = double(n - 1);
+    diag.mScaleGap = winLen > 0 && mapLen > 0 ? std::log(mapLen / winLen) : 0;
+    diag.mTiltGapDeg = tilt / m * 180.0 / M_PI;
+    diag.mYawGapDeg = yaw / m * 180.0 / M_PI;
+    diag.mMapSpeed = mapSpeed / m;
+    diag.mWindowSpeed = winSpeed / m;
+    diag.mMaxSpeedJump = maxJump;
+}
+
+// Jacobians at the first estimates and residuals at the current values, each
+// factor whitened by the upper Cholesky factor of its information.
+template <class Scalar_>
+void SqrtKeypointVioEstimator<Scalar_>::RelPoseFactorRows(
+    const AbsOrderMap& aom,
+    const Eigen::aligned_vector<RelPoseFactor>& vFactors, MatX& J, VecX& r,
+    Scalar* maxTrans, Scalar* maxRot) const {
+    J.setZero(POSE_SIZE * vFactors.size(), aom.total_size);
+    r.setZero(POSE_SIZE * vFactors.size());
+    if (vFactors.empty()) return;
+
+    const bool gs = mpGsActive && this->mGsState.has_value();
+    const Scalar s = gs ? this->mGsState->GetScale() : Scalar(1);
+    const Scalar sLin = gs ? this->mGsState->GetScaleLin() : Scalar(1);
+    const int cs =
+        gs ? aom.abs_order_map.at(kGravityScaleStateId).first +
+                 GRAVITY_SCALE_SIZE - 1
+           : -1;
+
+    for (size_t f = 0; f < vFactors.size(); ++f) {
+        const RelPoseFactor& rpf = vFactors[f];
+        const PoseStateWithLin<Scalar> pi = getPoseStateWithLin(rpf.t_i_ns);
+        const PoseStateWithLin<Scalar> pj = getPoseStateWithLin(rpf.t_j_ns);
+        const SE3 Tij = rpf.T_i_j.template cast<Scalar>();
+
+        Sophus::Matrix6<Scalar> Ji, Jj;
+        Sophus::Vector6<Scalar> Js;
+        relPoseErrorGS<Scalar>(Tij, pi.getPoseLin(), pj.getPoseLin(), sLin,
+                               &Ji, &Jj, &Js);
+        const Sophus::Vector6<Scalar> res =
+            relPoseErrorGS<Scalar>(Tij, pi.getPose(), pj.getPose(), s);
+
+        const Sophus::Matrix6d U = rpf.cov_inv.llt().matrixU();
+        const Sophus::Matrix6<Scalar> W = U.template cast<Scalar>();
+        const int row = int(POSE_SIZE * f);
+        J.template block<POSE_SIZE, POSE_SIZE>(
+            row, aom.abs_order_map.at(rpf.t_i_ns).first) = W * Ji;
+        J.template block<POSE_SIZE, POSE_SIZE>(
+            row, aom.abs_order_map.at(rpf.t_j_ns).first) = W * Jj;
+        if (gs) J.template block<POSE_SIZE, 1>(row, cs) = W * Js;
+        r.template segment<POSE_SIZE>(row) = W * res;
+
+        if (maxTrans)
+            *maxTrans = std::max(*maxTrans, res.template head<3>().norm());
+        if (maxRot) *maxRot = std::max(*maxRot, res.template tail<3>().norm());
     }
 }
 

@@ -371,6 +371,15 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"max_rot_err", "f"}, {"limit_trans", "f"},
               {"limit_rot", "f"}});
 
+    Register("vio_local_map", "[VIO][local-map]",
+             {{"t_ns", "ns"}, {"keyframes", "count"}, {"pairs", "count"},
+              {"scale_gap", "f"}, {"tilt_gap_deg", "f"},
+              {"yaw_gap_deg", "f"}, {"map_speed", "f"},
+              {"window_speed", "f"}, {"max_speed_jump", "f"},
+              {"grad_rest", "f"}, {"hess_rest", "f"},
+              {"grad_local_map", "f"}, {"hess_local_map", "f"},
+              {"sigma_step", "f"}});
+
     Register("vio_gravity_scale", "[VIO][gravity-scale]",
              {{"t_ns", "ns"}, {"epoch", "count"}, {"sigma_step", "f"},
               {"tilt_step_deg", "f"}, {"scale_cumulative", "f"},
@@ -846,6 +855,34 @@ void Logger::AddVioPoseUpdate(int64_t tNs, int pending, int applied,
 }
 
 void Logger::PrintVioPoseUpdate() { Emit("vio_pose_update"); }
+
+void Logger::AddVioLocalMap(int64_t tNs, int keyframes, int pairs,
+                            double scaleGap, double tiltGapDeg,
+                            double yawGapDeg, double mapSpeed,
+                            double windowSpeed, double maxSpeedJump,
+                            double gradRest, double hessRest,
+                            double gradLocalMap, double hessLocalMap,
+                            double sigmaStep) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_local_map");
+    s.add_int("t_ns", tNs);
+    s.add("keyframes", double(keyframes));
+    s.add("pairs", double(pairs));
+    s.add("scale_gap", scaleGap);
+    s.add("tilt_gap_deg", tiltGapDeg);
+    s.add("yaw_gap_deg", yawGapDeg);
+    s.add("map_speed", mapSpeed);
+    s.add("window_speed", windowSpeed);
+    s.add("max_speed_jump", maxSpeedJump);
+    s.add("grad_rest", gradRest);
+    s.add("hess_rest", hessRest);
+    s.add("grad_local_map", gradLocalMap);
+    s.add("hess_local_map", hessLocalMap);
+    s.add("sigma_step", sigmaStep);
+    s.CommitRow();
+}
+
+void Logger::PrintVioLocalMap() { Emit("vio_local_map"); }
 
 void Logger::AddVioGravityScale(int64_t tNs, int64_t epoch, double sigmaStep,
                                 double tiltStepDeg, double scaleCumulative,

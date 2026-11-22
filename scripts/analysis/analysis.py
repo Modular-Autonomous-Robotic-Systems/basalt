@@ -1021,7 +1021,7 @@ class Analysis:
                         visualisation.time_series(
                             t_ns,
                             y,
-                            f"Local mapper pose update, {col}",
+                            f"Local map relative pose residuals, {col} pairs",
                             "t_ns",
                             "count",
                             x_range=self.shared_t_range,
@@ -1358,7 +1358,7 @@ class Analysis:
         add_multi("pose_update_gate", "gs_pose_update_gate", {e: df["t_ns"] for e, df in pu.items()}, {
             c: {e: df[c] for e, df in pu.items() if c in df}
             for c in ("applied", "rejected", "max_trans_err", "max_rot_err")
-        }, "Mapper pose updates at the estimator's gate, limits limit_trans and limit_rot")
+        }, "Local map pairs in the window as applied, largest unweighted relative pose residuals, standard deviations in limit_trans and limit_rot")
         ss = self.reader.load("vio_solver_summary")
         add_multi("solver_health", "gs_solver_health", {e: df["t_ns"] for e, df in ss.items()}, {
             c: {e: df[c] for e, df in ss.items() if c in df}

@@ -107,6 +107,13 @@ struct VioConfig {
     // 0 disables.
     double vio_zero_motion_pos_std;
     double vio_zero_motion_rot_std_deg;
+    // Standard deviations of the local mapper's keyframe poses, translation in
+    // metres and rotation in degrees, 0 disables their relative pose residuals.
+    double vio_local_map_pos_std;
+    double vio_local_map_rot_std_deg;
+    // Residuals between every pair of shared keyframes when true, and between
+    // the oldest and every other when false.
+    bool vio_local_map_pairwise;
 
     // Independently gated stationary body detector stages, combined by
     // logical AND into mpIsStationary.
@@ -160,9 +167,6 @@ struct VioConfig {
     double vio_gs_dm_coarse_scale_var;
     bool vio_gs_dm_smooth;
     bool vio_gs_dm_async;
-    // Drop the local mapper's pose updates during the period,
-    // plans/delayed_marginalisation.md §2.3.8.
-    bool vio_gs_dm_hold_pose_updates;
     // Count vio_gs_dm_delay from the end of the stationary period, and at
     // every moving frame that follows a stationary one reduce the prior to
     // its marginal on the last stationary state, dropping the ground
