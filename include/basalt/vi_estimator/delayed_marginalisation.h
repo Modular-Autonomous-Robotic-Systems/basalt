@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -242,6 +243,23 @@ void DelayedMargSetBlock(GravityScaleStateWithLin<Scalar>& gs,
     gs.ApplyInc(inc);
 }
 
+// True when the scale and the gravity direction gDir changed by at most
+// lnScale and tilt radians between every epoch of vEpochs and the last.
+inline bool DelayedMargBlockSettled(const GravityScaleCorrectionLog& log,
+                                    const std::deque<int64_t>& vEpochs,
+                                    const Eigen::Vector3d& gDir,
+                                    double lnScale, double tilt) {
+    for (const int64_t e : vEpochs) {
+        const GravityScaleCorrectionLog::Entry c =
+            log.Between(e, vEpochs.back());
+        if (std::abs(std::log(c.mScale)) > lnScale) return false;
+        const double cosAngle =
+            std::clamp((c.mQ * gDir).dot(gDir), -1.0, 1.0);
+        if (std::acos(cosAngle) > tilt) return false;
+    }
+    return true;
+}
+
 // One per frame inertial factor at zero bias, §2.3.11 Step 1. The deltas are
 // read from the residual at identity states, zero gravity and zero scale,
 // where the rotation row is Log(dR) and its gyroscope bias Jacobian carries
@@ -393,6 +411,12 @@ struct DelayedMargJob {
     std::set<int64_t> mvKeyframes;
     dm::Vec3<Scalar> mInitialDir = dm::Vec3<Scalar>::Zero();
     Scalar mTiltPriorW = 0;
+    // Prior on the one gyroscope and accelerometer bias, the estimate of the
+    // window at the snapshot and its information, zero disabling it.
+    dm::Vec3<Scalar> mBgPrior = dm::Vec3<Scalar>::Zero();
+    dm::Vec3<Scalar> mBaPrior = dm::Vec3<Scalar>::Zero();
+    Scalar mBgPriorW = 0;
+    Scalar mBaPriorW = 0;
     Scalar mScaleVarMax = 0;
     double mCoarseDeadlineSeconds = 0;
     // Standard deviation of a held keyframe position, §2.3.11 Step 4.
@@ -651,6 +675,19 @@ struct DelayedMargJob {
                     b->template head<2>() += mTiltPriorW * rt;
                 }
             }
+            // Bias priors at the window's estimate, columns 3 to 8.
+            auto biasPrior = [&](int col, Scalar w, const dm::Vec3<Scalar>& r) {
+                if (w <= 0) return;
+                cost += Scalar(0.5) * w * r.squaredNorm();
+                if (H) {
+                    for (int k = 0; k < 3; k++) {
+                        vTriplets.emplace_back(col + k, col + k, w);
+                    }
+                    b->template segment<3>(col) += w * r;
+                }
+            };
+            biasPrior(3, mBgPriorW, bg - mBgPrior);
+            biasPrior(6, mBaPriorW, ba - mBaPrior);
             if (H) {
                 H->resize(n, n);
                 H->setFromTriplets(vTriplets.begin(), vTriplets.end());
@@ -671,8 +708,8 @@ struct DelayedMargJob {
         auto solve = [&](bool scaleFree) {
             Rg = dm::SO3<Scalar>();
             eta = 0;
-            bg.setZero();
-            ba.setZero();
+            bg = mBgPriorW > 0 ? mBgPrior : dm::Vec3<Scalar>::Zero();
+            ba = mBaPriorW > 0 ? mBaPrior : dm::Vec3<Scalar>::Zero();
             du.setZero();
             Scalar cost = linearise(&H, &b);
             Scalar lambda = Scalar(1e-4);
@@ -1030,6 +1067,18 @@ class DelayedMarginalisation {
         mpBoundarySet = true;
     }
 
+    // Restarts the store from prior, discarding its steps, records and
+    // keyframes, with nextIndex the index of the next step.
+    void Reset(const DelayedMargPrior<Scalar>& prior, int64_t nextIndex) {
+        mpBoundary = prior;
+        mpBoundarySet = true;
+        mvpSteps.clear();
+        mpValues = DelayedMargValues<Scalar>();
+        mvpKeyframes.clear();
+        mpKfChain = DelayedMargKfChain<Scalar>();
+        mpNextIndex = nextIndex;
+    }
+
     const DelayedMargPrior<Scalar>& Boundary() const { return mpBoundary; }
     const std::deque<dm::StepPtr<Scalar>>& Steps() const { return mvpSteps; }
     DelayedMargValues<Scalar>& Values() { return mpValues; }
@@ -1085,16 +1134,20 @@ class DelayedMarginalisation {
     }
 
     // Moves the oldest steps beyond the delay into the boundary prior, with
-    // the scale free inertial rows of Change A when boundaryImu is set,
-    // §2.3.5.
+    // the scale free inertial rows when boundaryImu is set. From the step at
+    // keepFromIndex on, the store keeps one step more than the delay, so
+    // that it holds the last stationary step and the delay's moving steps.
     int AdvanceBoundary(const GravityScaleStateWithLin<Scalar>& gs,
                         const dm::Vec3<Scalar>& g,
                         const dm::Vec3<Scalar>& gyroW,
                         const dm::Vec3<Scalar>& accelW,
                         const GravityScaleCorrectionLog* log, int64_t epoch,
-                        bool boundaryImu, Scalar scaleFreeTol) {
+                        bool boundaryImu, Scalar scaleFreeTol,
+                        int64_t keepFromIndex =
+                            std::numeric_limits<int64_t>::max()) {
         int advanced = 0;
-        while (int(mvpSteps.size()) > mpDelay) {
+        while (int(mvpSteps.size()) >
+               mpDelay + (mvpSteps.front()->mIndex >= keepFromIndex ? 1 : 0)) {
             const dm::StepPtr<Scalar> step = mvpSteps.front();
             GravityScaleStateWithLin<Scalar> gsB = gs;
             gsB.Reanchor(mpBoundary.mAnchor.mDir, mpBoundary.mAnchor.mBasis,

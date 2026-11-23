@@ -35,11 +35,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
 #include <basalt/imu/preintegration.h>
+#include <basalt/utils/logger.h>
 #include <basalt/vi_estimator/delayed_marginalisation.h>
 #include <basalt/vi_estimator/sqrt_ba_base.h>
 #include <basalt/vi_estimator/vio_estimator.h>
 
-#include <basalt/utils/logger.h>
 #include <deque>
 #include <future>
 #include <mutex>
@@ -158,7 +158,59 @@ public:
     std::shared_ptr<DelayedMargJob<Scalar>> MakeDelayedJob(bool coarse) const;
     int InstallDelayedJob(DelayedMargJob<Scalar>& job);
     bool InstallCoarseJob(const DelayedMargJob<Scalar>& job);
+    // Rows of the zero velocity and zero motion residuals of the stationary
+    // states in aom. With leaving, only the zero motion factors whose first
+    // state leaves the window.
+    void StationaryRows(const AbsOrderMap& aom,
+                        const std::set<int64_t>* leaving, MatX& J,
+                        VecX& r) const;
+    // Relative pose rows of every keyframe the mapper and the window share
+    // against the oldest of them.
+    void LocalMapRows(const AbsOrderMap& aom, MatX& J, VecX& r,
+                      Scalar* maxTrans = nullptr,
+                      Scalar* maxRot = nullptr) const;
+    // Relative pose rows of every pair of keyframes the mapper and the window
+    // share.
+    void LocalMapRows2(const AbsOrderMap& aom, MatX& J, VecX& r,
+                       Scalar* maxTrans = nullptr,
+                       Scalar* maxRot = nullptr) const;
+    // Timestamps of the keyframes the mapper and the window share, oldest
+    // first, and their mapper poses carried to the latest epoch. Empty while
+    // the term is off or the gate is closed.
+    void GetLocalMapPoses(const AbsOrderMap& aom, std::vector<int64_t>& vIds,
+                          Eigen::aligned_vector<Sophus::SE3d>& vPoses) const;
+    // Agreement between the mapper's and the window's consecutive shared
+    // keyframes, and the pull of the solve and of the local map rows on the
+    // log scale in the first iteration of optimize.
+    struct LocalMapDiagnostics {
+        int mKeyframes = 0;
+        // Log of the mapper's over the window's summed relative translations.
+        double mScaleGap = 0;
+        // Mean horizontal and vertical parts, in degrees, of the relative
+        // rotation discrepancy expressed in the world.
+        double mTiltGapDeg = 0, mYawGapDeg = 0;
+        // Mean speeds implied by consecutive keyframes and the largest
+        // difference between them on one segment.
+        double mMapSpeed = 0, mWindowSpeed = 0, mMaxSpeedJump = 0;
+        // Gradient and curvature on the log scale of the visual, inertial and
+        // prior system, and of the local map rows, and the scale step solved.
+        double mGradRest = 0, mHessRest = 0;
+        double mGradLocalMap = 0, mHessLocalMap = 0;
+        double mSigmaStep = 0;
+    };
+    void LocalMapGaps(const AbsOrderMap& aom,
+                      LocalMapDiagnostics& diag) const;
+    // Whitened rows of relative pose factors measured in the metric world,
+    // with the scale of the gravity and scale block when it is active.
+    void RelPoseFactorRows(const AbsOrderMap& aom,
+                           const Eigen::aligned_vector<RelPoseFactor>& vFactors,
+                           MatX& J, VecX& r, Scalar* maxTrans,
+                           Scalar* maxRot) const;
     void StopDelayedMarg();
+    // Replaces the prior by its marginal on the gravity and scale block and
+    // the window state it holds, drops every keyframe pose with its landmarks
+    // and restarts the delayed store from the new prior at nextIndex.
+    void ResetPriorToLastState(int64_t nextIndex);
 
     void debug_finalize() override;
 
@@ -291,6 +343,16 @@ private:
     bool mpDmForceReplace = false;
     int64_t mpDmLastCoarseKeyframe = -1;
     double mpDmStoreSeconds = 0;
+    // Steps pushed into the store before the period's first moving frame.
+    int64_t mpDmMotionIndex = 0;
+    // Set by a moving frame that follows a stationary one, so that the next
+    // marginalisation resets the prior to the last stationary state.
+    bool mpDmResetPending = false;
+    bool mpWasStationary = false;
+    // Epochs of the last vio_gs_dm_fold_settle_count + 1 marginalisations of
+    // the delayed phase, and whether they satisfy the fold test.
+    std::deque<int64_t> mvpGsFoldEpochs;
+    bool mpGsFoldSettled = false;
     int mpGsVisualImuRot = 0;
     Scalar mpGsVisualImuScaleCol = 0;
     int frames_after_kf;
@@ -338,6 +400,8 @@ private:
     // Scalar mpStationaryAccelTol = Scalar(0.5);
     // Scalar mpStationaryGyroTol = Scalar(0.05);
     bool mpIsStationary = false;
+    // Frame states created while the vehicle was stationary.
+    std::set<int64_t> mvpStationaryStates;
     Scalar mpZeroVelocityWeight = Scalar(0);
 
     struct ImuSample {
@@ -376,9 +440,13 @@ private:
     std::unordered_map<int64_t, int64_t> mpPosesToUpdateEpoch;
     mutable std::mutex mpPosesToUpdateMutex;
 
-    // Thresholds above which a mapper correction is considered too large
-    // to apply safely (to preserve FEJ consistency).
-    static constexpr Scalar kRelinThresholdTrans = Scalar(0.10);
-    static constexpr Scalar kRelinThresholdRot = Scalar(0.05);
+    // Latest mapper pose per keyframe timestamp and the epoch it is expressed
+    // in, owned by the estimator thread.
+    std::map<int64_t, std::pair<Sophus::SE3d, int64_t>> mvpLocalMapPoses;
+    bool mpLocalMapOpen = false;
+    // Pair count and largest unweighted residuals of the last optimize.
+    int mpLocalMapPairs = 0;
+    Scalar mpLocalMapMaxTrans = 0, mpLocalMapMaxRot = 0;
+    LocalMapDiagnostics mpLocalMapDiag;
 };
 }  // namespace basalt

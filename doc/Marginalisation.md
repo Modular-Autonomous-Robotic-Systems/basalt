@@ -363,15 +363,15 @@ The term $\mathbf{J}_\text{marg}$ is the synthetic Jacobian from Step 1. The ter
 
 ### A.5 Step 3: Expanding the Squared Norm
 
-The cost produced by the proposed residual within the Gauss-Newton framework is $\frac{1}{2}\|\mathbf{r}_\text{marg}(\xi)\|^2$. Expanding using the vector norm identity $\|\mathbf{a} + \mathbf{b}\|^2 = \mathbf{a}^T\mathbf{a} + 2\mathbf{b}^T\mathbf{a} + \mathbf{b}^T\mathbf{b}$:
+The cost produced by the proposed residual within the Gauss-Newton framework is $\frac{1}{2}|\mathbf{r}_\text{marg}(\xi)|^2$. Expanding using the vector norm identity $|\mathbf{a} + \mathbf{b}|^2 = \mathbf{a}^T\mathbf{a} + 2\mathbf{b}^T\mathbf{a} + \mathbf{b}^T\mathbf{b}$:
 
-$$\frac{1}{2}\|\mathbf{J}_\text{marg} \xi + \mathbf{r}_{\text{marg},0}\|^2 = \frac{1}{2} \xi^T \mathbf{J}_\text{marg}^T \mathbf{J}_\text{marg} \xi + \mathbf{r}_{\text{marg},0}^T \mathbf{J}_\text{marg} \xi + \frac{1}{2} \|\mathbf{r}_{\text{marg},0}\|^2$$
+$$\frac{1}{2}|\mathbf{J}_\text{marg} \xi + \mathbf{r}_{\text{marg},0}|^2 = \frac{1}{2} \xi^T \mathbf{J}_\text{marg}^T \mathbf{J}_\text{marg} \xi + \mathbf{r}_{\text{marg},0}^T \mathbf{J}_\text{marg} \xi + \frac{1}{2} |\mathbf{r}_{\text{marg},0}|^2$$
 
 Substituting $\mathbf{J}_\text{marg}^T \mathbf{J}_\text{marg} = \mathbf{H}^*$ from Step 1:
 
-$$\frac{1}{2}\|\mathbf{r}_\text{marg}(\xi)\|^2 = \frac{1}{2} \xi^T \mathbf{H}^* \xi + \mathbf{r}_{\text{marg},0}^T \mathbf{J}_\text{marg} \xi + \underbrace{\frac{1}{2}\|\mathbf{r}_{\text{marg},0}\|^2}_{C}$$
+$$\frac{1}{2}|\mathbf{r}_\text{marg}(\xi)|^2 = \frac{1}{2} \xi^T \mathbf{H}^* \xi + \mathbf{r}_{\text{marg},0}^T \mathbf{J}_\text{marg} \xi + \underbrace{\frac{1}{2}|\mathbf{r}_{\text{marg},0}|^2}_{C}$$
 
-The term $C = \frac{1}{2}\|\mathbf{r}_{\text{marg},0}\|^2$ is independent of $\xi$. It contributes neither to the gradient $\partial E / \partial \xi$ nor to the Hessian $\partial^2 E / \partial \xi^2$ of the objective function. The optimisation is therefore identical whether or not this constant is retained, confirming the relation $\frac{1}{2}\|\mathbf{r}_\text{marg}(\xi)\|^2 = E_\text{marg}(\xi) + C$ stated in `doc/VIO.md` §3.1.3.
+The term $C = \frac{1}{2}|\mathbf{r}_{\text{marg},0}|^2$ is independent of $\xi$. It contributes neither to the gradient $\partial E / \partial \xi$ nor to the Hessian $\partial^2 E / \partial \xi^2$ of the objective function. The optimisation is therefore identical whether or not this constant is retained, confirming the relation $\frac{1}{2}|\mathbf{r}_\text{marg}(\xi)|^2 = E_\text{marg}(\xi) + C$ stated in `doc/VIO.md` §3.1.3.
 
 ---
 

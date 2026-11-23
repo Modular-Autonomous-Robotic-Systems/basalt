@@ -371,6 +371,15 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"max_rot_err", "f"}, {"limit_trans", "f"},
               {"limit_rot", "f"}});
 
+    Register("vio_local_map", "[VIO][local-map]",
+             {{"t_ns", "ns"}, {"keyframes", "count"}, {"pairs", "count"},
+              {"scale_gap", "f"}, {"tilt_gap_deg", "f"},
+              {"yaw_gap_deg", "f"}, {"map_speed", "f"},
+              {"window_speed", "f"}, {"max_speed_jump", "f"},
+              {"grad_rest", "f"}, {"hess_rest", "f"},
+              {"grad_local_map", "f"}, {"hess_local_map", "f"},
+              {"sigma_step", "f"}});
+
     Register("vio_gravity_scale", "[VIO][gravity-scale]",
              {{"t_ns", "ns"}, {"epoch", "count"}, {"sigma_step", "f"},
               {"tilt_step_deg", "f"}, {"scale_cumulative", "f"},
@@ -391,7 +400,8 @@ Logger::Logger(const std::string& outputDirectory, bool consoleEnabled)
               {"coarse_cost0", "f"}, {"coarse_cost1", "f"},
               {"coarse_spans", "count"}, {"coarse_bg", "f"},
               {"coarse_max_vel_inc", "f"}, {"coarse_iterations", "count"},
-              {"coarse_timed_out", "count"}, {"wait", "ms"}});
+              {"coarse_timed_out", "count"}, {"wait", "ms"},
+              {"motion_index", "count"}, {"fold_settled", "count"}});
 
     Register("vio_assoc", "[VIO][assoc]",
              {{"t_ns", "ns"}, {"of_obs", "count"}, {"connected0", "count"},
@@ -846,6 +856,34 @@ void Logger::AddVioPoseUpdate(int64_t tNs, int pending, int applied,
 
 void Logger::PrintVioPoseUpdate() { Emit("vio_pose_update"); }
 
+void Logger::AddVioLocalMap(int64_t tNs, int keyframes, int pairs,
+                            double scaleGap, double tiltGapDeg,
+                            double yawGapDeg, double mapSpeed,
+                            double windowSpeed, double maxSpeedJump,
+                            double gradRest, double hessRest,
+                            double gradLocalMap, double hessLocalMap,
+                            double sigmaStep) {
+    if (!mpEnabled) return;
+    AggregateStats& s = mpAggregates.at("vio_local_map");
+    s.add_int("t_ns", tNs);
+    s.add("keyframes", double(keyframes));
+    s.add("pairs", double(pairs));
+    s.add("scale_gap", scaleGap);
+    s.add("tilt_gap_deg", tiltGapDeg);
+    s.add("yaw_gap_deg", yawGapDeg);
+    s.add("map_speed", mapSpeed);
+    s.add("window_speed", windowSpeed);
+    s.add("max_speed_jump", maxSpeedJump);
+    s.add("grad_rest", gradRest);
+    s.add("hess_rest", hessRest);
+    s.add("grad_local_map", gradLocalMap);
+    s.add("hess_local_map", hessLocalMap);
+    s.add("sigma_step", sigmaStep);
+    s.CommitRow();
+}
+
+void Logger::PrintVioLocalMap() { Emit("vio_local_map"); }
+
 void Logger::AddVioGravityScale(int64_t tNs, int64_t epoch, double sigmaStep,
                                 double tiltStepDeg, double scaleCumulative,
                                 double tiltCumulativeDeg, int swapEvent,
@@ -879,7 +917,8 @@ void Logger::AddVioDelayedMarg(int64_t tNs, int steps, int records,
                                double coarseCost1, int coarseSpans,
                                double coarseBg, double coarseMaxVelInc,
                                int coarseIterations, int coarseTimedOut,
-                               double waitSeconds) {
+                               double waitSeconds, int motionIndex,
+                               int foldSettled) {
     if (!mpEnabled) return;
     AggregateStats& s = mpAggregates.at("vio_delayed_marg");
     s.add_int("t_ns", tNs);
@@ -909,6 +948,8 @@ void Logger::AddVioDelayedMarg(int64_t tNs, int steps, int records,
     s.add("coarse_iterations", double(coarseIterations));
     s.add("coarse_timed_out", double(coarseTimedOut));
     s.add("wait", waitSeconds);
+    s.add("motion_index", double(motionIndex));
+    s.add("fold_settled", double(foldSettled));
     s.CommitRow();
 }
 
